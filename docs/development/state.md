@@ -5,10 +5,12 @@
 
 ## Version
 
-**0.2.0** (in progress) — **0.1.0 released 2026-06-18** (the headless VT core, M1).
-0.2.0 cycle open: **M2 (PTY + process plumbing, Linux) COMPLETE** — real
-fork/exec through a pseudo-terminal feeds a live child's output into the grid;
-resize wired. 203 assertions green. Version map: M(n) → 0.n.0.
+**0.2.0** — **cut 2026-06-18, awaiting user tag.** Release gate green: 203 tests
+pass, fmt/lint clean, security scan clean, DCE build OK, VERSION↔cyrius.cyml↔
+CHANGELOG header all `0.2.0`. Contents: **M2 (PTY + process plumbing, Linux)** —
+real fork/exec through a pseudo-terminal feeds a live child's output into the
+grid; resize wired. (0.1.0 = the headless VT core, M1, released 2026-06-18.)
+Version map: M(n) → 0.n.0.
 
 ## Toolchain
 

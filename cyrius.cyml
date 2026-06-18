@@ -1,6 +1,6 @@
 [package]
 name = "puka"
-version = "0.1.0"
+version = "${file:VERSION}"
 description = "puka — sovereign Cyrius-native terminal emulator (Ghostty-class: VT/escape parser, cell grid, scrollback, font raster). Hawaiian: opening/doorway into the machine. Foundation for a future worktree coding-agent command center."
 license = "GPL-3.0-only"
 language = "cyrius"

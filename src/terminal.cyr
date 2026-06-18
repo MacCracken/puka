@@ -368,8 +368,15 @@ fn term_esc(final): i64 {
     if (final == 0x44) { term_index(); return 0; }            # IND (ESC D)
     if (final == 0x4d) { term_reverse_index(); return 0; }    # RI  (ESC M)
     if (final == 0x45) { term_newline(); return 0; }          # NEL (ESC E)
-    if (final == 0x37) { term_saved_row = grid_cursor_row(); term_saved_col = grid_cursor_col(); return 0; }  # DECSC (ESC 7)
-    if (final == 0x38) { grid_cursor_set(term_saved_row, term_saved_col); return 0; }                          # DECRC (ESC 8)
+    if (final == 0x37) {                                      # DECSC (ESC 7) save cursor
+        term_saved_row = grid_cursor_row();
+        term_saved_col = grid_cursor_col();
+        return 0;
+    }
+    if (final == 0x38) {                                      # DECRC (ESC 8) restore cursor
+        grid_cursor_set(term_saved_row, term_saved_col);
+        return 0;
+    }
     if (final == 0x63) { return term_init(grid_get_rows(), grid_get_cols()); }   # RIS (ESC c) full reset
     if (final == 0x48) { grid_tab_set(grid_cursor_col()); return 0; }            # HTS (ESC H) set tab stop
     return 0;
