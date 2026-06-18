@@ -19,4 +19,5 @@ Decisions about puka — what we chose, the context, and the consequences we acc
 
 ## Index
 
-_No ADRs yet. Add the first as `0001-kebab-case-title.md`._
+- [0001 — Sovereign reimplementation; no libghostty, no external engine](0001-sovereign-reimplementation-no-external-engine.md) — reimplement the terminal in Cyrius from the VT specs; references are prior art, never embedded code.
+- [0002 — Build the terminal app first; extract the VT engine to a library later](0002-build-app-first-extract-engine-later.md) — app-first, engine extracted to a Sanskrit-named lib when the phase-2 command center becomes the second consumer.
