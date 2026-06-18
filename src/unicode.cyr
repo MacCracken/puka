@@ -1,0 +1,162 @@
+# unicode.cyr — UTF-8 decode/encode + character cell width for puka.
+#
+# The parser (parser.cyr) emits one PRINT event per byte. terminal.cyr feeds
+# those bytes here to assemble codepoints, then asks char_width() how many
+# cells the codepoint occupies. The renderer uses utf8_encode() to turn grid
+# codepoints back into UTF-8 bytes for output.
+#
+# Sources:
+#  - UTF-8: RFC 3629 (well-formed byte sequences; overlong + surrogate +
+#    > U+10FFFF rejected -> U+FFFD replacement).
+#  - Width: Unicode Standard Annex #11 "East Asian Width" (W/F => 2 cells);
+#    combining/zero-width modeled on Markus Kuhn's wcwidth reference
+#    (https://www.cl.cam.ac.uk/~mgk25/ucs/wcwidth.c).
+#  NOTE (M1 scope): the combining and wide tables here are the high-impact
+#  ranges (Latin combining, CJK, Hangul, fullwidth forms, main emoji), not
+#  the exhaustive UAX#11 / Mn+Me set. The authoritative full tables should be
+#  generated (cf. cyrius `programs/gen_unicode_data.cyr`) and folded in at M6.
+
+enum Utf8Const {
+    UTF8_MORE    = 0x7FFFFFFF;   # not a valid codepoint: "need more bytes"
+    UC_REPLACE   = 0xFFFD;       # U+FFFD REPLACEMENT CHARACTER (decode error)
+    UC_MAX       = 0x10FFFF;     # highest valid Unicode scalar value
+}
+
+# Incremental decoder state.
+var utf8_cp = 0;     # codepoint accumulator
+var utf8_need = 0;   # remaining continuation bytes expected
+var utf8_min = 0;    # minimum legal codepoint for this length (overlong guard)
+
+fn utf8_reset(): i64 {
+    utf8_cp = 0;
+    utf8_need = 0;
+    utf8_min = 0;
+    return 0;
+}
+
+# Feed one byte. Returns a codepoint (0..0x10FFFF), UC_REPLACE on a decode
+# error, or UTF8_MORE if more continuation bytes are required.
+fn utf8_feed(b): i64 {
+    b = b & 255;
+
+    if (utf8_need == 0) {
+        # expecting a lead (or single) byte
+        if (b < 0x80) { return b; }                       # ASCII
+        if (b >= 0xc2) {
+            if (b <= 0xdf) { utf8_cp = b & 0x1f; utf8_need = 1; utf8_min = 0x80; return UTF8_MORE; }
+        }
+        if (b >= 0xe0) {
+            if (b <= 0xef) { utf8_cp = b & 0x0f; utf8_need = 2; utf8_min = 0x800; return UTF8_MORE; }
+        }
+        if (b >= 0xf0) {
+            if (b <= 0xf4) { utf8_cp = b & 0x07; utf8_need = 3; utf8_min = 0x10000; return UTF8_MORE; }
+        }
+        return UC_REPLACE;   # stray continuation (0x80-0xBF), 0xC0/0xC1, 0xF5-0xFF
+    }
+
+    # expecting a continuation byte (0x80-0xBF)
+    if (b < 0x80) { utf8_reset(); return UC_REPLACE; }     # truncated sequence (offending byte dropped)
+    if (b > 0xbf) { utf8_reset(); return UC_REPLACE; }
+    utf8_cp = (utf8_cp << 6) | (b & 0x3f);
+    utf8_need = utf8_need - 1;
+    if (utf8_need > 0) { return UTF8_MORE; }
+
+    # sequence complete — validate
+    var cp = utf8_cp;
+    var lo = utf8_min;
+    utf8_reset();
+    if (cp < lo) { return UC_REPLACE; }                    # overlong
+    if (cp > UC_MAX) { return UC_REPLACE; }                # beyond Unicode
+    if (cp >= 0xd800) {
+        if (cp <= 0xdfff) { return UC_REPLACE; }           # UTF-16 surrogate
+    }
+    return cp;
+}
+
+# Encode a codepoint as UTF-8 into buf (byte pointer). Returns bytes written.
+# Invalid input is encoded as U+FFFD.
+fn utf8_encode(cp, buf): i64 {
+    if (cp < 0) { cp = UC_REPLACE; }
+    if (cp > UC_MAX) { cp = UC_REPLACE; }
+    if (cp >= 0xd800) {
+        if (cp <= 0xdfff) { cp = UC_REPLACE; }
+    }
+    if (cp < 0x80) {
+        store8(buf, cp);
+        return 1;
+    }
+    if (cp < 0x800) {
+        store8(buf, 0xc0 | (cp >> 6));
+        store8(buf + 1, 0x80 | (cp & 0x3f));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        store8(buf, 0xe0 | (cp >> 12));
+        store8(buf + 1, 0x80 | ((cp >> 6) & 0x3f));
+        store8(buf + 2, 0x80 | (cp & 0x3f));
+        return 3;
+    }
+    store8(buf, 0xf0 | (cp >> 18));
+    store8(buf + 1, 0x80 | ((cp >> 12) & 0x3f));
+    store8(buf + 2, 0x80 | ((cp >> 6) & 0x3f));
+    store8(buf + 3, 0x80 | (cp & 0x3f));
+    return 4;
+}
+
+# ---- width -------------------------------------------------------------
+
+fn uc__in(cp, lo, hi): i64 {
+    if (cp < lo) { return 0; }
+    if (cp > hi) { return 0; }
+    return 1;
+}
+
+# Zero-width: combining marks + explicit zero-width / format chars (subset).
+fn uc__zero_width(cp): i64 {
+    if (cp == 0) { return 1; }                       # NUL
+    if (uc__in(cp, 0x0300, 0x036f) == 1) { return 1; }  # combining diacritical
+    if (uc__in(cp, 0x0483, 0x0489) == 1) { return 1; }
+    if (uc__in(cp, 0x0591, 0x05bd) == 1) { return 1; }
+    if (uc__in(cp, 0x0610, 0x061a) == 1) { return 1; }
+    if (uc__in(cp, 0x064b, 0x065f) == 1) { return 1; }
+    if (uc__in(cp, 0x06d6, 0x06dc) == 1) { return 1; }
+    if (uc__in(cp, 0x0e31, 0x0e3a) == 1) { return 1; }  # Thai
+    if (uc__in(cp, 0x1ab0, 0x1aff) == 1) { return 1; }  # combining ext
+    if (uc__in(cp, 0x1dc0, 0x1dff) == 1) { return 1; }  # combining supplement
+    if (uc__in(cp, 0x200b, 0x200f) == 1) { return 1; }  # zero-width space/joiners/marks
+    if (uc__in(cp, 0x202a, 0x202e) == 1) { return 1; }  # bidi format
+    if (uc__in(cp, 0x2060, 0x2064) == 1) { return 1; }  # word joiner etc.
+    if (uc__in(cp, 0xfe00, 0xfe0f) == 1) { return 1; }  # variation selectors
+    if (uc__in(cp, 0xfe20, 0xfe2f) == 1) { return 1; }  # combining half marks
+    if (cp == 0xfeff) { return 1; }                  # ZWNBSP / BOM
+    return 0;
+}
+
+# Wide (2 cells): East Asian Wide/Fullwidth + main emoji (subset of UAX#11).
+fn uc__wide(cp): i64 {
+    if (uc__in(cp, 0x1100, 0x115f) == 1) { return 1; }  # Hangul Jamo
+    if (uc__in(cp, 0x2329, 0x232a) == 1) { return 1; }  # angle brackets
+    if (uc__in(cp, 0x2e80, 0x303e) == 1) { return 1; }  # CJK radicals .. Kangxi
+    if (uc__in(cp, 0x3041, 0x33ff) == 1) { return 1; }  # Hiragana .. CJK compat
+    if (uc__in(cp, 0x3400, 0x4dbf) == 1) { return 1; }  # CJK Ext A
+    if (uc__in(cp, 0x4e00, 0x9fff) == 1) { return 1; }  # CJK Unified
+    if (uc__in(cp, 0xa000, 0xa4cf) == 1) { return 1; }  # Yi
+    if (uc__in(cp, 0xac00, 0xd7a3) == 1) { return 1; }  # Hangul syllables
+    if (uc__in(cp, 0xf900, 0xfaff) == 1) { return 1; }  # CJK compat ideographs
+    if (uc__in(cp, 0xfe10, 0xfe19) == 1) { return 1; }  # vertical forms
+    if (uc__in(cp, 0xfe30, 0xfe6f) == 1) { return 1; }  # CJK compat forms
+    if (uc__in(cp, 0xff00, 0xff60) == 1) { return 1; }  # fullwidth forms
+    if (uc__in(cp, 0xffe0, 0xffe6) == 1) { return 1; }  # fullwidth signs
+    if (uc__in(cp, 0x1f300, 0x1faff) == 1) { return 1; } # main emoji blocks
+    if (uc__in(cp, 0x1f1e6, 0x1f1ff) == 1) { return 1; } # regional indicators
+    if (uc__in(cp, 0x20000, 0x3fffd) == 1) { return 1; } # CJK Ext B+
+    return 0;
+}
+
+# Display width of a codepoint in cells: 0 (combining/zero-width),
+# 2 (East Asian wide / emoji), or 1 (everything else).
+fn char_width(cp): i64 {
+    if (uc__zero_width(cp) == 1) { return 0; }
+    if (uc__wide(cp) == 1) { return 2; }
+    return 1;
+}

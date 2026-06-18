@@ -1,0 +1,415 @@
+# terminal.cyr — puka terminal: VT semantics over the grid.
+#
+# The driver. term_feed(byte) pumps one byte through the parser (parser.cyr),
+# switches on the event, and applies the semantics to the grid (grid.cyr).
+# Printable bytes are assembled into codepoints via the UTF-8 decoder
+# (unicode.cyr) and placed with the correct cell width. This module is the
+# ONLY writer of the grid.
+#
+# Co-compiled with parser.cyr + grid.cyr + unicode.cyr (the consumer — main
+# or a test — includes all four; this file includes none, to avoid double
+# includes).
+#
+# Color encoding (terminal owns the meaning; grid stores it opaquely):
+#   0                      = default fg/bg
+#   1 .. 256               = palette color (value-1 => index 0..255)
+#   0x1000000 | (r<<16|g<<8|b) = 24-bit truecolor
+# Ranges are disjoint, so a stored color is self-describing for the renderer.
+
+enum TermColor {
+    COLOR_DEFAULT = 0;
+    COLOR_TRUE    = 0x1000000;   # truecolor tag bit (bit 24)
+    ATTR_ALL      = 0xFFFF;      # mask for clearing attribute bits via XOR
+}
+
+var term_autowrap = 1;     # DECAWM
+var term_pending_wrap = 0; # deferred wrap: at last col, wrap on next print
+var term_origin = 0;       # DECOM (cursor addressing relative to scroll region)
+var term_insert = 0;       # IRM (insert mode)
+var term_cursor_vis = 1;   # DECTCEM (display only; tracked for the renderer)
+var term_app_cursor = 0;   # DECCKM (cursor-key mode; consumed by the input bite)
+var term_attr = 0;         # current SGR pen
+var term_fg = 0;
+var term_bg = 0;
+var term_saved_row = 0;    # DECSC / ANSI.SYS save-cursor
+var term_saved_col = 0;
+
+# ---- color helpers -----------------------------------------------------
+fn color_palette(idx): i64 { return idx + 1; }
+fn color_rgb(r, g, b): i64 { return COLOR_TRUE | ((r & 255) << 16) | ((g & 255) << 8) | (b & 255); }
+
+fn term__sync_pen(): i64 { return grid_set_pen(term_attr, term_fg, term_bg); }
+
+# ---- lifecycle ---------------------------------------------------------
+fn term_init(rows, cols): i64 {
+    grid_init(rows, cols);
+    vt_reset();
+    utf8_reset();
+    term_autowrap = 1;
+    term_pending_wrap = 0;
+    term_origin = 0;
+    term_insert = 0;
+    term_cursor_vis = 1;
+    term_app_cursor = 0;
+    term_attr = 0;
+    term_fg = 0;
+    term_bg = 0;
+    term_saved_row = 0;
+    term_saved_col = 0;
+    term__sync_pen();
+    return 0;
+}
+
+# ---- vertical movement -------------------------------------------------
+
+# IND / LF: move down one line, scrolling the region up at the bottom margin.
+fn term_index(): i64 {
+    if (grid_cursor_row() == grid_scroll_bot_get()) {
+        grid_scroll_up(1);
+    } else {
+        grid_cursor_set(grid_cursor_row() + 1, grid_cursor_col());
+    }
+    return 0;
+}
+
+# RI: move up one line, scrolling the region down at the top margin.
+fn term_reverse_index(): i64 {
+    if (grid_cursor_row() == grid_scroll_top_get()) {
+        grid_scroll_down(1);
+    } else {
+        grid_cursor_set(grid_cursor_row() - 1, grid_cursor_col());
+    }
+    return 0;
+}
+
+fn term_carriage_return(): i64 {
+    grid_cursor_set(grid_cursor_row(), 0);
+    term_pending_wrap = 0;
+    return 0;
+}
+
+# CR + LF, used for the deferred autowrap.
+fn term_newline(): i64 {
+    term_carriage_return();
+    term_index();
+    return 0;
+}
+
+# ---- printing ----------------------------------------------------------
+
+fn term_print(cp): i64 {
+    var w = char_width(cp);
+    if (w == 0) { return 0; }   # combining/zero-width: not separately placed in M1
+
+    # resolve a deferred wrap from the previous glyph at the right margin
+    if (term_pending_wrap == 1) {
+        if (term_autowrap == 1) { term_newline(); }
+        term_pending_wrap = 0;
+    }
+
+    var row = grid_cursor_row();
+    var col = grid_cursor_col();
+
+    # wrap if a wide glyph would straddle the right margin
+    if (col + w > grid_get_cols()) {
+        if (term_autowrap == 1) {
+            term_newline();
+            row = grid_cursor_row();
+            col = 0;
+        } else {
+            col = grid_get_cols() - w;     # clamp so it fits on the line
+            if (col < 0) { col = 0; }
+        }
+    }
+
+    if (term_insert == 1) { grid_insert_cells(row, col, w); }
+
+    grid_put_cell(row, col, cp);
+    if (w == 2) { grid_set_cell(row, col + 1, 0, term_attr, term_fg, term_bg); }  # wide spacer
+
+    var nextc = col + w;
+    if (nextc >= grid_get_cols()) {
+        grid_cursor_set(row, grid_get_cols() - 1);   # stay at last col
+        term_pending_wrap = 1;                       # wrap deferred to next print
+    } else {
+        grid_cursor_set(row, nextc);
+        term_pending_wrap = 0;
+    }
+    return 0;
+}
+
+# ---- C0 control bytes --------------------------------------------------
+fn term_c0(b): i64 {
+    if (b == 0x08) {                         # BS
+        if (grid_cursor_col() > 0) { grid_cursor_set(grid_cursor_row(), grid_cursor_col() - 1); }
+        term_pending_wrap = 0;
+        return 0;
+    }
+    if (b == 0x09) {                         # HT
+        grid_cursor_set(grid_cursor_row(), grid_next_tab(grid_cursor_col()));
+        term_pending_wrap = 0;
+        return 0;
+    }
+    if (b == 0x0a) { term_index(); term_pending_wrap = 0; return 0; }   # LF
+    if (b == 0x0b) { term_index(); term_pending_wrap = 0; return 0; }   # VT
+    if (b == 0x0c) { term_index(); term_pending_wrap = 0; return 0; }   # FF
+    if (b == 0x0d) { term_carriage_return(); return 0; }               # CR
+    # BEL (0x07) and the rest: no display effect in M1
+    return 0;
+}
+
+# ---- SGR ---------------------------------------------------------------
+fn term__attr_clear(mask): i64 { term_attr = term_attr & (ATTR_ALL ^ mask); return 0; }
+
+fn term_sgr(): i64 {
+    var count = vt_param_count();
+    if (count == 0) {
+        term_attr = 0; term_fg = 0; term_bg = 0;
+        term__sync_pen();
+        return 0;
+    }
+    var i = 0;
+    while (i < count) {
+        var p = vt_param(i);
+        if (p == 0) { term_attr = 0; term_fg = 0; term_bg = 0; }
+        elif (p == 1) { term_attr = term_attr | ATTR_BOLD; }
+        elif (p == 2) { term_attr = term_attr | ATTR_DIM; }
+        elif (p == 3) { term_attr = term_attr | ATTR_ITALIC; }
+        elif (p == 4) { term_attr = term_attr | ATTR_UNDERLINE; }
+        elif (p == 5) { term_attr = term_attr | ATTR_BLINK; }
+        elif (p == 7) { term_attr = term_attr | ATTR_REVERSE; }
+        elif (p == 8) { term_attr = term_attr | ATTR_HIDDEN; }
+        elif (p == 9) { term_attr = term_attr | ATTR_STRIKE; }
+        elif (p == 22) { term__attr_clear(ATTR_BOLD | ATTR_DIM); }
+        elif (p == 23) { term__attr_clear(ATTR_ITALIC); }
+        elif (p == 24) { term__attr_clear(ATTR_UNDERLINE); }
+        elif (p == 25) { term__attr_clear(ATTR_BLINK); }
+        elif (p == 27) { term__attr_clear(ATTR_REVERSE); }
+        elif (p == 28) { term__attr_clear(ATTR_HIDDEN); }
+        elif (p == 29) { term__attr_clear(ATTR_STRIKE); }
+        elif (p == 39) { term_fg = 0; }
+        elif (p == 49) { term_bg = 0; }
+        elif (p == 38) { i = term__ext_color(i, 1); }
+        elif (p == 48) { i = term__ext_color(i, 0); }
+        else {
+            if (p >= 30) {
+                if (p <= 37) { term_fg = color_palette(p - 30); }
+            }
+            if (p >= 40) {
+                if (p <= 47) { term_bg = color_palette(p - 40); }
+            }
+            if (p >= 90) {
+                if (p <= 97) { term_fg = color_palette(p - 90 + 8); }
+            }
+            if (p >= 100) {
+                if (p <= 107) { term_bg = color_palette(p - 100 + 8); }
+            }
+        }
+        i = i + 1;
+    }
+    term__sync_pen();
+    return 0;
+}
+
+# Extended color starting at param index i (the 38/48 selector). is_fg=1 for
+# foreground. Returns the new index to continue from (the last param consumed).
+# Handles both 5;<idx> (256-color) and 2;<r>;<g>;<b> (truecolor) — colon and
+# semicolon forms arrive identically (parser flattens ':' into params).
+fn term__ext_color(i, is_fg): i64 {
+    var mode = vt_param(i + 1);
+    var col = 0;
+    var consumed = i;
+    if (mode == 5) {
+        col = color_palette(vt_param(i + 2));
+        consumed = i + 2;
+    }
+    if (mode == 2) {
+        col = color_rgb(vt_param(i + 2), vt_param(i + 3), vt_param(i + 4));
+        consumed = i + 4;
+    }
+    if (is_fg == 1) { term_fg = col; } else { term_bg = col; }
+    return consumed;
+}
+
+# ---- CSI dispatch ------------------------------------------------------
+fn term_csi(final): i64 {
+    var prefix = vt_prefix();
+
+    # private (DEC) modes: CSI ? Pm h / l
+    if (prefix == 0x3f) {
+        if (final == 0x68) { return term__dec_mode(1); }   # 'h' set
+        if (final == 0x6c) { return term__dec_mode(0); }   # 'l' reset
+        return 0;                                          # other private CSIs: ignore in M1
+    }
+    if (prefix != 0) { return 0; }                         # other prefixes ('<','=','>'): ignore
+
+    var p1 = vt_param_or(0, 1);
+    var row = grid_cursor_row();
+    var col = grid_cursor_col();
+
+    if (final == 0x41) { grid_cursor_set(row - p1, col); term_pending_wrap = 0; return 0; }      # CUU
+    if (final == 0x42) { grid_cursor_set(row + p1, col); term_pending_wrap = 0; return 0; }      # CUD
+    if (final == 0x43) { grid_cursor_set(row, col + p1); term_pending_wrap = 0; return 0; }      # CUF
+    if (final == 0x44) { grid_cursor_set(row, col - p1); term_pending_wrap = 0; return 0; }      # CUB
+    if (final == 0x45) { grid_cursor_set(row + p1, 0); term_pending_wrap = 0; return 0; }        # CNL
+    if (final == 0x46) { grid_cursor_set(row - p1, 0); term_pending_wrap = 0; return 0; }        # CPL
+    if (final == 0x47) { grid_cursor_set(row, p1 - 1); term_pending_wrap = 0; return 0; }        # CHA
+    if (final == 0x64) { grid_cursor_set(p1 - 1, col); term_pending_wrap = 0; return 0; }        # VPA
+    if (final == 0x48) { return term__cup(); }                                                   # CUP
+    if (final == 0x66) { return term__cup(); }                                                   # HVP (= CUP)
+    if (final == 0x4a) { return term__erase_display(vt_param(0)); }                              # ED
+    if (final == 0x4b) { return term__erase_line(vt_param(0)); }                                 # EL
+    if (final == 0x4c) { grid_scroll_down_in(row, grid_scroll_bot_get(), p1); return 0; }        # IL
+    if (final == 0x4d) { grid_scroll_up_in(row, grid_scroll_bot_get(), p1); return 0; }          # DL
+    if (final == 0x40) { grid_insert_cells(row, col, p1); return 0; }                            # ICH
+    if (final == 0x50) { grid_delete_cells(row, col, p1); return 0; }                            # DCH
+    if (final == 0x58) { grid_erase_cells(row, col, col + p1 - 1); return 0; }                   # ECH
+    if (final == 0x53) { grid_scroll_up(p1); return 0; }                                         # SU
+    if (final == 0x54) { grid_scroll_down(p1); return 0; }                                       # SD
+    if (final == 0x72) { return term__decstbm(); }                                               # DECSTBM
+    if (final == 0x6d) { return term_sgr(); }                                                    # SGR
+    if (final == 0x67) { return term__tbc(vt_param(0)); }                                        # TBC
+    if (final == 0x68) { return term__ansi_mode(1); }                                            # SM (IRM)
+    if (final == 0x6c) { return term__ansi_mode(0); }                                            # RM
+    if (final == 0x73) { term_saved_row = row; term_saved_col = col; return 0; }                 # SCP (save)
+    if (final == 0x75) { grid_cursor_set(term_saved_row, term_saved_col); return 0; }            # RCP (restore)
+    # DA ('c') / DSR ('n') need a host writer — deferred to M2 (PTY).
+    return 0;
+}
+
+fn term__cup(): i64 {
+    var r = vt_param_or(0, 1) - 1;
+    var c = vt_param_or(1, 1) - 1;
+    if (term_origin == 1) { r = r + grid_scroll_top_get(); }
+    grid_cursor_set(r, c);
+    term_pending_wrap = 0;
+    return 0;
+}
+
+fn term__erase_display(mode): i64 {
+    var row = grid_cursor_row();
+    var col = grid_cursor_col();
+    var last = grid_get_rows() - 1;
+    if (mode == 1) {                                   # start .. cursor
+        if (row > 0) { grid_erase_rows(0, row - 1); }
+        grid_erase_cells(row, 0, col);
+    } elif (mode == 2) {                               # whole display
+        grid_erase_rows(0, last);
+    } elif (mode == 3) {                               # display + scrollback (none in M1)
+        grid_erase_rows(0, last);
+    } else {                                           # cursor .. end
+        grid_erase_cells(row, col, grid_get_cols() - 1);
+        if (row < last) { grid_erase_rows(row + 1, last); }
+    }
+    return 0;
+}
+
+fn term__erase_line(mode): i64 {
+    var row = grid_cursor_row();
+    var col = grid_cursor_col();
+    var last = grid_get_cols() - 1;
+    if (mode == 1) { grid_erase_cells(row, 0, col); }          # start .. cursor
+    elif (mode == 2) { grid_erase_cells(row, 0, last); }       # whole line
+    else { grid_erase_cells(row, col, last); }                 # cursor .. end
+    return 0;
+}
+
+fn term__decstbm(): i64 {
+    var top = vt_param_or(0, 1) - 1;
+    var bot = vt_param_or(1, grid_get_rows()) - 1;
+    grid_set_scroll(top, bot);
+    # DECSTBM homes the cursor (origin-relative).
+    if (term_origin == 1) { grid_cursor_set(grid_scroll_top_get(), 0); }
+    else { grid_cursor_set(0, 0); }
+    term_pending_wrap = 0;
+    return 0;
+}
+
+fn term__tbc(mode): i64 {
+    if (mode == 3) { grid_tab_clear_all(); return 0; }   # clear all
+    grid_tab_clear(grid_cursor_col());                   # clear at cursor (mode 0)
+    return 0;
+}
+
+# ANSI (non-private) modes. M1 handles IRM (4).
+fn term__ansi_mode(set): i64 {
+    if (vt_param(0) == 4) { term_insert = set; }
+    return 0;
+}
+
+# DEC private modes (CSI ? Pn h/l). M1 handles DECCKM/DECOM/DECAWM/DECTCEM.
+fn term__dec_mode(set): i64 {
+    var m = vt_param(0);
+    if (m == 1) { term_app_cursor = set; }                 # DECCKM
+    if (m == 6) {                                          # DECOM (origin)
+        term_origin = set;
+        if (set == 1) { grid_cursor_set(grid_scroll_top_get(), 0); }
+        else { grid_cursor_set(0, 0); }
+    }
+    if (m == 7) { term_autowrap = set; }                   # DECAWM
+    if (m == 25) { term_cursor_vis = set; }                # DECTCEM
+    # alt-screen (1049), bracketed paste (2004), mouse (1000..1006): later bites
+    return 0;
+}
+
+# ---- ESC dispatch ------------------------------------------------------
+fn term_esc(final): i64 {
+    if (vt_inter_count() > 0) { return 0; }   # charset designators (ESC ( B etc.): M6 — no-op for now
+    if (final == 0x44) { term_index(); return 0; }            # IND (ESC D)
+    if (final == 0x4d) { term_reverse_index(); return 0; }    # RI  (ESC M)
+    if (final == 0x45) { term_newline(); return 0; }          # NEL (ESC E)
+    if (final == 0x37) { term_saved_row = grid_cursor_row(); term_saved_col = grid_cursor_col(); return 0; }  # DECSC (ESC 7)
+    if (final == 0x38) { grid_cursor_set(term_saved_row, term_saved_col); return 0; }                          # DECRC (ESC 8)
+    if (final == 0x63) { return term_init(grid_get_rows(), grid_get_cols()); }   # RIS (ESC c) full reset
+    if (final == 0x48) { grid_tab_set(grid_cursor_col()); return 0; }            # HTS (ESC H) set tab stop
+    return 0;
+}
+
+# ---- the pump ----------------------------------------------------------
+fn term_feed(b): i64 {
+    var ev = vt_feed(b);
+    if (ev == VTE_PRINT) {
+        var cp = utf8_feed(vt_event_char());
+        if (cp != UTF8_MORE) { term_print(cp); }
+        return 0;
+    }
+    if (ev == VTE_EXECUTE) { return term_c0(vt_event_char()); }
+    if (ev == VTE_CSI) { return term_csi(vt_event_char()); }
+    if (ev == VTE_ESC) { return term_esc(vt_event_char()); }
+    # VTE_OSC: titles etc. — captured by the parser; no grid effect in M1.
+    return 0;
+}
+
+fn term_feed_str(s): i64 {
+    var n = strlen(s);
+    for (var i = 0; i < n; i = i + 1) { term_feed(load8(s + i)); }
+    return 0;
+}
+
+# ---- headless renderer (grid -> UTF-8 text) ----------------------------
+# Write row r's glyphs as UTF-8 into buf (cap bytes). Wide-spacer cells
+# (glyph 0) are skipped. Returns bytes written. Trailing blanks are kept
+# (callers that want a trimmed compare can stop at the logical end).
+fn term_render_row(r, buf, cap): i64 {
+    var n = 0;
+    var c = 0;
+    var cols = grid_get_cols();
+    while (c < cols) {
+        var g = grid_glyph(r, c);
+        if (g != 0) {
+            if (n + 4 <= cap) { n = n + utf8_encode(g, buf + n); }
+        }
+        c = c + 1;
+    }
+    return n;
+}
+
+# Like term_render_row but drops trailing spaces (0x20) — handy for tests.
+fn term_render_row_trim(r, buf, cap): i64 {
+    var n = term_render_row(r, buf, cap);
+    while (n > 0) {
+        if (load8(buf + n - 1) != 0x20) { return n; }
+        n = n - 1;
+    }
+    return n;
+}

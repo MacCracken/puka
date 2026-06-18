@@ -1,0 +1,166 @@
+# terminal.tcyr — end-to-end terminal tests (Bite 4 / M1).
+# Feeds byte streams through the full pipe (parser -> terminal -> grid) and
+# asserts grid state + rendered text. Stdlib auto-included via cyrius.cyml.
+
+include "src/parser.cyr"
+include "src/grid.cyr"
+include "src/unicode.cyr"
+include "src/terminal.cyr"
+
+var rbuf[256];
+
+# Assert that the trimmed render of row r equals expected (a NUL-terminated
+# string). Compares length then bytes.
+fn assert_row(r, expected, name): i64 {
+    var n = term_render_row_trim(r, &rbuf, 256);
+    var m = strlen(expected);
+    if (n != m) { return assert_eq(n, m, name); }
+    for (var i = 0; i < n; i = i + 1) {
+        if (load8(&rbuf + i) != load8(expected + i)) { return assert(0, name); }
+    }
+    return assert(1, name);
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("plain printing + render");
+    term_init(24, 80);
+    term_feed_str("Hello");
+    assert_row(0, "Hello", "row 0 reads 'Hello'");
+    assert_eq(grid_cursor_row(), 0, "cursor still row 0");
+    assert_eq(grid_cursor_col(), 5, "cursor advanced to col 5");
+
+    test_group("CR + LF");
+    term_init(24, 80);
+    term_feed_str("ab\r\ncd");
+    assert_row(0, "ab", "row 0 = ab");
+    assert_row(1, "cd", "row 1 = cd");
+    assert_eq(grid_cursor_row(), 1, "cursor on row 1");
+    assert_eq(grid_cursor_col(), 2, "cursor col 2");
+
+    test_group("CUP absolute positioning");
+    term_init(24, 80);
+    term_feed_str("\x1b[3;5HX");          # row3 col5 (1-based) -> (2,4) 0-based
+    assert_eq(grid_glyph(2, 4), 0x58, "X placed at (2,4)");
+    term_feed_str("\x1b[HY");             # home -> (0,0)
+    assert_eq(grid_glyph(0, 0), 0x59, "Y placed at home");
+
+    test_group("relative cursor moves");
+    term_init(24, 80);
+    term_feed_str("\x1b[10;10H");         # (9,9)
+    term_feed_str("\x1b[3A");             # up 3 -> row 6
+    assert_eq(grid_cursor_row(), 6, "CUU 3 -> row 6");
+    term_feed_str("\x1b[2B");             # down 2 -> row 8
+    assert_eq(grid_cursor_row(), 8, "CUD 2 -> row 8");
+    term_feed_str("\x1b[4C");             # right 4 -> col 13
+    assert_eq(grid_cursor_col(), 13, "CUF 4 -> col 13");
+    term_feed_str("\x1b[5D");             # left 5 -> col 8
+    assert_eq(grid_cursor_col(), 8, "CUB 5 -> col 8");
+
+    test_group("SGR -> grid pen");
+    term_init(24, 80);
+    term_feed_str("\x1b[1;31;44mA");      # bold + fg red(31) + bg blue(44)
+    assert_eq(grid_attr(0, 0), ATTR_BOLD, "bold attr set");
+    assert_eq(grid_fg(0, 0), color_palette(1), "fg = palette 1 (red)");
+    assert_eq(grid_bg(0, 0), color_palette(4), "bg = palette 4 (blue)");
+    term_feed_str("\x1b[0mB");            # reset
+    assert_eq(grid_attr(0, 1), 0, "reset clears attrs");
+    assert_eq(grid_fg(0, 1), 0, "reset clears fg");
+
+    test_group("SGR 256-color + truecolor");
+    term_init(24, 80);
+    term_feed_str("\x1b[38;5;200mA");     # 256-color fg index 200
+    assert_eq(grid_fg(0, 0), color_palette(200), "256-color fg = palette 200");
+    term_feed_str("\x1b[38;2;10;20;30mB"); # truecolor
+    assert_eq(grid_fg(0, 1), color_rgb(10, 20, 30), "truecolor fg matches");
+
+    test_group("ED / EL erase");
+    term_init(24, 80);
+    term_feed_str("line0\r\nline1\r\nline2");
+    term_feed_str("\x1b[2;1H");           # cursor to row1 col0
+    term_feed_str("\x1b[2J");             # clear whole display
+    assert_row(0, "", "ED 2 cleared row 0");
+    assert_row(2, "", "ED 2 cleared row 2");
+    term_init(24, 80);
+    term_feed_str("ABCDEF\x1b[1;4H\x1b[0K"); # cursor col4, erase to EOL
+    assert_row(0, "ABC", "EL 0 erased from cursor to EOL");
+
+    test_group("autowrap (deferred)");
+    term_init(4, 4);
+    term_feed_str("ABCD");                # fills row 0 exactly (cols 0..3)
+    assert_eq(grid_cursor_row(), 0, "still row 0 after last col (deferred)");
+    term_feed_str("E");                   # now wraps
+    assert_eq(grid_cursor_row(), 1, "wrapped to row 1");
+    assert_eq(grid_glyph(1, 0), 0x45, "E on row 1");
+    assert_row(0, "ABCD", "row 0 intact");
+
+    test_group("LF at bottom scrolls");
+    term_init(3, 8);
+    term_feed_str("r0\r\nr1\r\nr2");      # cursor now on last row (2)
+    term_feed_str("\r\nr3");              # LF scrolls, r0 lost
+    assert_row(0, "r1", "row0 now r1 (scrolled)");
+    assert_row(1, "r2", "row1 now r2");
+    assert_row(2, "r3", "row2 now r3");
+
+    test_group("scroll region (DECSTBM)");
+    term_init(5, 8);
+    term_feed_str("\x1b[2;4r");           # region rows 2..4 (1-based) -> 1..3
+    assert_eq(grid_scroll_top_get(), 1, "scroll top = 1");
+    assert_eq(grid_scroll_bot_get(), 3, "scroll bot = 3");
+    assert_eq(grid_cursor_row(), 0, "DECSTBM homed cursor (no origin mode)");
+
+    test_group("tab + backspace");
+    term_init(24, 80);
+    term_feed_str("\tX");                 # HT to col 8, write X
+    assert_eq(grid_glyph(0, 8), 0x58, "X at tab stop col 8");
+    term_init(24, 80);
+    term_feed_str("AB\x08C");             # BS over B
+    assert_eq(grid_glyph(0, 1), 0x43, "C overwrote B after backspace");
+
+    test_group("ICH / DCH");
+    term_init(24, 80);
+    term_feed_str("ABCDE\x1b[1;1H");      # cursor home
+    term_feed_str("\x1b[2@");             # insert 2 blanks
+    assert_row(0, "  ABCDE", "ICH shifted right by 2");
+    term_init(24, 80);
+    term_feed_str("ABCDE\x1b[1;1H");
+    term_feed_str("\x1b[2P");             # delete 2 chars
+    assert_row(0, "CDE", "DCH shifted left by 2");
+
+    test_group("UTF-8 printing + wide chars");
+    term_init(24, 80);
+    term_feed_str("a\xc3\xa9b");          # a, e-acute, b
+    assert_eq(grid_glyph(0, 0), 0x61, "a");
+    assert_eq(grid_glyph(0, 1), 0xe9, "e-acute decoded into one cell");
+    assert_eq(grid_glyph(0, 2), 0x62, "b");
+    assert_eq(grid_cursor_col(), 3, "cursor advanced 3 (all narrow)");
+    term_init(24, 80);
+    term_feed_str("\xe4\xb8\xad");        # CJK 'zhong' (width 2)
+    assert_eq(grid_glyph(0, 0), 0x4e2d, "wide glyph in cell 0");
+    assert_eq(grid_glyph(0, 1), 0, "spacer in cell 1");
+    assert_eq(grid_cursor_col(), 2, "cursor advanced 2 for wide glyph");
+
+    test_group("ESC index / reverse-index");
+    term_init(4, 8);
+    term_feed_str("\x1b[4;1Hbottom");     # go to last row, write
+    term_feed_str("\x1bD");               # IND at bottom -> scroll up
+    assert_row(2, "bottom", "IND scrolled 'bottom' up to row 2");
+    term_init(4, 8);
+    term_feed_str("top\x1b[1;1H");        # 'top' on row0, cursor home
+    term_feed_str("\x1bM");               # RI at top -> scroll down
+    assert_row(1, "top", "RI scrolled 'top' down to row 1");
+
+    test_group("RIS full reset (ESC c)");
+    term_init(24, 80);
+    term_feed_str("\x1b[5;5Hjunk\x1b[1;31m");
+    term_feed_str("\x1bc");               # RIS
+    assert_eq(grid_cursor_row(), 0, "RIS homed cursor");
+    assert_eq(grid_glyph(2, 4), 0x20, "RIS cleared screen");
+    assert_eq(grid_attr(0, 0), 0, "RIS reset SGR");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

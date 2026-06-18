@@ -33,9 +33,12 @@ The pipeline is built from the **inside out**: the platform-agnostic core
 - `cyrius init puka` scaffold landed; hello-world builds + runs on Linux host
 - Doc-tree + design docs (CLAUDE, roadmap, architecture overview, ADR-0001/0002) per [first-party-documentation.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/first-party/first-party-documentation.md)
 
-### M1 — VT parser + cell-grid core (v0.2.0) — the heart
+### M1 — VT parser + cell-grid core — ✅ complete 2026-06-18
 
-The platform-agnostic core. No rendering, no PTY — pure data.
+The platform-agnostic core. No rendering, no PTY — pure data. **Done:** all four
+modules landed (`parser` / `grid` / `unicode` / `terminal`) + headless text
+renderer + demo entry; **192 assertions green**. Deferred to later milestones
+(documented in state.md): DA/DSR responses, charset designators, alt-screen.
 
 - **Parser** (`parser.cyr`) — Paul Williams DEC ANSI state machine: `GROUND` / `ESCAPE` / `ESC_INTERMEDIATE` / `CSI_ENTRY` / `CSI_PARAM` / `CSI_INTERMEDIATE` / `CSI_IGNORE` / `OSC_STRING` / `DCS_*` / `SOS_PM_APC`. Emits typed actions (print, execute-C0, csi-dispatch, esc-dispatch, osc, dcs hooks).
 - **Unicode** (`unicode.cyr`) — UTF-8 decode + east-asian width (wcwidth) so glyphs land in the right number of cells. Grapheme clustering may defer to M6.

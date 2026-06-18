@@ -1,11 +1,42 @@
-# puka — main entry point
-# Stdlib auto-included via cyrius.cyml
+# puka — terminal emulator entry point.
+#
+# M1 is the headless core (parser + grid + unicode + terminal). Until the
+# PTY backend lands (M2) and the framebuffer renderer (M3), this entry is a
+# demo: it drives a canned byte stream through the full pipe and prints the
+# rendered grid to stdout — proving parse -> grid -> render end to end.
 
-fn main() {
-    alloc_init();
-    println("hello from puka");
+include "src/parser.cyr"
+include "src/grid.cyr"
+include "src/unicode.cyr"
+include "src/terminal.cyr"
+
+var demo_buf[256];
+
+fn puka_demo(): i64 {
+    term_init(24, 80);
+    # bold-green word via SGR (stripped by the text renderer), a UTF-8
+    # check mark (U+2713), CR/LF, then a CJK glyph (width 2) and cursor moves.
+    term_feed_str("puka \x1b[1;32mterminal\x1b[0m \xe2\x9c\x93\r\n");
+    term_feed_str("VT parser + cell grid + UTF-8 \xe4\xb8\xad, sovereign Cyrius.\r\n");
+    term_feed_str("\x1b[5Cindented via CUF.\r\n");
+
+    var r = 0;
+    while (r < grid_get_rows()) {
+        var n = term_render_row_trim(r, &demo_buf, 256);
+        if (n > 0) {
+            syscall(1, 1, &demo_buf, n);
+            syscall(1, 1, "\n", 1);
+        }
+        r = r + 1;
+    }
     return 0;
 }
 
-var r = main();
-syscall(SYS_EXIT, r);
+fn main(): i64 {
+    alloc_init();
+    puka_demo();
+    return 0;
+}
+
+fn _entry(): i64 { var r = main(); syscall(SYS_EXIT, r); return 0; }
+_entry();

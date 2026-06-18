@@ -1,0 +1,343 @@
+# grid.cyr — puka cell grid: the terminal screen model.
+#
+# THE single source of truth for the visible screen (architecture invariant).
+# terminal.cyr is the only writer — it translates parser events into the
+# primitives here; the renderer is a pure read of this state.
+#
+# A cell is two packed i64 words behind accessors (callers never see the
+# packing):
+#   glyph word: codepoint (bits 0..31) | attrs (bits 32..47)
+#   color word: fg (bits 0..31)        | bg (bits 32..63)
+# fg/bg are opaque to the grid — terminal.cyr's SGR decides their meaning
+# (see the color encoding it defines). The grid only stores and returns them.
+#
+# Scope (M1): visible screen only. Scrollback ring is M6 (roadmap), so rows
+# that scroll off the top are discarded here.
+#
+# Coordinates are 0-based (row, col). VT's 1-based params are converted by
+# terminal.cyr before calling in.
+
+enum GridDim {
+    GRID_MAX_COLS = 132;   # DECCOLM max width
+    GRID_MAX_ROWS = 64;    # generous height ceiling
+}
+
+# SGR attribute flag bits (stored in the glyph word's high half).
+enum GridAttr {
+    ATTR_BOLD      = 1;
+    ATTR_DIM       = 2;
+    ATTR_ITALIC    = 4;
+    ATTR_UNDERLINE = 8;
+    ATTR_BLINK     = 16;
+    ATTR_REVERSE   = 32;
+    ATTR_HIDDEN    = 64;
+    ATTR_STRIKE    = 128;
+}
+
+# Backing store. Module-global => GRID_MAX_COLS*GRID_MAX_ROWS u64 each
+# (8448 cells -> ~66KB per word array). Index = row*GRID_MAX_COLS + col.
+var grid_g[8448];   # glyph|attr words
+var grid_c[8448];   # fg|bg words
+var grid_tabs[132]; # tab-stop flags, one byte per column (store8)
+
+var grid_rows = 0;
+var grid_cols = 0;
+var grid_cur_row = 0;
+var grid_cur_col = 0;
+var grid_scroll_top = 0;   # scroll region top row (inclusive)
+var grid_scroll_bot = 0;   # scroll region bottom row (inclusive)
+var grid_pen_attr = 0;     # current SGR pen — applied to printed + erased cells
+var grid_pen_fg = 0;       # 0 = default color
+var grid_pen_bg = 0;
+
+# ---- internal cell ops -------------------------------------------------
+
+fn grid__idx(r, c): i64 { return r * GRID_MAX_COLS + c; }
+
+fn grid_set_cell(r, c, glyph, attr, fg, bg): i64 {
+    if (r < 0) { return 0; }
+    if (r >= grid_rows) { return 0; }
+    if (c < 0) { return 0; }
+    if (c >= grid_cols) { return 0; }
+    var idx = grid__idx(r, c);
+    var gw = (glyph & 0xFFFFFFFF) | (attr << 32);
+    var cw = (fg & 0xFFFFFFFF) | (bg << 32);
+    store64(&grid_g + idx * 8, gw);
+    store64(&grid_c + idx * 8, cw);
+    return 0;
+}
+
+fn grid_glyph(r, c): i64 {
+    if (r < 0) { return 0x20; }
+    if (r >= grid_rows) { return 0x20; }
+    if (c < 0) { return 0x20; }
+    if (c >= grid_cols) { return 0x20; }
+    return load64(&grid_g + grid__idx(r, c) * 8) & 0xFFFFFFFF;
+}
+
+fn grid_attr(r, c): i64 {
+    if (r < 0) { return 0; }
+    if (r >= grid_rows) { return 0; }
+    if (c < 0) { return 0; }
+    if (c >= grid_cols) { return 0; }
+    return (load64(&grid_g + grid__idx(r, c) * 8) >> 32) & 0xFFFF;
+}
+
+fn grid_fg(r, c): i64 {
+    if (r < 0) { return 0; }
+    if (r >= grid_rows) { return 0; }
+    if (c < 0) { return 0; }
+    if (c >= grid_cols) { return 0; }
+    return load64(&grid_c + grid__idx(r, c) * 8) & 0xFFFFFFFF;
+}
+
+fn grid_bg(r, c): i64 {
+    if (r < 0) { return 0; }
+    if (r >= grid_rows) { return 0; }
+    if (c < 0) { return 0; }
+    if (c >= grid_cols) { return 0; }
+    return (load64(&grid_c + grid__idx(r, c) * 8) >> 32) & 0xFFFFFFFF;
+}
+
+# Blank a cell: space glyph, no attrs, default fg, current pen bg (bce —
+# erased cells take the current background color).
+fn grid_blank(r, c): i64 {
+    return grid_set_cell(r, c, 0x20, 0, 0, grid_pen_bg);
+}
+
+fn grid__copy_row(src, dst): i64 {
+    var bs = src * GRID_MAX_COLS;
+    var bd = dst * GRID_MAX_COLS;
+    for (var c = 0; c < grid_cols; c = c + 1) {
+        store64(&grid_g + (bd + c) * 8, load64(&grid_g + (bs + c) * 8));
+        store64(&grid_c + (bd + c) * 8, load64(&grid_c + (bs + c) * 8));
+    }
+    return 0;
+}
+
+fn grid__blank_row(r): i64 {
+    for (var c = 0; c < grid_cols; c = c + 1) { grid_blank(r, c); }
+    return 0;
+}
+
+# ---- pen ---------------------------------------------------------------
+
+fn grid_set_pen(attr, fg, bg): i64 {
+    grid_pen_attr = attr;
+    grid_pen_fg = fg;
+    grid_pen_bg = bg;
+    return 0;
+}
+fn grid_pen_attr_get(): i64 { return grid_pen_attr; }
+fn grid_pen_fg_get(): i64 { return grid_pen_fg; }
+fn grid_pen_bg_get(): i64 { return grid_pen_bg; }
+
+# Write a glyph at (r,c) using the current pen attrs/colors.
+fn grid_put_cell(r, c, glyph): i64 {
+    return grid_set_cell(r, c, glyph, grid_pen_attr, grid_pen_fg, grid_pen_bg);
+}
+
+# ---- cursor ------------------------------------------------------------
+
+fn grid_cursor_set(r, c): i64 {
+    if (r < 0) { r = 0; }
+    if (r >= grid_rows) { r = grid_rows - 1; }
+    if (c < 0) { c = 0; }
+    if (c >= grid_cols) { c = grid_cols - 1; }
+    grid_cur_row = r;
+    grid_cur_col = c;
+    return 0;
+}
+fn grid_cursor_row(): i64 { return grid_cur_row; }
+fn grid_cursor_col(): i64 { return grid_cur_col; }
+fn grid_get_rows(): i64 { return grid_rows; }
+fn grid_get_cols(): i64 { return grid_cols; }
+
+# ---- scroll region -----------------------------------------------------
+
+fn grid_set_scroll(top, bot): i64 {
+    if (top < 0) { top = 0; }
+    if (bot >= grid_rows) { bot = grid_rows - 1; }
+    if (top >= bot) { return 0; }       # invalid region: ignore (VT keeps prior)
+    grid_scroll_top = top;
+    grid_scroll_bot = bot;
+    return 0;
+}
+fn grid_scroll_top_get(): i64 { return grid_scroll_top; }
+fn grid_scroll_bot_get(): i64 { return grid_scroll_bot; }
+
+# Scroll an arbitrary sub-region [top,bot] up by n lines: content rises,
+# bottom n rows blank. Lines scrolled off the top are discarded (no
+# scrollback in M1). This is the primitive; the verbs below specialize it.
+fn grid_scroll_up_in(top, bot, n): i64 {
+    if (n <= 0) { return 0; }
+    if (top < 0) { top = 0; }
+    if (bot >= grid_rows) { bot = grid_rows - 1; }
+    if (top > bot) { return 0; }
+    var span = bot - top + 1;
+    if (n > span) { n = span; }
+    var r = top;
+    while (r + n <= bot) {
+        grid__copy_row(r + n, r);
+        r = r + 1;
+    }
+    var rb = bot - n + 1;
+    while (rb <= bot) {
+        grid__blank_row(rb);
+        rb = rb + 1;
+    }
+    return 0;
+}
+
+# Scroll an arbitrary sub-region [top,bot] down by n lines: content
+# descends, top n rows blank.
+fn grid_scroll_down_in(top, bot, n): i64 {
+    if (n <= 0) { return 0; }
+    if (top < 0) { top = 0; }
+    if (bot >= grid_rows) { bot = grid_rows - 1; }
+    if (top > bot) { return 0; }
+    var span = bot - top + 1;
+    if (n > span) { n = span; }
+    var r = bot;
+    while (r >= top + n) {
+        grid__copy_row(r - n, r);
+        r = r - 1;
+    }
+    var rt = top;
+    while (rt < top + n) {
+        grid__blank_row(rt);
+        rt = rt + 1;
+    }
+    return 0;
+}
+
+# Scroll the active scroll-region up / down (SU/SD, LF/RI at the margin).
+fn grid_scroll_up(n): i64 {
+    return grid_scroll_up_in(grid_scroll_top, grid_scroll_bot, n);
+}
+fn grid_scroll_down(n): i64 {
+    return grid_scroll_down_in(grid_scroll_top, grid_scroll_bot, n);
+}
+
+# ---- erase -------------------------------------------------------------
+
+# Erase cols [c0, c1] inclusive on row r (to blank cells).
+fn grid_erase_cells(r, c0, c1): i64 {
+    if (c0 < 0) { c0 = 0; }
+    if (c1 >= grid_cols) { c1 = grid_cols - 1; }
+    var c = c0;
+    while (c <= c1) {
+        grid_blank(r, c);
+        c = c + 1;
+    }
+    return 0;
+}
+
+# Erase whole rows [r0, r1] inclusive.
+fn grid_erase_rows(r0, r1): i64 {
+    var r = r0;
+    while (r <= r1) {
+        grid__blank_row(r);
+        r = r + 1;
+    }
+    return 0;
+}
+
+# Insert n blank cells at (r,c): cells from c rightward shift right by n,
+# cells pushed past the right margin are lost (ICH).
+fn grid_insert_cells(r, c, n): i64 {
+    if (n <= 0) { return 0; }
+    if (c < 0) { return 0; }
+    if (c >= grid_cols) { return 0; }
+    if (n > grid_cols - c) { n = grid_cols - c; }
+    var base = r * GRID_MAX_COLS;
+    var dst = grid_cols - 1;
+    while (dst >= c + n) {
+        store64(&grid_g + (base + dst) * 8, load64(&grid_g + (base + dst - n) * 8));
+        store64(&grid_c + (base + dst) * 8, load64(&grid_c + (base + dst - n) * 8));
+        dst = dst - 1;
+    }
+    grid_erase_cells(r, c, c + n - 1);
+    return 0;
+}
+
+# Delete n cells at (r,c): cells from c+n leftward shift to c, the tail is
+# blanked (DCH).
+fn grid_delete_cells(r, c, n): i64 {
+    if (n <= 0) { return 0; }
+    if (c < 0) { return 0; }
+    if (c >= grid_cols) { return 0; }
+    if (n > grid_cols - c) { n = grid_cols - c; }
+    var base = r * GRID_MAX_COLS;
+    var src = c + n;
+    while (src < grid_cols) {
+        store64(&grid_g + (base + src - n) * 8, load64(&grid_g + (base + src) * 8));
+        store64(&grid_c + (base + src - n) * 8, load64(&grid_c + (base + src) * 8));
+        src = src + 1;
+    }
+    grid_erase_cells(r, grid_cols - n, grid_cols - 1);
+    return 0;
+}
+
+# ---- tab stops ---------------------------------------------------------
+
+fn grid_tab_set(col): i64 {
+    if (col < 0) { return 0; }
+    if (col >= GRID_MAX_COLS) { return 0; }
+    store8(&grid_tabs + col, 1);
+    return 0;
+}
+fn grid_tab_clear(col): i64 {
+    if (col < 0) { return 0; }
+    if (col >= GRID_MAX_COLS) { return 0; }
+    store8(&grid_tabs + col, 0);
+    return 0;
+}
+fn grid_tab_clear_all(): i64 {
+    for (var c = 0; c < GRID_MAX_COLS; c = c + 1) { store8(&grid_tabs + c, 0); }
+    return 0;
+}
+fn grid_tabs_default(): i64 {
+    grid_tab_clear_all();
+    var c = 8;
+    while (c < GRID_MAX_COLS) {
+        store8(&grid_tabs + c, 1);
+        c = c + 8;
+    }
+    return 0;
+}
+# Next tab stop strictly after `col`, clamped to the last column.
+fn grid_next_tab(col): i64 {
+    var c = col + 1;
+    while (c < grid_cols) {
+        if (load8(&grid_tabs + c) == 1) { return c; }
+        c = c + 1;
+    }
+    return grid_cols - 1;
+}
+
+# ---- lifecycle ---------------------------------------------------------
+
+fn grid_clear_all(): i64 {
+    for (var r = 0; r < grid_rows; r = r + 1) { grid__blank_row(r); }
+    return 0;
+}
+
+fn grid_init(rows, cols): i64 {
+    if (rows > GRID_MAX_ROWS) { rows = GRID_MAX_ROWS; }
+    if (cols > GRID_MAX_COLS) { cols = GRID_MAX_COLS; }
+    if (rows < 1) { rows = 1; }
+    if (cols < 1) { cols = 1; }
+    grid_rows = rows;
+    grid_cols = cols;
+    grid_cur_row = 0;
+    grid_cur_col = 0;
+    grid_scroll_top = 0;
+    grid_scroll_bot = rows - 1;
+    grid_pen_attr = 0;
+    grid_pen_fg = 0;
+    grid_pen_bg = 0;
+    grid_clear_all();
+    grid_tabs_default();
+    return 0;
+}

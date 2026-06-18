@@ -1,0 +1,77 @@
+# unicode.tcyr — UTF-8 decode/encode + width tests (Bite 2 / M1).
+# Stdlib auto-included via cyrius.cyml.
+
+include "src/unicode.cyr"
+
+# Decode a buffer of n bytes; return the final codepoint produced (asserts
+# elsewhere that intermediate bytes return UTF8_MORE).
+fn dec(s, n): i64 {
+    utf8_reset();
+    var cp = 0;
+    for (var i = 0; i < n; i = i + 1) {
+        cp = utf8_feed(load8(s + i));
+    }
+    return cp;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("decode: ASCII");
+    utf8_reset();
+    assert_eq(utf8_feed(0x41), 0x41, "'A' decodes immediately");
+    assert_eq(utf8_feed(0x7f), 0x7f, "0x7F decodes immediately");
+
+    test_group("decode: 2-byte (U+00E9 e-acute)");
+    utf8_reset();
+    assert_eq(utf8_feed(0xc3), UTF8_MORE, "lead byte needs more");
+    assert_eq(utf8_feed(0xa9), 0xe9, "continuation completes U+00E9");
+
+    test_group("decode: 3-byte (U+20AC euro, U+4E2D CJK)");
+    assert_eq(dec("\xe2\x82\xac", 3), 0x20ac, "euro decodes");
+    assert_eq(dec("\xe4\xb8\xad", 3), 0x4e2d, "CJK zhong decodes");
+
+    test_group("decode: 4-byte (U+1F600 emoji)");
+    assert_eq(dec("\xf0\x9f\x98\x80", 4), 0x1f600, "grinning face decodes");
+
+    test_group("decode: error handling");
+    utf8_reset();
+    assert_eq(utf8_feed(0x80), UC_REPLACE, "stray continuation -> replacement");
+    assert_eq(dec("\xc0\x80", 2), UC_REPLACE, "overlong NUL -> replacement");
+    assert_eq(dec("\xed\xa0\x80", 3), UC_REPLACE, "surrogate -> replacement");
+    assert_eq(dec("\xf5\x80\x80\x80", 4), UC_REPLACE, "> U+10FFFF lead -> replacement");
+
+    test_group("width");
+    assert_eq(char_width(0x41), 1, "'A' is 1 cell");
+    assert_eq(char_width(0xe9), 1, "e-acute is 1 cell");
+    assert_eq(char_width(0x4e2d), 2, "CJK is 2 cells");
+    assert_eq(char_width(0xac00), 2, "Hangul syllable is 2 cells");
+    assert_eq(char_width(0xff21), 2, "fullwidth 'A' is 2 cells");
+    assert_eq(char_width(0x1f600), 2, "emoji is 2 cells");
+    assert_eq(char_width(0x0301), 0, "combining acute is 0 cells");
+    assert_eq(char_width(0x200b), 0, "zero-width space is 0 cells");
+
+    test_group("encode round-trips decode");
+    var buf[8];
+    var n1 = utf8_encode(0x41, &buf);
+    assert_eq(n1, 1, "ASCII encodes to 1 byte");
+    assert_eq(load8(&buf), 0x41, "ASCII byte correct");
+
+    var n2 = utf8_encode(0xe9, &buf);
+    assert_eq(n2, 2, "U+00E9 encodes to 2 bytes");
+    assert_eq(dec(&buf, 2), 0xe9, "2-byte round-trips");
+
+    var n3 = utf8_encode(0x4e2d, &buf);
+    assert_eq(n3, 3, "U+4E2D encodes to 3 bytes");
+    assert_eq(load8(&buf), 0xe4, "3-byte lead correct");
+    assert_eq(dec(&buf, 3), 0x4e2d, "3-byte round-trips");
+
+    var n4 = utf8_encode(0x1f600, &buf);
+    assert_eq(n4, 4, "U+1F600 encodes to 4 bytes");
+    assert_eq(dec(&buf, 4), 0x1f600, "4-byte round-trips");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

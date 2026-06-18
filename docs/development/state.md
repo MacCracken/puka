@@ -5,8 +5,9 @@
 
 ## Version
 
-**0.1.0** — scaffolded 2026-06-18 via `cyrius init puka`. No releases yet.
-M1 in progress: design docs landed; **Bite 1 (VT parser) complete**.
+**0.1.0** — scaffolded 2026-06-18 via `cyrius init puka`. No releases tagged yet.
+**M1 (headless VT core) COMPLETE** — parser + grid + unicode + terminal, 192
+assertions green, runnable demo. Ready for a first tag (number is the user's call).
 
 ## Toolchain
 
@@ -14,16 +15,21 @@ M1 in progress: design docs landed; **Bite 1 (VT parser) complete**.
 
 ## Source
 
-- `src/parser.cyr` — VT/escape-sequence parser (Williams DEC ANSI state machine). Pure: `vt_feed(byte)` → one typed event. **M1 Bite 1 done.**
-- `src/main.cyr` — scaffold hello-world only.
-
-Next modules (M1): `unicode.cyr` (UTF-8 + width), `grid.cyr` (cell/row/screen), `terminal.cyr` (parser events → grid), headless text renderer.
+- `src/parser.cyr` — VT parser (Williams DEC ANSI state machine). Pure: `vt_feed(byte)` → one typed event.
+- `src/grid.cyr` — cell grid (the screen, single source of truth): cells, cursor, scroll region, tabs, scroll/erase/insert/delete primitives.
+- `src/unicode.cyr` — UTF-8 decode/encode + `char_width` (wcwidth, UAX#11).
+- `src/terminal.cyr` — the driver: parser events → grid mutations (cursor/erase/SGR/scroll/modes) + headless text renderer.
+- `src/main.cyr` — demo entry: drives a canned stream through the full pipe, prints the rendered grid.
 
 ## Tests
 
-- `tests/parser.tcyr` — 70 assertions, all green (`cyrius test`)
-- `tests/puka.tcyr` — scaffold smoke (2 assertions)
-- `tests/puka.bcyr` / `tests/puka.fcyr` — bench / fuzz stubs (fuzzing the parser is the M1 hardening target)
+- `tests/parser.tcyr` (70), `tests/grid.tcyr` (43), `tests/unicode.tcyr` (28), `tests/terminal.tcyr` (49 end-to-end), `tests/puka.tcyr` (2 smoke) — **192 assertions, all green** (`cyrius test`).
+- `tests/puka.bcyr` / `tests/puka.fcyr` — bench / fuzz stubs (fuzzing the parser against adversarial input is the M1-hardening target).
+
+## Carry-forward / known
+
+- **Large static data warning** (~142KB): the grid backing store is a fixed module-global array. Acceptable for M1; heap-allocate it when resize lands (M2) — that also enables SIGWINCH.
+- Deferred (need the PTY writer or later milestones): DA/DSR query responses, charset designators (ESC ( B), alt-screen (1049), IRM is in but mouse/bracketed-paste modes are M6.
 
 ## Dependencies
 
@@ -44,4 +50,6 @@ _None yet._ Phase-2 command center (post-v1.0) will be the first.
 
 ## Next
 
-M1 — VT parser + cell-grid core (v0.2.0). See [`roadmap.md`](roadmap.md).
+M2 — PTY + process plumbing (Linux): allocate a pty pair, spawn a shell with
+explicit argv, wire its output into `term_feed`. First step toward an interactive
+terminal. Triggers the grid heap-alloc/resize refactor. See [`roadmap.md`](roadmap.md).
