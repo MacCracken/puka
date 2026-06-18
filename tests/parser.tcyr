@@ -1,0 +1,148 @@
+# parser.tcyr — VT parser conformance tests (Bite 1 / M1).
+# Feeds real escape sequences and asserts the events + operands the
+# parser exposes. Stdlib auto-included via cyrius.cyml.
+
+include "src/parser.cyr"
+
+# Feed every byte of a string through the parser; return the last event.
+# (For dispatch sequences the final byte produces the event, so the last
+# event IS the sequence's event — except ST-terminated strings, fed
+# stepwise below.)
+fn feed_str(s): i64 {
+    var n = strlen(s);
+    var ev = 0;
+    for (var i = 0; i < n; i = i + 1) {
+        ev = vt_feed(load8(s + i));
+    }
+    return ev;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("ground: print + execute");
+    vt_reset();
+    assert_eq(vt_feed(0x41), VTE_PRINT, "'A' is a print");
+    assert_eq(vt_event_char(), 0x41, "print char = 'A'");
+    assert_eq(vt_feed(0x0a), VTE_EXECUTE, "LF executes");
+    assert_eq(vt_event_char(), 0x0a, "execute char = LF");
+    assert_eq(vt_feed(0x7f), VTE_NONE, "DEL ignored in ground");
+    assert_eq(vt_feed(0xc3), VTE_PRINT, "0xC3 (UTF-8 lead) prints");
+    assert_eq(vt_event_char(), 0xc3, "UTF-8 byte preserved");
+
+    test_group("CSI: cursor position");
+    vt_reset();
+    assert_eq(feed_str("\x1b[5;3H"), VTE_CSI, "CUP dispatches a CSI");
+    assert_eq(vt_event_char(), 0x48, "final byte = 'H'");
+    assert_eq(vt_param_count(), 2, "two params");
+    assert_eq(vt_param(0), 5, "row = 5");
+    assert_eq(vt_param(1), 3, "col = 3");
+    assert_eq(vt_prefix(), 0, "no private marker");
+    assert_eq(vt_get_state(), VT_GROUND, "back in ground after dispatch");
+
+    test_group("CSI: defaults (bare)");
+    vt_reset();
+    assert_eq(feed_str("\x1b[H"), VTE_CSI, "bare CUP dispatches");
+    assert_eq(vt_param_count(), 0, "no params given");
+    assert_eq(vt_param_or(0, 1), 1, "row defaults to 1");
+    assert_eq(vt_param_or(1, 1), 1, "col defaults to 1");
+
+    test_group("CSI: leading-empty param");
+    vt_reset();
+    assert_eq(feed_str("\x1b[;5H"), VTE_CSI, "CUP ;5 dispatches");
+    assert_eq(vt_param_count(), 2, "two params");
+    assert_eq(vt_param(0), 0, "first param empty = 0");
+    assert_eq(vt_param(1), 5, "second param = 5");
+    assert_eq(vt_param_or(0, 1), 1, "empty param defaults to 1");
+
+    test_group("CSI: private marker (DECSET)");
+    vt_reset();
+    assert_eq(feed_str("\x1b[?25h"), VTE_CSI, "DECSET dispatches");
+    assert_eq(vt_event_char(), 0x68, "final byte = 'h'");
+    assert_eq(vt_prefix(), 0x3f, "private marker = '?'");
+    assert_eq(vt_param(0), 25, "param = 25");
+
+    test_group("SGR: multi-param");
+    vt_reset();
+    assert_eq(feed_str("\x1b[1;31;45m"), VTE_CSI, "SGR dispatches");
+    assert_eq(vt_event_char(), 0x6d, "final byte = 'm'");
+    assert_eq(vt_param_count(), 3, "three params");
+    assert_eq(vt_param(0), 1, "bold");
+    assert_eq(vt_param(1), 31, "fg red");
+    assert_eq(vt_param(2), 45, "bg magenta");
+
+    test_group("SGR: truecolor (';' and ':' flattened)");
+    vt_reset();
+    assert_eq(feed_str("\x1b[38;2;255;0;128m"), VTE_CSI, "semicolon truecolor");
+    assert_eq(vt_param_count(), 5, "five params");
+    assert_eq(vt_param(2), 255, "R = 255");
+    assert_eq(vt_param(4), 128, "B = 128");
+    vt_reset();
+    assert_eq(feed_str("\x1b[38:2:255:0:128m"), VTE_CSI, "colon truecolor");
+    assert_eq(vt_param_count(), 5, "five params (colon flattened)");
+    assert_eq(vt_param(2), 255, "R = 255 (colon)");
+
+    test_group("ESC: dispatch");
+    vt_reset();
+    assert_eq(feed_str("\x1bc"), VTE_ESC, "ESC c (RIS) dispatches");
+    assert_eq(vt_event_char(), 0x63, "final byte = 'c'");
+    assert_eq(vt_inter_count(), 0, "no intermediates");
+
+    test_group("ESC: intermediate (charset designate)");
+    vt_reset();
+    assert_eq(feed_str("\x1b(B"), VTE_ESC, "ESC ( B dispatches");
+    assert_eq(vt_event_char(), 0x42, "final byte = 'B'");
+    assert_eq(vt_inter_count(), 1, "one intermediate");
+    assert_eq(vt_intermediate(0), 0x28, "intermediate = '('");
+
+    test_group("OSC: BEL-terminated");
+    vt_reset();
+    assert_eq(feed_str("\x1b]0;hi\x07"), VTE_OSC, "OSC ends on BEL");
+    assert_eq(vt_string_len(), 4, "OSC string length 4");
+    assert_eq(load8(vt_string_ptr() + 0), 0x30, "osc[0] = '0'");
+    assert_eq(load8(vt_string_ptr() + 1), 0x3b, "osc[1] = ';'");
+    assert_eq(load8(vt_string_ptr() + 2), 0x68, "osc[2] = 'h'");
+    assert_eq(load8(vt_string_ptr() + 3), 0x69, "osc[3] = 'i'");
+
+    test_group("OSC: ST-terminated (ESC backslash)");
+    vt_reset();
+    feed_str("\x1b]2;X");
+    assert_eq(vt_feed(0x1b), VTE_OSC, "ESC terminates the OSC string");
+    assert_eq(vt_string_len(), 3, "OSC string '2;X' length 3");
+    assert_eq(vt_feed(0x5c), VTE_ESC, "trailing backslash dispatches as ESC (ST, ignorable)");
+
+    test_group("CSI: ignore (private marker mid-param)");
+    vt_reset();
+    assert_eq(feed_str("\x1b[1?m"), VTE_NONE, "marker after digit → ignored, no dispatch");
+    assert_eq(vt_get_state(), VT_GROUND, "final consumed, back to ground");
+    assert_eq(vt_feed(0x41), VTE_PRINT, "recovers and prints next char");
+
+    test_group("abort: CAN mid-sequence");
+    vt_reset();
+    feed_str("\x1b[12");
+    assert_eq(vt_feed(0x18), VTE_NONE, "CAN aborts the sequence");
+    assert_eq(vt_get_state(), VT_GROUND, "ground after CAN");
+    assert_eq(vt_feed(0x41), VTE_PRINT, "prints after abort");
+
+    test_group("control byte mid-CSI executes, sequence survives");
+    vt_reset();
+    feed_str("\x1b[1");
+    assert_eq(vt_feed(0x0a), VTE_EXECUTE, "LF mid-CSI executes");
+    assert_eq(vt_event_char(), 0x0a, "LF char surfaced");
+    assert_eq(vt_feed(0x42), VTE_CSI, "CSI resumes (final 'B' = CUD)");
+    assert_eq(vt_param(0), 1, "param survived the embedded control");
+
+    test_group("param: clamp + count cap");
+    vt_reset();
+    assert_eq(feed_str("\x1b[99999999H"), VTE_CSI, "oversized param still dispatches");
+    assert_eq(vt_param(0), VT_PARAM_CLAMP, "param clamped to 65535");
+    vt_reset();
+    feed_str("\x1b[1;2;3;4;5;6;7;8;9;10;11;12;13;14;15;16;17;18H");
+    assert_eq(vt_get_state(), VT_GROUND, "over-long param list still dispatches");
+    assert_lte(vt_param_count(), 16, "param count capped at 16");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

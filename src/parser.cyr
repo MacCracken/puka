@@ -1,0 +1,351 @@
+# parser.cyr — puka VT/escape-sequence parser.
+#
+# A faithful implementation of the Paul Williams DEC ANSI parser state
+# machine (https://vt100.net/emu/dec_ansi_parser). PURE by design: it does
+# no I/O, no rendering, and no hot-path allocation. Bytes go in via
+# vt_feed(); a single consumer-visible EVENT comes out (the return value),
+# with operands exposed through accessor functions. The terminal driver
+# (terminal.cyr, a later bite) switches on the event and mutates the grid;
+# the parser never touches the grid itself. This keeps the untrusted-input
+# boundary in one auditable place.
+#
+# Per-byte contract: vt_feed(b) advances the machine by one byte and returns
+# at most one event. Operands for that event (final byte, params, prefix,
+# intermediates, OSC string) are valid in the parser's module-global state
+# *until the next vt_feed call* — the single-threaded read-before-next idiom.
+#
+# UTF-8 / 8-bit C1: this parser treats bytes >= 0x80 as printable (the next
+# bite layers a UTF-8 decoder over the PRINT stream). It deliberately does
+# NOT honor 8-bit C1 controls (0x80-0x9F) — in a UTF-8 terminal those are
+# continuation bytes, so all C1 functions arrive 7-bit via ESC. This is the
+# correct choice for a modern UTF-8 terminal.
+#
+# Scope (M1): GROUND / ESCAPE / CSI / OSC fully implemented. DCS and
+# SOS/PM/APC strings are consumed and discarded (VT_STR_IGN) — full DCS
+# passthrough (hook/put/unhook events) is deferred to M6 per the roadmap.
+
+# ---- States (Williams) -------------------------------------------------
+enum VtState {
+    VT_GROUND    = 0;
+    VT_ESCAPE    = 1;
+    VT_ESC_INTER = 2;   # ESCAPE intermediate
+    VT_CSI_ENTRY = 3;
+    VT_CSI_PARAM = 4;
+    VT_CSI_INTER = 5;
+    VT_CSI_IGNORE = 6;
+    VT_OSC       = 7;   # OSC string (emits VTE_OSC on terminator)
+    VT_STR_IGN   = 8;   # DCS / SOS / PM / APC — consumed, discarded (M6)
+}
+
+# ---- Events (return value of vt_feed) ----------------------------------
+enum VtEvent {
+    VTE_NONE    = 0;   # bookkeeping byte — nothing for the consumer to do
+    VTE_PRINT   = 1;   # printable: vt_event_char() = byte (codepoint after UTF-8 bite)
+    VTE_EXECUTE = 2;   # C0 control: vt_event_char() = control byte
+    VTE_CSI     = 3;   # CSI dispatch: char=final byte; prefix/params/intermediates valid
+    VTE_ESC     = 4;   # ESC dispatch: char=final byte; intermediates valid
+    VTE_OSC     = 5;   # OSC terminated: string in vt_string_ptr()/vt_string_len()
+}
+
+# ---- Limits ------------------------------------------------------------
+enum VtLimits {
+    VT_PARAM_MAX   = 16;     # max CSI parameters
+    VT_INTER_MAX   = 2;      # max intermediate bytes
+    VT_STR_CAP     = 512;    # OSC string capacity in BYTES
+    VT_PARAM_CLAMP = 65535;  # per-parameter ceiling (overflow guard)
+}
+
+# ---- State (module-global; single-threaded by design) ------------------
+# Reminder (genesis CLAUDE): a module-global `var X[N]` reserves N*u64.
+#   vt_params[16] = 16 i64 slots (128 bytes), element i at &vt_params + i*8.
+#   vt_inter[2]   = 2 i64 slots.
+#   vt_str_buf[64] = 64*8 = 512 bytes — matches VT_STR_CAP; bytes via store8.
+var vt_state = 0;
+var vt_nparams = 0;     # index of the current (last) param slot, 0-based
+var vt_have_param = 0;  # 1 if any digit/separator seen this sequence
+var vt_params[16];
+var vt_ninter = 0;
+var vt_inter[2];
+var vt_pfx = 0;         # CSI private-marker byte (0x3C-0x3F), else 0
+var vt_evch = 0;        # event char/byte for the last vt_feed
+var vt_str_len = 0;
+var vt_str_buf[64];
+
+# ---- Internal actions --------------------------------------------------
+
+# CLEAR: reset params, intermediates, and the private marker. Run on entry
+# to a fresh control sequence (ESC, CSI_ENTRY).
+fn vt__clear(): i64 {
+    vt_nparams = 0;
+    vt_have_param = 0;
+    vt_ninter = 0;
+    vt_pfx = 0;
+    for (var i = 0; i < VT_PARAM_MAX; i = i + 1) {
+        store64(&vt_params + i * 8, 0);
+    }
+    return 0;
+}
+
+# PARAM: fold a decimal digit into the current parameter slot.
+fn vt__param_digit(d): i64 {
+    if (vt_nparams >= VT_PARAM_MAX) { return 0; }   # overflow: drop extra digits
+    var off = vt_nparams * 8;
+    var cur = load64(&vt_params + off) * 10 + d;
+    if (cur > VT_PARAM_CLAMP) { cur = VT_PARAM_CLAMP; }
+    store64(&vt_params + off, cur);
+    vt_have_param = 1;
+    return 0;
+}
+
+# PARAM separator (';' and, flattened, ':'): advance to the next slot.
+# NOTE: ':' sub-parameters are flattened into the same flat list in M1 —
+# enough to *read* SGR truecolor (38:2:r:g:b becomes separate params);
+# preserving ';' vs ':' grouping is a later refinement.
+fn vt__param_next(): i64 {
+    vt_have_param = 1;
+    if (vt_nparams + 1 < VT_PARAM_MAX) {
+        vt_nparams = vt_nparams + 1;
+        store64(&vt_params + vt_nparams * 8, 0);
+    }
+    return 0;
+}
+
+# COLLECT: store an intermediate byte (0x20-0x2F).
+fn vt__collect(b): i64 {
+    if (vt_ninter < VT_INTER_MAX) {
+        store64(&vt_inter + vt_ninter * 8, b);
+        vt_ninter = vt_ninter + 1;
+    }
+    return 0;
+}
+
+fn vt__str_reset(): i64 { vt_str_len = 0; return 0; }
+
+fn vt__str_push(b): i64 {
+    if (vt_str_len < VT_STR_CAP) {
+        store8(&vt_str_buf + vt_str_len, b);
+        vt_str_len = vt_str_len + 1;
+    }
+    return 0;
+}
+
+# C0 controls that EXECUTE: 0x00-0x17, 0x19, 0x1C-0x1F. CAN(0x18),
+# SUB(0x1A), ESC(0x1B) are handled separately (sequence abort / escape).
+fn vt__is_c0(b): i64 {
+    if (b <= 0x17) { return 1; }
+    if (b == 0x19) { return 1; }
+    if (b >= 0x1c) {
+        if (b <= 0x1f) { return 1; }
+    }
+    return 0;
+}
+
+# ---- Public accessors --------------------------------------------------
+
+fn vt_event_char(): i64 { return vt_evch; }
+
+# Number of parameters present (0 = none given → consumer uses defaults).
+fn vt_param_count(): i64 {
+    if (vt_have_param == 1) { return vt_nparams + 1; }
+    return 0;
+}
+
+# Raw value of parameter i (0 if absent).
+fn vt_param(i): i64 {
+    if (i < 0) { return 0; }
+    if (i >= VT_PARAM_MAX) { return 0; }
+    return load64(&vt_params + i * 8);
+}
+
+# Parameter i with VT default-substitution: an omitted OR explicit-zero
+# parameter yields `dflt`. Correct for cursor/erase verbs (CSI 0 A == CSI A).
+# SGR must read vt_param() directly — for SGR an explicit 0 means "reset".
+fn vt_param_or(i, dflt): i64 {
+    if (i >= vt_param_count()) { return dflt; }
+    var v = vt_param(i);
+    if (v == 0) { return dflt; }
+    return v;
+}
+
+fn vt_inter_count(): i64 { return vt_ninter; }
+
+fn vt_intermediate(i): i64 {
+    if (i < 0) { return 0; }
+    if (i >= vt_ninter) { return 0; }
+    return load64(&vt_inter + i * 8);
+}
+
+# CSI private-marker byte (e.g. '?' in CSI ?25h), or 0 if none.
+fn vt_prefix(): i64 { return vt_pfx; }
+
+fn vt_string_ptr(): i64 { return &vt_str_buf; }
+fn vt_string_len(): i64 { return vt_str_len; }
+
+fn vt_get_state(): i64 { return vt_state; }
+
+# ---- Lifecycle ---------------------------------------------------------
+
+fn vt_reset(): i64 {
+    vt_state = VT_GROUND;
+    vt__str_reset();
+    vt__clear();
+    return 0;
+}
+
+fn vt_init(): i64 { return vt_reset(); }
+
+# ---- The machine -------------------------------------------------------
+# Feed one byte. Returns one VtEvent (VTE_NONE for pure bookkeeping).
+fn vt_feed(b): i64 {
+    vt_evch = 0;
+    b = b & 255;
+
+    # ---- anywhere transitions: ESC, CAN, SUB ----
+    # These abort whatever sequence is in flight. Leaving an OSC string
+    # fires its end event (the Williams state-exit action).
+    if (b == 0x1b) {
+        var eesc = VTE_NONE;
+        if (vt_state == VT_OSC) { eesc = VTE_OSC; vt_evch = vt_str_len; }
+        vt_state = VT_ESCAPE;
+        vt__clear();
+        return eesc;
+    }
+    if (b == 0x18) {
+        var ecan = VTE_NONE;
+        if (vt_state == VT_OSC) { ecan = VTE_OSC; vt_evch = vt_str_len; }
+        vt_state = VT_GROUND;
+        return ecan;
+    }
+    if (b == 0x1a) {
+        var esub = VTE_NONE;
+        if (vt_state == VT_OSC) { esub = VTE_OSC; vt_evch = vt_str_len; }
+        vt_state = VT_GROUND;
+        return esub;
+    }
+
+    # ---- GROUND ----
+    if (vt_state == VT_GROUND) {
+        if (vt__is_c0(b) == 1) { vt_evch = b; return VTE_EXECUTE; }
+        if (b == 0x7f) { return VTE_NONE; }              # DEL ignored in ground
+        vt_evch = b;                                     # 0x20-0x7E and 0x80+ (UTF-8)
+        return VTE_PRINT;
+    }
+
+    # ---- ESCAPE ----
+    if (vt_state == VT_ESCAPE) {
+        if (vt__is_c0(b) == 1) { vt_evch = b; return VTE_EXECUTE; }
+        if (b == 0x7f) { return VTE_NONE; }
+        if (b == 0x5b) { vt_state = VT_CSI_ENTRY; vt__clear(); return VTE_NONE; }   # '[' CSI
+        if (b == 0x5d) { vt_state = VT_OSC; vt__str_reset(); return VTE_NONE; }     # ']' OSC
+        if (b == 0x50) { vt_state = VT_STR_IGN; return VTE_NONE; }                  # 'P' DCS (M6)
+        if (b == 0x58) { vt_state = VT_STR_IGN; return VTE_NONE; }                  # 'X' SOS
+        if (b == 0x5e) { vt_state = VT_STR_IGN; return VTE_NONE; }                  # '^' PM
+        if (b == 0x5f) { vt_state = VT_STR_IGN; return VTE_NONE; }                  # '_' APC
+        if (b >= 0x20) {
+            if (b <= 0x2f) { vt__collect(b); vt_state = VT_ESC_INTER; return VTE_NONE; }
+        }
+        if (b >= 0x30) {
+            if (b <= 0x7e) { vt_evch = b; vt_state = VT_GROUND; return VTE_ESC; }
+        }
+        vt_state = VT_GROUND;                            # 0x80+ in escape: abort
+        return VTE_NONE;
+    }
+
+    # ---- ESCAPE intermediate ----
+    if (vt_state == VT_ESC_INTER) {
+        if (vt__is_c0(b) == 1) { vt_evch = b; return VTE_EXECUTE; }
+        if (b == 0x7f) { return VTE_NONE; }
+        if (b >= 0x20) {
+            if (b <= 0x2f) { vt__collect(b); return VTE_NONE; }
+        }
+        if (b >= 0x30) {
+            if (b <= 0x7e) { vt_evch = b; vt_state = VT_GROUND; return VTE_ESC; }
+        }
+        vt_state = VT_GROUND;
+        return VTE_NONE;
+    }
+
+    # ---- CSI entry ----
+    if (vt_state == VT_CSI_ENTRY) {
+        if (vt__is_c0(b) == 1) { vt_evch = b; return VTE_EXECUTE; }
+        if (b == 0x7f) { return VTE_NONE; }
+        if (b >= 0x30) {
+            if (b <= 0x39) { vt__param_digit(b - 0x30); vt_state = VT_CSI_PARAM; return VTE_NONE; }
+        }
+        if (b == 0x3b) { vt__param_next(); vt_state = VT_CSI_PARAM; return VTE_NONE; }   # ';'
+        if (b == 0x3a) { vt__param_next(); vt_state = VT_CSI_PARAM; return VTE_NONE; }   # ':'
+        if (b >= 0x3c) {
+            if (b <= 0x3f) { vt_pfx = b; vt_state = VT_CSI_PARAM; return VTE_NONE; }     # private marker
+        }
+        if (b >= 0x20) {
+            if (b <= 0x2f) { vt__collect(b); vt_state = VT_CSI_INTER; return VTE_NONE; }
+        }
+        if (b >= 0x40) {
+            if (b <= 0x7e) { vt_evch = b; vt_state = VT_GROUND; return VTE_CSI; }
+        }
+        vt_state = VT_GROUND;
+        return VTE_NONE;
+    }
+
+    # ---- CSI param ----
+    if (vt_state == VT_CSI_PARAM) {
+        if (vt__is_c0(b) == 1) { vt_evch = b; return VTE_EXECUTE; }
+        if (b == 0x7f) { return VTE_NONE; }
+        if (b >= 0x30) {
+            if (b <= 0x39) { vt__param_digit(b - 0x30); return VTE_NONE; }
+        }
+        if (b == 0x3b) { vt__param_next(); return VTE_NONE; }
+        if (b == 0x3a) { vt__param_next(); return VTE_NONE; }
+        if (b >= 0x3c) {
+            if (b <= 0x3f) { vt_state = VT_CSI_IGNORE; return VTE_NONE; }   # marker mid-param → ignore
+        }
+        if (b >= 0x20) {
+            if (b <= 0x2f) { vt__collect(b); vt_state = VT_CSI_INTER; return VTE_NONE; }
+        }
+        if (b >= 0x40) {
+            if (b <= 0x7e) { vt_evch = b; vt_state = VT_GROUND; return VTE_CSI; }
+        }
+        vt_state = VT_GROUND;
+        return VTE_NONE;
+    }
+
+    # ---- CSI intermediate ----
+    if (vt_state == VT_CSI_INTER) {
+        if (vt__is_c0(b) == 1) { vt_evch = b; return VTE_EXECUTE; }
+        if (b == 0x7f) { return VTE_NONE; }
+        if (b >= 0x20) {
+            if (b <= 0x2f) { vt__collect(b); return VTE_NONE; }
+        }
+        if (b >= 0x40) {
+            if (b <= 0x7e) { vt_evch = b; vt_state = VT_GROUND; return VTE_CSI; }
+        }
+        if (b >= 0x30) {
+            if (b <= 0x3f) { vt_state = VT_CSI_IGNORE; return VTE_NONE; }   # param after inter → ignore
+        }
+        vt_state = VT_GROUND;
+        return VTE_NONE;
+    }
+
+    # ---- CSI ignore ----
+    if (vt_state == VT_CSI_IGNORE) {
+        if (vt__is_c0(b) == 1) { vt_evch = b; return VTE_EXECUTE; }
+        if (b >= 0x40) {
+            if (b <= 0x7e) { vt_state = VT_GROUND; return VTE_NONE; }       # consume final, no dispatch
+        }
+        return VTE_NONE;
+    }
+
+    # ---- OSC string ----
+    if (vt_state == VT_OSC) {
+        if (b == 0x07) { vt_state = VT_GROUND; vt_evch = vt_str_len; return VTE_OSC; }  # BEL terminator
+        if (b >= 0x20) { vt__str_push(b); return VTE_NONE; }                            # collect content
+        return VTE_NONE;                                                                # stray control: ignore
+    }
+
+    # ---- DCS / SOS / PM / APC (consumed, discarded — M6) ----
+    if (vt_state == VT_STR_IGN) {
+        return VTE_NONE;   # terminated by ESC/CAN/SUB in the anywhere block above
+    }
+
+    return VTE_NONE;
+}

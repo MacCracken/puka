@@ -6,7 +6,7 @@
 ## Version
 
 **0.1.0** — scaffolded 2026-06-18 via `cyrius init puka`. No releases yet.
-Design phase: docs landed, no domain code yet.
+M1 in progress: design docs landed; **Bite 1 (VT parser) complete**.
 
 ## Toolchain
 
@@ -14,13 +14,16 @@ Design phase: docs landed, no domain code yet.
 
 ## Source
 
-- `src/main.cyr` — scaffold hello-world only. Builds + runs on Linux host.
+- `src/parser.cyr` — VT/escape-sequence parser (Williams DEC ANSI state machine). Pure: `vt_feed(byte)` → one typed event. **M1 Bite 1 done.**
+- `src/main.cyr` — scaffold hello-world only.
+
+Next modules (M1): `unicode.cyr` (UTF-8 + width), `grid.cyr` (cell/row/screen), `terminal.cyr` (parser events → grid), headless text renderer.
 
 ## Tests
 
-- `tests/puka.tcyr` — primary suite (scaffold smoke; passes on `cyrius test`)
-- `tests/puka.bcyr` — benchmark stub
-- `tests/puka.fcyr` — fuzz stub
+- `tests/parser.tcyr` — 70 assertions, all green (`cyrius test`)
+- `tests/puka.tcyr` — scaffold smoke (2 assertions)
+- `tests/puka.bcyr` / `tests/puka.fcyr` — bench / fuzz stubs (fuzzing the parser is the M1 hardening target)
 
 ## Dependencies
 
