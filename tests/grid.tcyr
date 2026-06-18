@@ -108,6 +108,22 @@ fn main() {
     grid_tab_clear_all();
     assert_eq(grid_next_tab(0), 79, "no tabs -> clamp to last col");
 
+    test_group("resize");
+    grid_init(24, 80);
+    grid_put_cell(0, 0, 0x41);          # 'A' survives a shrink it's inside
+    grid_cursor_set(20, 70);
+    grid_resize(10, 40);
+    assert_eq(grid_get_rows(), 10, "resized to 10 rows");
+    assert_eq(grid_get_cols(), 40, "resized to 40 cols");
+    assert_eq(grid_glyph(0, 0), 0x41, "in-bounds content preserved");
+    assert_eq(grid_cursor_row(), 9, "cursor clamped to new last row");
+    assert_eq(grid_cursor_col(), 39, "cursor clamped to new last col");
+    assert_eq(grid_scroll_bot_get(), 9, "scroll region reset to full height");
+    grid_resize(99, 99);
+    assert_eq(grid_get_rows(), 64, "grow clamps to max rows");
+    assert_eq(grid_get_cols(), 99, "grow to 99 cols");
+    assert_eq(grid_glyph(5, 50), 0x20, "newly-exposed cell is blank");
+
     return assert_summary();
 }
 

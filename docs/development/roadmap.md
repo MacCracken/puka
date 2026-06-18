@@ -47,34 +47,41 @@ renderer + demo entry; **192 assertions green**. Deferred to later milestones
 - **Headless test renderer** — dumps grid → text so the whole core is unit-testable on Linux.
 - **Acceptance**: feed known sequences, assert grid state; first slice of the conformance corpus green.
 
-### M2 — PTY + process plumbing, Linux (v0.3.0)
+### M2 — PTY + process plumbing, Linux — ✅ complete 2026-06-18 (0.2.0)
 
-Wire a real byte stream into the parser.
+Wire a real byte stream into the parser. **Done:** `src/pty.cyr` —
+`/dev/ptmx` open + unlock + `TIOCGPTN`, `fork` + controlling-tty child setup
+(`setsid`/`TIOCSCTTY`/`dup2`) + `execve` with explicit argv, bounded
+non-blocking `pty_pump` into `term_feed`, `pty_write`/`pty_set_winsize`/
+`pty_wait`/`pty_close`. Resize: `grid_resize` + `term_resize` (no reflow).
+`tests/pty.tcyr` spawns a real `/bin/echo` and asserts grid output (skip-clean);
+`programs/pty_demo.cyr` runs `/bin/ls /` inside a sized PTY and re-renders it
+(winsize propagation visible). Linux-guarded; agnos PTY is M5.
 
-- **PTY** (`pty.cyr`, Linux backend) — allocate a pty pair, spawn a child with explicit argv (`exec_vec`, never a shell string), non-blocking read/write loop.
-- Run a real shell (`sh` / agnoshi) headless; snapshot the grid after commands.
-- **Acceptance**: launch `sh`, run `ls`, grid reflects output. Resize (SIGWINCH / `TIOCSWINSZ`) propagates.
+> **Version map:** M*n* → 0.*n*.0. The grid heap-alloc refactor that M1's notes
+> anticipated turned out unnecessary for resize (fixed-max backing) — it's a
+> deferred optimization, tracked in state.md, not a milestone gate.
 
-### M3 — Framebuffer renderer + glyphs (v0.4.0) — first visible terminal
+### M3 — Framebuffer renderer + glyphs (0.3.0) — first visible terminal
 
 - **Render** (`render/fb.cyr`) — grid → framebuffer. Linux KMS/DRM for dev, AGNOS `blit`#39 for native.
 - **Glyphs** via **`kashi`** (bitmap console fonts — CP437 + PSF). Color: 16/256/truecolor cell attributes.
 - Damage tracking (dirty cells) so a frame only repaints what changed.
 - **Acceptance**: the grid renders, cursor visible, colors correct, scrolling smooth.
 
-### M4 — Input encoding (v0.5.0) — interactive
+### M4 — Input encoding (0.4.0) — interactive
 
 - **Input** (`input.cyr`) — keyboard → escape sequences: cursor/function keys, modifiers (shift/ctrl/alt), bracketed paste, application-cursor-key mode. Mouse tracking (SGR) may defer to M6.
 - On AGNOS, source keystrokes from the xHCI/HID input path.
 - **Acceptance**: type in puka, the shell echoes and responds; a full interactive session works on Linux.
 
-### M5 — AGNOS-native bring-up (v0.6.0) — the proof-app
+### M5 — AGNOS-native bring-up (0.5.0) — the proof-app
 
 - **AGNOS PTY surface** — the kernel-side pty syscalls puka needs (a Cyrius-native gap, analogous to the `net.cyr` / `vani` agnos-backend gaps; grown per the kernel-growth rules, not POSIX `forkpty` emulation).
 - Run puka on the AGNOS framebuffer as a real console, launching agnoshi.
 - **Acceptance**: puka boots a shell on AGNOS iron/QEMU and is interactive — the DOOM/tracker-class proof milestone for the terminal.
 
-### M6 — Conformance + polish (v0.7.0 → v0.9.0)
+### M6 — Conformance + polish (0.6.0 → 0.9.0)
 
 - Full vttest / `ctlseqs` conformance pass; scrollback ring; **alternate screen**; origin mode; charset switching (DEC special graphics); mouse tracking; bracketed paste edge cases; grapheme clustering.
 - Performance: parser throughput, dirty-cell rendering, optional GPU path via **`mabda`**.

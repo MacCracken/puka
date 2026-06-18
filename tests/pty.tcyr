@@ -1,0 +1,74 @@
+# pty.tcyr — PTY plumbing integration test (Bite 5 / M2).
+#
+# Spawns a REAL child process through a pseudo-terminal and asserts its
+# output lands in the grid via the full pipe (pty -> term_feed -> parser ->
+# grid). Linux-only and skip-clean: if a sandbox/seccomp policy blocks
+# /dev/ptmx or fork, it prints a SKIP marker and passes trivially rather
+# than faking a result (matching darshana/tests/pty.tcyr discipline).
+
+include "src/parser.cyr"
+include "src/grid.cyr"
+include "src/unicode.cyr"
+include "src/terminal.cyr"
+include "src/pty.cyr"
+
+var prow[256];
+
+fn row_eq(r, expected): i64 {
+    var n = term_render_row_trim(r, &prow, 256);
+    var m = strlen(expected);
+    if (n != m) { return 0; }
+    var i = 0;
+    while (i < n) {
+        if (load8(&prow + i) != load8(expected + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn skip(reason) {
+    syscall(1, 1, "SKIP pty: ", 10);
+    syscall(1, 1, reason, strlen(reason));
+    syscall(1, 1, "\n", 1);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("pty: spawn echo, capture output in grid");
+
+#ifdef CYRIUS_TARGET_LINUX
+    term_init(24, 80);
+    var m = pty_open();
+    if (m < 0) {
+        skip("/dev/ptmx unavailable (sandbox)");
+        assert(1, "skipped: no pty");
+    } else {
+        var pid = pty_spawn("/bin/echo", "hello world", 0, 24, 80);
+        if (pid < 0) {
+            skip("fork/spawn blocked");
+            pty_close();
+            assert(1, "skipped: no spawn");
+        } else {
+            pty_pump(200);          # up to ~200ms of idle before giving up
+            pty_wait();
+            pty_close();
+            # /bin/echo writes "hello world\n"; the pts maps \n -> \r\n, so
+            # the grid shows "hello world" on row 0 and the cursor drops to row 1.
+            assert(row_eq(0, "hello world"), "row 0 == 'hello world' from real child");
+            assert_eq(grid_cursor_row(), 1, "cursor advanced past the echoed line");
+        }
+    }
+#endif
+
+#ifndef CYRIUS_TARGET_LINUX
+    skip("pty backend is Linux-only (agnos PTY is M5)");
+    assert(1, "skipped: non-linux target");
+#endif
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

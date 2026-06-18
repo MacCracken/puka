@@ -1,0 +1,58 @@
+# pty_demo.cyr — live M2 demo: run a real program inside puka.
+#
+# Opens a pseudo-terminal, spawns `/bin/ls /` wired to it, pumps the child's
+# output through the full pipe (pty -> parser -> grid), then re-renders the
+# captured grid to stdout. Because the child runs on a real PTY sized to our
+# grid, `ls` columnates to that width — proving winsize propagation too.
+#
+# Build:  cyrius build programs/pty_demo.cyr build/pty_demo && ./build/pty_demo
+
+include "src/parser.cyr"
+include "src/grid.cyr"
+include "src/unicode.cyr"
+include "src/terminal.cyr"
+include "src/pty.cyr"
+
+var line[512];
+
+fn emit(s, n): i64 { syscall(1, 1, s, n); return 0; }
+fn emit_str(s): i64 { return emit(s, strlen(s)); }
+
+fn main(): i64 {
+    alloc_init();
+    term_init(24, 80);
+
+    emit_str("puka pty demo — running `/bin/ls /` inside the terminal:\n");
+    emit_str("------------------------------------------------------------\n");
+
+    var m = pty_open();
+    if (m < 0) {
+        emit_str("(no PTY available in this environment)\n");
+        return 0;
+    }
+    var pid = pty_spawn("/bin/ls", "/", 0, 24, 80);
+    if (pid < 0) {
+        emit_str("(could not spawn child)\n");
+        pty_close();
+        return 0;
+    }
+    pty_pump(200);
+    pty_wait();
+    pty_close();
+
+    var r = 0;
+    while (r < grid_get_rows()) {
+        var n = term_render_row_trim(r, &line, 512);
+        if (n > 0) {
+            emit(&line, n);
+            emit_str("\n");
+        }
+        r = r + 1;
+    }
+    emit_str("------------------------------------------------------------\n");
+    emit_str("(captured into puka's cell grid, then re-rendered)\n");
+    return 0;
+}
+
+fn _entry(): i64 { var rc = main(); syscall(SYS_EXIT, rc); return 0; }
+_entry();

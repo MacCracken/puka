@@ -60,6 +60,16 @@ fn term_init(rows, cols): i64 {
     return 0;
 }
 
+# Resize the terminal (e.g. on SIGWINCH). Delegates to the grid and clears
+# the deferred-wrap latch. The caller (the PTY owner) is responsible for
+# pushing the new size to the child via pty_set_winsize — terminal.cyr does
+# not depend on the PTY layer.
+fn term_resize(rows, cols): i64 {
+    grid_resize(rows, cols);
+    term_pending_wrap = 0;
+    return 0;
+}
+
 # ---- vertical movement -------------------------------------------------
 
 # IND / LF: move down one line, scrolling the region up at the bottom margin.

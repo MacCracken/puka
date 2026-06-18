@@ -1,0 +1,199 @@
+# pty.cyr — pseudo-terminal + child-process plumbing (Linux backend).
+#
+# Allocates a PTY pair, forks a child wired to the slave as its controlling
+# terminal, execs a program, and pumps the master's output into term_feed()
+# (terminal.cyr). This is the I/O edge that turns the headless core into a
+# real terminal hosting a real process.
+#
+# Linux-only (devpts ABI: TIOCSPTLCK / TIOCGPTN). The AGNOS-native PTY
+# surface is a kernel gap scheduled for M5; on non-Linux targets the calls
+# are stubs that report "unsupported". PTY-master setup mirrors the proven
+# sequence in darshana/tests/pty.tcyr; the fork/execve/argv build mirrors
+# the cyrius stdlib process.cyr `_exec3`.
+#
+# Child spawn uses explicit argv (never a shell string) — no command
+# injection surface (SECURITY.md / CLAUDE rule).
+
+#ifdef CYRIUS_TARGET_LINUX
+
+enum PtyAbi {
+    PTY_SYS_IOCTL     = 16;          # x86_64 SYS_ioctl
+    PTY_SYS_NANOSLEEP = 35;          # x86_64 SYS_nanosleep
+    PTY_O_RDWR        = 2;
+    PTY_O_NOCTTY      = 0x100;       # O_NOCTTY — don't acquire a controlling tty on open
+    PTY_O_NONBLOCK    = 0x800;
+    PTY_TIOCSPTLCK    = 0x40045431;  # _IOW('T',0x31,int)  — (un)lock slave
+    PTY_TIOCGPTN      = 0x80045430;  # _IOR('T',0x30,uint) — slave number
+    PTY_TIOCSWINSZ    = 0x5414;      # set window size
+    PTY_TIOCSCTTY     = 0x540e;      # set controlling tty
+}
+
+var pty_master = 0;          # master fd (0 = unset; valid fds are >0 after stdio)
+var pty_child_pid = 0;
+var pty_slave_path[32];      # "/dev/pts/<n>\0" — module-global (256 bytes; first ~16 used)
+
+fn pty__nap(): i64 {
+    var ts[16];
+    store64(&ts, 0);
+    store64(&ts + 8, 1000000);       # 0 s, 1e6 ns = 1 ms
+    syscall(PTY_SYS_NANOSLEEP, &ts, 0);
+    return 0;
+}
+
+# Build "/dev/pts/<n>\0" into pty_slave_path.
+fn pty__build_slave_path(n): i64 {
+    var pfx = "/dev/pts/";
+    var i = 0;
+    while (i < 9) { store8(&pty_slave_path + i, load8(pfx + i)); i = i + 1; }
+    var pos = 9;
+    if (n == 0) {
+        store8(&pty_slave_path + pos, 0x30);
+        pos = pos + 1;
+    } else {
+        var tmp[16];
+        var ti = 0;
+        var v = n;
+        while (v > 0) {
+            store8(&tmp + ti, 0x30 + (v - (v / 10) * 10));
+            ti = ti + 1;
+            v = v / 10;
+        }
+        var k = ti - 1;
+        while (k >= 0) {
+            store8(&pty_slave_path + pos, load8(&tmp + k));
+            pos = pos + 1;
+            k = k - 1;
+        }
+    }
+    store8(&pty_slave_path + pos, 0);
+    return 0;
+}
+
+# struct winsize { u16 ws_row, ws_col, ws_xpixel, ws_ypixel; } — set on fd.
+fn pty_set_winsize(fd, rows, cols): i64 {
+    var ws[8];
+    store8(&ws + 0, rows & 0xff); store8(&ws + 1, (rows >> 8) & 0xff);
+    store8(&ws + 2, cols & 0xff); store8(&ws + 3, (cols >> 8) & 0xff);
+    store8(&ws + 4, 0); store8(&ws + 5, 0);
+    store8(&ws + 6, 0); store8(&ws + 7, 0);
+    return syscall(PTY_SYS_IOCTL, fd, PTY_TIOCSWINSZ, &ws);
+}
+
+# Open the PTY master and resolve the slave path. Returns the master fd, or
+# a negative value on failure (sandbox / no devpts).
+fn pty_open(): i64 {
+    var m = sys_open("/dev/ptmx", PTY_O_RDWR | PTY_O_NOCTTY | PTY_O_NONBLOCK, 0);
+    if (m < 0) { return 0 - 1; }
+
+    var lockarg[4];
+    store8(&lockarg + 0, 0); store8(&lockarg + 1, 0);
+    store8(&lockarg + 2, 0); store8(&lockarg + 3, 0);
+    if (syscall(PTY_SYS_IOCTL, m, PTY_TIOCSPTLCK, &lockarg) < 0) { sys_close(m); return 0 - 1; }
+
+    var ptnbuf[4];
+    store8(&ptnbuf + 0, 0); store8(&ptnbuf + 1, 0);
+    store8(&ptnbuf + 2, 0); store8(&ptnbuf + 3, 0);
+    if (syscall(PTY_SYS_IOCTL, m, PTY_TIOCGPTN, &ptnbuf) < 0) { sys_close(m); return 0 - 1; }
+
+    pty__build_slave_path(load32(&ptnbuf));
+    pty_master = m;
+    pty_child_pid = 0;
+    return m;
+}
+
+# Fork a child wired to the slave (setsid + TIOCSCTTY + dup2 → 0,1,2) and
+# execve(path, [path, arg1?, arg2?], [TERM=...]). Returns child pid, or
+# negative on failure. Must call pty_open() first.
+fn pty_spawn(path, arg1, arg2, rows, cols): i64 {
+    if (pty_master <= 0) { return 0 - 1; }
+    var pid = sys_fork();
+    if (pid < 0) { return 0 - 1; }
+    if (pid == 0) {
+        # ---- child ----
+        sys_setsid();
+        var s = sys_open(&pty_slave_path, PTY_O_RDWR, 0);
+        if (s < 0) { sys_exit(127); }
+        syscall(PTY_SYS_IOCTL, s, PTY_TIOCSCTTY, 0);
+        pty_set_winsize(s, rows, cols);
+        sys_dup2(s, 0);
+        sys_dup2(s, 1);
+        sys_dup2(s, 2);
+        if (s > 2) { sys_close(s); }
+        sys_close(pty_master);
+        var argv[40];
+        store64(&argv, path);
+        var ai = 1;
+        if (arg1 != 0) { store64(&argv + ai * 8, arg1); ai = ai + 1; }
+        if (arg2 != 0) { store64(&argv + ai * 8, arg2); ai = ai + 1; }
+        store64(&argv + ai * 8, 0);
+        var envp[16];
+        store64(&envp, "TERM=xterm-256color");
+        store64(&envp + 8, 0);
+        sys_execve(path, &argv, &envp);
+        sys_exit(127);            # execve failed
+    }
+    pty_child_pid = pid;
+    return pid;
+}
+
+# Pump the master into the terminal: read available bytes, feed each through
+# term_feed(). Bounded — stops at EOF, or after `max_idle` consecutive empty
+# (EAGAIN) polls (each ~1ms), so it can never hang. Returns bytes consumed.
+fn pty_pump(max_idle): i64 {
+    if (pty_master <= 0) { return 0; }
+    var buf[1024];
+    var total = 0;
+    var idle = 0;
+    var go = 1;
+    while (go == 1) {
+        var n = file_read(pty_master, &buf, 1024);
+        if (n > 0) {
+            var i = 0;
+            while (i < n) { term_feed(load8(&buf + i)); i = i + 1; }
+            total = total + n;
+            idle = 0;
+        } else {
+            if (n == 0) {
+                go = 0;                       # EOF: slave fully closed
+            } else {
+                idle = idle + 1;
+                if (idle >= max_idle) { go = 0; }
+                pty__nap();
+            }
+        }
+    }
+    return total;
+}
+
+# Write bytes to the child (keyboard input path; used in M4). Returns count.
+fn pty_write(buf, len): i64 {
+    if (pty_master <= 0) { return 0 - 1; }
+    return file_write(pty_master, buf, len);
+}
+
+# Reap the child; returns its raw wait status (or 0 if none).
+fn pty_wait(): i64 {
+    if (pty_child_pid <= 0) { return 0; }
+    var st[1];
+    sys_waitpid(pty_child_pid, &st, 0);
+    pty_child_pid = 0;
+    return load32(&st);
+}
+
+fn pty_close(): i64 {
+    if (pty_master > 0) { sys_close(pty_master); pty_master = 0; }
+    return 0;
+}
+
+#endif
+
+#ifndef CYRIUS_TARGET_LINUX
+# Non-Linux stubs. AGNOS-native PTY is M5 (kernel syscall gap).
+fn pty_open(): i64 { return 0 - 1; }
+fn pty_spawn(path, arg1, arg2, rows, cols): i64 { return 0 - 1; }
+fn pty_pump(max_idle): i64 { return 0; }
+fn pty_write(buf, len): i64 { return 0 - 1; }
+fn pty_wait(): i64 { return 0; }
+fn pty_close(): i64 { return 0; }
+fn pty_set_winsize(fd, rows, cols): i64 { return 0 - 1; }
+#endif

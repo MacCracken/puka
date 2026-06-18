@@ -323,6 +323,37 @@ fn grid_clear_all(): i64 {
     return 0;
 }
 
+# Resize the logical screen (SIGWINCH / TIOCSWINSZ). The backing store is
+# fixed at GRID_MAX_*, so this is a dimension change, not a reallocation:
+# newly-exposed cells are blanked, the scroll region resets to full, and the
+# cursor is clamped. Content is not reflowed (matches xterm/VT resize).
+fn grid_resize(rows, cols): i64 {
+    if (rows > GRID_MAX_ROWS) { rows = GRID_MAX_ROWS; }
+    if (cols > GRID_MAX_COLS) { cols = GRID_MAX_COLS; }
+    if (rows < 1) { rows = 1; }
+    if (cols < 1) { cols = 1; }
+    var oldr = grid_rows;
+    var oldc = grid_cols;
+    grid_rows = rows;
+    grid_cols = cols;
+    if (cols > oldc) {
+        var r = 0;
+        while (r < oldr) {
+            if (r < rows) { grid_erase_cells(r, oldc, cols - 1); }
+            r = r + 1;
+        }
+    }
+    if (rows > oldr) {
+        var rr = oldr;
+        while (rr < rows) { grid__blank_row(rr); rr = rr + 1; }
+    }
+    grid_scroll_top = 0;
+    grid_scroll_bot = rows - 1;
+    if (grid_cur_row >= rows) { grid_cur_row = rows - 1; }
+    if (grid_cur_col >= cols) { grid_cur_col = cols - 1; }
+    return 0;
+}
+
 fn grid_init(rows, cols): i64 {
     if (rows > GRID_MAX_ROWS) { rows = GRID_MAX_ROWS; }
     if (cols > GRID_MAX_COLS) { cols = GRID_MAX_COLS; }
