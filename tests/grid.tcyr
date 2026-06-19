@@ -3,6 +3,13 @@
 
 include "src/grid.cyr"
 
+# Clear the dirty bit on every row 0..rows-1 (test setup helper).
+fn clear_dirty(rows): i64 {
+    var r = 0;
+    while (r < rows) { grid_clear_row_dirty(r); r = r + 1; }
+    return 0;
+}
+
 fn main() {
     alloc_init();
 
@@ -123,6 +130,31 @@ fn main() {
     assert_eq(grid_get_rows(), 64, "grow clamps to max rows");
     assert_eq(grid_get_cols(), 99, "grow to 99 cols");
     assert_eq(grid_glyph(5, 50), 0x20, "newly-exposed cell is blank");
+
+    test_group("damage: per-row dirty tracking");
+    grid_init(10, 20);
+    assert_eq(grid_row_dirty(0), 1, "init marks row 0 dirty");
+    assert_eq(grid_row_dirty(9), 1, "init marks last row dirty");
+    clear_dirty(10);
+    assert_eq(grid_row_dirty(0), 0, "cleared row 0 is clean");
+    assert_eq(grid_row_dirty(5), 0, "cleared row 5 is clean");
+    grid_put_cell(3, 2, 0x41);                  # write one cell
+    assert_eq(grid_row_dirty(3), 1, "cell write marks its row");
+    assert_eq(grid_row_dirty(2), 0, "neighbour row 2 stays clean");
+    assert_eq(grid_row_dirty(4), 0, "neighbour row 4 stays clean");
+    clear_dirty(10);
+    grid_cursor_set(0, 0);                       # known start row
+    clear_dirty(10);
+    grid_cursor_set(6, 4);                        # move row 0 -> row 6
+    assert_eq(grid_row_dirty(0), 1, "cursor move marks the old row");
+    assert_eq(grid_row_dirty(6), 1, "cursor move marks the new row");
+    assert_eq(grid_row_dirty(3), 0, "an untouched row stays clean");
+    clear_dirty(10);
+    grid_scroll_up(1);                            # rewrites every region row
+    assert_eq(grid_row_dirty(0), 1, "scroll marks row 0");
+    assert_eq(grid_row_dirty(9), 1, "scroll marks the last row");
+    assert_eq(grid_row_dirty(0 - 1), 0, "negative row dirty query -> 0");
+    assert_eq(grid_row_dirty(9999), 0, "out-of-range row dirty query -> 0");
 
     return assert_summary();
 }

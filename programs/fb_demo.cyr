@@ -1,0 +1,55 @@
+# fb_demo.cyr — M3 demo: render puka's grid to a framebuffer image.
+#
+# Drives a styled byte stream through the full pipe (parser -> terminal ->
+# grid), paints the grid to an in-memory RGB framebuffer via render/fb.cyr
+# (background colours + kashi glyphs + cursor block), and writes it out as a
+# PPM (P6) image you can open in any viewer. The first VISIBLE puka.
+#
+# Build:  cyrius build programs/fb_demo.cyr build/fb_demo && ./build/fb_demo
+#         then open puka_frame.ppm
+
+include "src/parser.cyr"
+include "src/grid.cyr"
+include "src/unicode.cyr"
+include "src/terminal.cyr"
+include "lib/kashi_font_data.cyr"
+include "src/render/fb.cyr"
+
+fn emit(s, n): i64 { syscall(1, 1, s, n); return 0; }
+fn emit_str(s): i64 { return emit(s, strlen(s)); }
+
+fn main(): i64 {
+    alloc_init();
+    term_init(24, 80);
+    fb_init(8, 16);                          # 80x24 cells @ 8x16 = 640x384 px
+
+    # A taste of the surface: SGR colours, bold, reverse, 256-colour, truecolor,
+    # a UTF-8 check mark, and the kashi-rendered glyphs themselves.
+    term_feed_str("\x1b[1;32mpuka\x1b[0m \x1b[1;31mterminal\x1b[0m \xe2\x9c\x93\r\n");
+    term_feed_str("VT parser + cell grid + framebuffer, sovereign Cyrius.\r\n");
+    term_feed_str("\r\n");
+    term_feed_str("\x1b[7m  reverse video  \x1b[0m   \x1b[44;1;97m  blue bg  \x1b[0m   \x1b[42;30m  green bg  \x1b[0m\r\n");
+    term_feed_str("\r\n");
+    term_feed_str("256-color: \x1b[38;5;208mO\x1b[38;5;82mr\x1b[38;5;51ma\x1b[38;5;201mn\x1b[38;5;226mg\x1b[38;5;46me\x1b[0m    ");
+    term_feed_str("truecolor: \x1b[38;2;255;128;0mC\x1b[38;2;0;200;255my\x1b[38;2;180;120;255mr\x1b[38;2;120;255;120mi\x1b[38;2;255;90;160mus\x1b[0m\r\n");
+    term_feed_str("\r\n");
+    term_feed_str("the quick brown fox jumps over the lazy dog  0123456789  !@#$%^&*()\r\n");
+    term_feed_str("\r\nthe cursor block sits at the start of this line -> ");
+
+    var painted = fb_render();
+    var wrote = fb_dump_ppm("puka_frame.ppm");
+
+    emit_str("puka framebuffer demo — wrote puka_frame.ppm  (");
+    fb__emit_uint(1, fb_width());
+    emit_str("x");
+    fb__emit_uint(1, fb_height());
+    emit_str(" px, ");
+    fb__emit_uint(1, painted);
+    emit_str(" rows painted, ");
+    fb__emit_uint(1, wrote);
+    emit_str(" pixel bytes)\n");
+    return 0;
+}
+
+fn _entry(): i64 { var rc = main(); syscall(SYS_EXIT, rc); return 0; }
+_entry();

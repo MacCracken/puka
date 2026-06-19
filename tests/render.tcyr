@@ -1,0 +1,175 @@
+# render.tcyr — framebuffer renderer tests (M3).
+# Verifies colour resolution, background/cursor painting, the kashi glyph
+# blit, and PPM serialization by asserting on the resolved values and the
+# actual pixels in the buffer. Stdlib auto-included via cyrius.cyml.
+
+include "src/parser.cyr"
+include "src/grid.cyr"
+include "src/unicode.cyr"
+include "src/terminal.cyr"
+include "lib/kashi_font_data.cyr"
+include "src/render/fb.cyr"
+
+var hdr[64];   # scratch for reading back the PPM header (module-global: 512 bytes)
+
+# Packed 0xRRGGBB of the pixel at (x,y).
+fn px_rgb(x, y): i64 {
+    var p = fb_buf();
+    var off = (y * fb_width() + x) * 3;
+    return (load8(p + off) << 16) | (load8(p + off + 1) << 8) | load8(p + off + 2);
+}
+
+# Count pixels equal to `colour` inside cell (cr,cc) for an 8x16 cell.
+fn count_color(cr, cc, colour): i64 {
+    var n = 0;
+    var y0 = cr * 16;
+    var x0 = cc * 8;
+    var dy = 0;
+    while (dy < 16) {
+        var dx = 0;
+        while (dx < 8) {
+            if (px_rgb(x0 + dx, y0 + dy) == colour) { n = n + 1; }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+    return n;
+}
+
+# Assert the first n bytes of buf equal expected.
+fn assert_bytes(buf, expected, n, name): i64 {
+    var i = 0;
+    while (i < n) {
+        if (load8(buf + i) != load8(expected + i)) { return assert(0, name); }
+        i = i + 1;
+    }
+    return assert(1, name);
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("palette: 16 ANSI");
+    assert_eq(fb__palette_rgb(0),  0x000000, "ansi 0 black");
+    assert_eq(fb__palette_rgb(1),  0x800000, "ansi 1 red");
+    assert_eq(fb__palette_rgb(7),  0xC0C0C0, "ansi 7 silver");
+    assert_eq(fb__palette_rgb(9),  0xFF0000, "ansi 9 bright red");
+    assert_eq(fb__palette_rgb(15), 0xFFFFFF, "ansi 15 white");
+
+    test_group("palette: 6x6x6 cube");
+    assert_eq(fb__palette_rgb(16),  0x000000, "cube base = black");
+    assert_eq(fb__palette_rgb(21),  0x0000FF, "cube 21 = blue");
+    assert_eq(fb__palette_rgb(196), 0xFF0000, "cube 196 = red");
+    assert_eq(fb__palette_rgb(231), 0xFFFFFF, "cube 231 = white");
+    assert_eq(fb__palette_rgb(67),  0x5F87AF, "cube 67 = steel blue (levels)");
+
+    test_group("palette: grayscale ramp");
+    assert_eq(fb__palette_rgb(232), 0x080808, "gray 232 = near-black");
+    assert_eq(fb__palette_rgb(255), 0xEEEEEE, "gray 255 = near-white");
+
+    test_group("palette: clamps out-of-range index");
+    assert_eq(fb__palette_rgb(0 - 5), 0x000000, "negative idx clamps to 0");
+    assert_eq(fb__palette_rgb(9999),  0xEEEEEE, "huge idx clamps to 255");
+
+    test_group("decode: default / palette / truecolor");
+    assert_eq(fb__decode(0, 1), 0xC0C0C0, "default fg = light grey");
+    assert_eq(fb__decode(0, 0), 0x000000, "default bg = black");
+    assert_eq(fb__decode(color_palette(1), 1), 0x800000, "palette token 1 = red");
+    assert_eq(fb__decode(color_rgb(10, 20, 30), 1), 0x0A141E, "truecolor verbatim");
+
+    test_group("resolve: BOLD brightens standard fg");
+    grid_init(4, 4);
+    grid_set_cell(0, 0, 0x41, ATTR_BOLD, color_palette(1), 0);   # red + bold
+    var out[16];
+    fb__resolve(0, 0, 0, &out);
+    assert_eq(load64(&out), 0xFF0000, "bold red -> bright red");
+    grid_set_cell(0, 1, 0x41, ATTR_BOLD, color_rgb(10, 20, 30), 0);
+    fb__resolve(0, 1, 0, &out);
+    assert_eq(load64(&out), 0x0A141E, "bold leaves truecolor unchanged");
+
+    test_group("resolve: DIM halves the foreground");
+    grid_set_cell(1, 0, 0x41, ATTR_DIM, color_rgb(128, 128, 128), 0);
+    fb__resolve(1, 0, 0, &out);
+    assert_eq(load64(&out), 0x404040, "dim 0x808080 -> 0x404040");
+
+    test_group("resolve: REVERSE swaps fg/bg");
+    grid_set_cell(2, 0, 0x20, ATTR_REVERSE, 0, 0);
+    fb__resolve(2, 0, 0, &out);
+    assert_eq(load64(&out), 0x000000, "reverse fg = default bg");
+    assert_eq(load64(&out + 8), 0xC0C0C0, "reverse bg = default fg");
+
+    test_group("resolve: HIDDEN conceals (fg == bg)");
+    grid_set_cell(3, 0, 0x41, ATTR_HIDDEN, color_palette(1), 0);
+    fb__resolve(3, 0, 0, &out);
+    assert_eq(load64(&out), load64(&out + 8), "hidden: fg collapses to bg");
+
+    test_group("resolve: cursor cancels SGR reverse");
+    grid_set_cell(2, 1, 0x20, ATTR_REVERSE, 0, 0);
+    fb__resolve(2, 1, 1, &out);                       # is_cursor = 1
+    assert_eq(load64(&out + 8), 0x000000, "reverse+cursor: bg back to black");
+    assert_eq(load64(&out), 0xC0C0C0, "reverse+cursor: fg back to default");
+
+    test_group("paint: default cell is black bg");
+    term_init(2, 2);
+    fb_init(4, 4);                                    # 8x8 framebuffer
+    fb_render();
+    assert_eq(px_rgb(5, 5), 0x000000, "non-cursor default cell paints black");
+
+    test_group("paint: cursor cell inverted");
+    term_init(2, 2);                                  # cursor home, visible
+    fb_init(4, 4);
+    fb_render();
+    assert_eq(px_rgb(1, 1), 0xC0C0C0, "cursor block paints default fg as bg");
+
+    test_group("paint: SGR background colour");
+    term_init(2, 2);
+    fb_init(8, 16);
+    term_feed_str("\x1b[41m \x1b[0m");                # space, red bg, at (0,0)
+    fb_render();
+    assert_eq(px_rgb(3, 8), 0x800000, "red-bg space cell is uniformly red");
+
+    test_group("glyph: kashi blit draws 'A', blank for space");
+    term_init(4, 4);
+    fb_init(8, 16);
+    term_feed_str("A");                               # 'A' at (0,0); cursor -> (0,1)
+    fb_render();
+    assert_gt(count_color(0, 0, 0xC0C0C0), 0, "'A' lights foreground pixels");
+    assert_lt(count_color(0, 0, 0xC0C0C0), 128, "'A' does not fill the whole cell");
+    assert_eq(count_color(1, 1, 0xC0C0C0), 0, "blank cell lights no glyph pixels");
+
+    test_group("DECTCEM toggle re-dirties the cursor row");
+    term_init(4, 4);                                  # cursor (0,0), visible
+    fb_init(8, 16);
+    fb_render();                                       # paint all, clear dirty bits
+    assert_eq(grid_row_dirty(0), 0, "settled frame: cursor row is clean");
+    assert_eq(px_rgb(1, 1), 0xC0C0C0, "cursor block present before hide");
+    term_feed_str("\x1b[?25l");                        # hide cursor (no cell write)
+    assert_eq(grid_row_dirty(0), 1, "hide re-dirties the cursor row");
+    fb_render();
+    assert_eq(px_rgb(1, 1), 0x000000, "cursor block gone after hide");
+    term_feed_str("\x1b[?25h");                        # show cursor again
+    assert_eq(grid_row_dirty(0), 1, "show re-dirties the cursor row");
+    fb_render();
+    assert_eq(px_rgb(1, 1), 0xC0C0C0, "cursor block restored after show");
+
+    test_group("fb_init clamps pathological cell size (no overflow)");
+    term_init(2, 2);
+    assert_eq(fb_init(1, 72057594037927937), 0, "huge cell_h clamped -> ok, not wrapped");
+    assert_eq(fb_width(), 2, "fb_width = cols * cell_w (1)");
+    assert_eq(fb_height(), 512, "fb_height = rows * clamped cell_h (256)");
+
+    test_group("ppm: P6 header");
+    term_init(2, 2);
+    fb_init(4, 4);                                    # 8x8
+    fb_render();
+    var wrote = fb_dump_ppm("/tmp/puka_render_test.ppm");
+    assert_gt(wrote, 0, "ppm dump wrote pixel bytes");
+    var got = file_read_all("/tmp/puka_render_test.ppm", &hdr, 512);
+    assert_gt(got, 11, "ppm file read back");
+    assert_bytes(&hdr, "P6\n8 8\n255\n", 11, "ppm header is exact");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

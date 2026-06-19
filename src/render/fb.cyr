@@ -1,0 +1,333 @@
+# fb.cyr — puka framebuffer renderer (the first VISIBLE surface).
+#
+# A pure READ of the grid (architecture invariant: grid is the single source
+# of truth; terminal.cyr is the only writer; the renderer never mutates).
+# It paints each cell's background rectangle in resolved RGB, blits the cell's
+# glyph foreground via kashi's freestanding bitmap-font core, draws the cursor
+# block (reverse-under-cursor), and serializes the pixel buffer to a PPM (P6)
+# image so the output is headlessly verifiable with pixel-asserting tests —
+# the same headless discipline as terminal.cyr's text renderer.
+#
+# Integer-only (no floats); all colour math is i64 with byte masks. The pixel
+# buffer is heap-allocated (alloc) — never a module-global `var buf[N]` (which
+# at module scope is N*u64, the wrong size).
+#
+# Co-compiled: the consumer (main / a test / a program) includes, in order,
+# parser.cyr, grid.cyr, unicode.cyr, terminal.cyr, lib/kashi_font_data.cyr,
+# then this file. fb.cyr itself includes nothing (mirrors terminal.cyr) to
+# avoid double includes. fb_init() calls kashi_font_init() so callers don't
+# have to remember to (it is idempotent).
+#
+# Colour input is terminal.cyr's self-describing encoding (ranges disjoint):
+#   0                     = default fg / bg
+#   1..256                = palette colour, index = value-1 (16 ANSI + 6x6x6
+#                           cube + grayscale ramp)
+#   0x1000000 | rgb       = 24-bit truecolor (bit 24 set)
+#
+# Backend note: this renders into an in-memory RGB buffer + PPM (the Linux dev
+# / CI path, fully testable). Pushing the buffer to a real display — Linux
+# KMS/DRM or the AGNOS `blit`#39 framebuffer — is a thin later backend over
+# the same buffer, not this module's concern.
+
+# Cursor styles (only block is wired; the rest are reserved for a DECSCUSR bite).
+enum FbCursorStyle {
+    FB_CURSOR_BLOCK     = 0;
+    FB_CURSOR_UNDERLINE = 1;
+    FB_CURSOR_BAR       = 2;
+}
+
+# ---- module state ------------------------------------------------------
+var fb_buf_ptr = 0;        # heap base of the W*H*3 RGB buffer (0 = uninitialized)
+var fb_cell_w  = 8;        # cell width  in px (default VGA 8x16)
+var fb_cell_h  = 16;       # cell height in px
+var fb_w       = 0;        # framebuffer width  = cols * fb_cell_w
+var fb_h       = 0;        # framebuffer height = rows * fb_cell_h
+var fb_def_fg  = 0xC0C0C0; # default foreground RGB (xterm light grey)
+var fb_def_bg  = 0x000000; # default background RGB (black)
+var fb_cursor_style = 0;   # FB_CURSOR_BLOCK
+var fb_font_id = 0;        # KASHI_FONT_VGA_8X16
+
+# ---- palette / colour resolution (pure) --------------------------------
+
+# One 6x6x6-cube channel level for a digit 0..5 (xterm: 0,95,135,175,215,255).
+fn fb__level(d): i64 {
+    if (d == 0) { return 0; }
+    return d * 40 + 55;
+}
+
+# Palette index 0..255 -> packed 0xRRGGBB. Closed-form (no materialized table);
+# idx is clamped first since it derives from untrusted cell data.
+fn fb__palette_rgb(idx): i64 {
+    if (idx < 0) { idx = 0; }
+    if (idx > 255) { idx = 255; }
+    # 0..15 — the standard ANSI/VGA 16 (xterm values).
+    if (idx == 0)  { return 0x000000; }
+    if (idx == 1)  { return 0x800000; }
+    if (idx == 2)  { return 0x008000; }
+    if (idx == 3)  { return 0x808000; }
+    if (idx == 4)  { return 0x000080; }
+    if (idx == 5)  { return 0x800080; }
+    if (idx == 6)  { return 0x008080; }
+    if (idx == 7)  { return 0xC0C0C0; }
+    if (idx == 8)  { return 0x808080; }
+    if (idx == 9)  { return 0xFF0000; }
+    if (idx == 10) { return 0x00FF00; }
+    if (idx == 11) { return 0xFFFF00; }
+    if (idx == 12) { return 0x0000FF; }
+    if (idx == 13) { return 0xFF00FF; }
+    if (idx == 14) { return 0x00FFFF; }
+    if (idx == 15) { return 0xFFFFFF; }
+    if (idx < 232) {
+        # 16..231 — 6x6x6 colour cube.
+        var n = idx - 16;
+        var ri = n / 36;
+        var gi = (n / 6) % 6;
+        var bi = n % 6;
+        return (fb__level(ri) << 16) | (fb__level(gi) << 8) | fb__level(bi);
+    }
+    # 232..255 — 24-step grayscale ramp (8, 18, .. 238).
+    var g = 8 + (idx - 232) * 10;
+    return (g << 16) | (g << 8) | g;
+}
+
+# Decode one stored colour token -> 0xRRGGBB. is_fg picks the default.
+fn fb__decode(val, is_fg): i64 {
+    if (val == 0) {
+        if (is_fg != 0) { return fb_def_fg; }
+        return fb_def_bg;
+    }
+    if ((val & 0x1000000) != 0) { return val & 0xFFFFFF; }   # truecolor, verbatim
+    return fb__palette_rgb(val - 1);                          # palette 1..256
+}
+
+# Resolve cell (r,c) to a final (fg_rgb, bg_rgb) pair, writing fg -> out[0..7]
+# and bg -> out[8..15] (caller passes a >=16-byte scratch buffer). The order is
+# load-bearing: bold-brighten token -> decode -> dim -> reverse -> hidden ->
+# cursor (cursor reuses the reverse swap, so SGR-reverse under the cursor
+# double-swaps back to normal — matching xterm).
+fn fb__resolve(r, c, is_cursor, out): i64 {
+    var fgv = grid_fg(r, c);
+    var bgv = grid_bg(r, c);
+    var at  = grid_attr(r, c);
+    # BOLD = bright: standard palette fg tokens 1..8 (index 0..7) -> 9..16.
+    if ((at & ATTR_BOLD) != 0) {
+        if (fgv >= 1) { if (fgv <= 8) { fgv = fgv + 8; } }
+    }
+    var fg = fb__decode(fgv, 1);
+    var bg = fb__decode(bgv, 0);
+    if ((at & ATTR_DIM) != 0) { fg = (fg >> 1) & 0x7F7F7F; }      # halve each channel
+    if ((at & ATTR_REVERSE) != 0) { var t = fg; fg = bg; bg = t; }
+    if ((at & ATTR_HIDDEN) != 0) { fg = bg; }                     # conceal glyph
+    if (is_cursor != 0) { var u = fg; fg = bg; bg = u; }
+    store64(out, fg);
+    store64(out + 8, bg);
+    return 0;
+}
+
+# ---- pixel buffer ------------------------------------------------------
+
+# Plot one pixel (the single bounds-clamped write path). PTY/grid data is
+# untrusted, so every coordinate is checked.
+fn fb__plot(x, y, rgb): i64 {
+    if (fb_buf_ptr == 0) { return 0; }
+    if (x < 0) { return 0; }
+    if (x >= fb_w) { return 0; }
+    if (y < 0) { return 0; }
+    if (y >= fb_h) { return 0; }
+    var off = (y * fb_w + x) * 3;
+    store8(fb_buf_ptr + off, (rgb >> 16) & 255);
+    store8(fb_buf_ptr + off + 1, (rgb >> 8) & 255);
+    store8(fb_buf_ptr + off + 2, rgb & 255);
+    return 0;
+}
+
+fn fb__fill_rect(x, y, w, h, rgb): i64 {
+    var dy = 0;
+    while (dy < h) {
+        var dx = 0;
+        while (dx < w) {
+            fb__plot(x + dx, y + dy, rgb);
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+    return 0;
+}
+
+# Initialize: seed cell metrics, (re)allocate the W*H*3 RGB buffer, zero it
+# (alloc does not), ensure kashi's built-in fonts are loaded, and mark every
+# row dirty so the first fb_render() paints the whole screen. Call after
+# grid_init/term_init (so cols/rows are known) and after alloc_init().
+# Returns 0 on success, -1 on bad size / OOM.
+fn fb_init(cell_w, cell_h): i64 {
+    kashi_font_init();                       # idempotent — built-in fonts ready
+    if (cell_w < 1) { cell_w = 1; }
+    if (cell_h < 1) { cell_h = 1; }
+    # Bound cell metrics so W*H*3 cannot wrap i64 (no real console cell exceeds
+    # this). With cols<=132 / rows<=64 already bounded by the grid, this keeps
+    # fb_w/fb_h small-positive; a genuinely-too-large request then fails cleanly
+    # at alloc() instead of wrapping sz into a tiny, undersized buffer.
+    if (cell_w > 256) { cell_w = 256; }
+    if (cell_h > 256) { cell_h = 256; }
+    fb_cell_w = cell_w;
+    fb_cell_h = cell_h;
+    fb_w = grid_get_cols() * cell_w;
+    fb_h = grid_get_rows() * cell_h;
+    if (fb_w <= 0) { return 0 - 1; }
+    if (fb_h <= 0) { return 0 - 1; }
+    var sz = fb_w * fb_h * 3;
+    if (sz <= 0) { return 0 - 1; }
+    if (sz / 3 != fb_w * fb_h) { return 0 - 1; }   # overflow backstop (defensive)
+    fb_buf_ptr = alloc(sz);
+    if (fb_buf_ptr == 0) { return 0 - 1; }
+    # zero exactly sz bytes: word sweep then byte tail (no over-write assumption)
+    var nwords = sz / 8;
+    var i = 0;
+    while (i < nwords) { store64(fb_buf_ptr + i * 8, 0); i = i + 1; }
+    var j = nwords * 8;
+    while (j < sz) { store8(fb_buf_ptr + j, 0); j = j + 1; }
+    grid_mark_all_dirty();
+    return 0;
+}
+
+# Re-seed cell metrics + re-allocate (e.g. adopting a new font's glyph size).
+fn fb_set_cell_size(cell_w, cell_h): i64 { return fb_init(cell_w, cell_h); }
+
+fn fb_set_default_colors(fg_rgb, bg_rgb): i64 {
+    fb_def_fg = fg_rgb;
+    fb_def_bg = bg_rgb;
+    return 0;
+}
+
+fn fb_set_cursor_style(style): i64 { fb_cursor_style = style; return 0; }
+
+# ---- glyph foreground (kashi seam) -------------------------------------
+
+# Blit codepoint cp's bitmap at cell pixel origin (x_px,y_px) in fg_rgb, set
+# bits only (unset bits leave the already-painted background). Sourced from
+# kashi's freestanding font core: kashi_glyph_row returns one row byte,
+# bit 7 = leftmost pixel. Codepoints with no glyph (control / CJK / combining,
+# outside CP437 0x20..0xFF) yield 0 rows -> nothing drawn. Clamped to the cell
+# box so an oversized glyph never bleeds into a neighbour.
+fn fb__glyph_draw(cp, x_px, y_px, fg_rgb): i64 {
+    var fw = kashi_font_width(fb_font_id);
+    var fh = kashi_font_height(fb_font_id);
+    if (fw <= 0) { return 0; }
+    if (fh <= 0) { return 0; }
+    if (fw > 8) { fw = 8; }                  # one row byte = 8 px (built-ins)
+    if (fw > fb_cell_w) { fw = fb_cell_w; }
+    if (fh > fb_cell_h) { fh = fb_cell_h; }
+    var row = 0;
+    while (row < fh) {
+        var bits = kashi_glyph_row(fb_font_id, cp, row);
+        if (bits != 0) {
+            var col = 0;
+            while (col < fw) {
+                if ((bits & (1 << (7 - col))) != 0) {
+                    fb__plot(x_px + col, y_px + row, fg_rgb);
+                }
+                col = col + 1;
+            }
+        }
+        row = row + 1;
+    }
+    return 0;
+}
+
+# ---- frame -------------------------------------------------------------
+
+# 1 iff the cursor is visible AND lands on cell (r,c) within the active grid.
+fn fb__is_cursor(r, c): i64 {
+    if (term_cursor_visible() == 0) { return 0; }
+    if (r != grid_cursor_row()) { return 0; }
+    if (c != grid_cursor_col()) { return 0; }
+    if (r < 0) { return 0; }
+    if (r >= grid_get_rows()) { return 0; }
+    if (c < 0) { return 0; }
+    if (c >= grid_get_cols()) { return 0; }
+    return 1;
+}
+
+# Paint every dirty row (background + glyph + cursor), clearing each row's
+# dirty bit right after — frame-atomic, single-threaded. Returns the number
+# of rows repainted.
+fn fb_render(): i64 {
+    if (fb_buf_ptr == 0) { return 0; }
+    var rows = grid_get_rows();
+    var cols = grid_get_cols();
+    var out[16];                             # 16 BYTES function-local scratch
+    var painted = 0;
+    var r = 0;
+    while (r < rows) {
+        if (grid_row_dirty(r) != 0) {
+            var py = r * fb_cell_h;
+            var c = 0;
+            while (c < cols) {
+                var px = c * fb_cell_w;
+                fb__resolve(r, c, fb__is_cursor(r, c), &out);
+                var fg = load64(&out);
+                var bg = load64(&out + 8);
+                fb__fill_rect(px, py, fb_cell_w, fb_cell_h, bg);
+                var cp = grid_glyph(r, c);
+                if (cp != 0) {                                    # skip wide spacer
+                    if ((grid_attr(r, c) & ATTR_HIDDEN) == 0) {
+                        fb__glyph_draw(cp, px, py, fg);
+                    }
+                }
+                c = c + 1;
+            }
+            grid_clear_row_dirty(r);
+            painted = painted + 1;
+        }
+        r = r + 1;
+    }
+    return painted;
+}
+
+# Force a full repaint (resize / first frame / backend reattach).
+fn fb_render_full(): i64 {
+    grid_mark_all_dirty();
+    return fb_render();
+}
+
+# ---- PPM (P6) serialization -------------------------------------------
+
+# Write n as ASCII decimal to fd (PPM header has no in-buffer int formatter).
+fn fb__emit_uint(fd, n): i64 {
+    if (n == 0) { return file_write(fd, "0", 1); }
+    var d[24];
+    var k = 0;
+    while (n > 0) { store8(&d + k, 48 + n % 10); n = n / 10; k = k + 1; }
+    var o[24];
+    var j = 0;
+    while (j < k) { store8(&o + j, load8(&d + k - 1 - j)); j = j + 1; }
+    return file_write(fd, &o, k);
+}
+
+# Serialize the painted buffer to a PPM P6 file: "P6\n<w> <h>\n255\n" then
+# raw RGB bytes. Returns bytes of pixel data written, or negative on error.
+# (Only serializes — never touches the grid; the pixel-test verification seam.)
+fn fb_dump_ppm(path): i64 {
+    if (fb_buf_ptr == 0) { return 0 - 1; }
+    var fd = file_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    if (fd < 0) { return fd; }
+    file_write(fd, "P6\n", 3);
+    fb__emit_uint(fd, fb_w);
+    file_write(fd, " ", 1);
+    fb__emit_uint(fd, fb_h);
+    file_write(fd, "\n255\n", 5);
+    var total = fb_w * fb_h * 3;
+    var done = 0;
+    while (done < total) {
+        var n = file_write(fd, fb_buf_ptr + done, total - done);
+        if (n <= 0) { file_close(fd); return 0 - 1; }
+        done = done + n;
+    }
+    file_close(fd);
+    return done;
+}
+
+# ---- accessors (for tests / a future display backend) ------------------
+fn fb_buf(): i64 { return fb_buf_ptr; }
+fn fb_width(): i64 { return fb_w; }
+fn fb_height(): i64 { return fb_h; }

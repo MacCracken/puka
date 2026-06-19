@@ -50,9 +50,25 @@ var grid_pen_attr = 0;     # current SGR pen — applied to printed + erased cel
 var grid_pen_fg = 0;       # 0 = default color
 var grid_pen_bg = 0;
 
+# Per-row damage bitset (one bit per row; GRID_MAX_ROWS=64 fits one u64).
+# The grid is the single writer, so it marks rows dirty at the write sites;
+# the renderer (render/fb.cyr) is a pure read that consumes + clears these
+# bits each frame so it only repaints rows that changed. Single-threaded:
+# pump -> mutate+mark -> render reads/paints/clears, no lock, no torn read.
+var grid_dirty_rows = 0;
+
 # ---- internal cell ops -------------------------------------------------
 
 fn grid__idx(r, c): i64 { return r * GRID_MAX_COLS + c; }
+
+# Mark row r dirty (renderer repaints it next frame). Bounds-guarded against
+# the full backing height so a stray row never corrupts the bitset.
+fn grid__mark_row(r): i64 {
+    if (r < 0) { return 0; }
+    if (r >= GRID_MAX_ROWS) { return 0; }
+    grid_dirty_rows = grid_dirty_rows | (1 << r);
+    return 0;
+}
 
 fn grid_set_cell(r, c, glyph, attr, fg, bg): i64 {
     if (r < 0) { return 0; }
@@ -64,6 +80,7 @@ fn grid_set_cell(r, c, glyph, attr, fg, bg): i64 {
     var cw = (fg & 0xFFFFFFFF) | (bg << 32);
     store64(&grid_g + idx * 8, gw);
     store64(&grid_c + idx * 8, cw);
+    grid__mark_row(r);
     return 0;
 }
 
@@ -112,6 +129,7 @@ fn grid__copy_row(src, dst): i64 {
         store64(&grid_g + (bd + c) * 8, load64(&grid_g + (bs + c) * 8));
         store64(&grid_c + (bd + c) * 8, load64(&grid_c + (bs + c) * 8));
     }
+    grid__mark_row(dst);
     return 0;
 }
 
@@ -144,8 +162,10 @@ fn grid_cursor_set(r, c): i64 {
     if (r >= grid_rows) { r = grid_rows - 1; }
     if (c < 0) { c = 0; }
     if (c >= grid_cols) { c = grid_cols - 1; }
+    grid__mark_row(grid_cur_row);   # old row repaints — clears the block it held
     grid_cur_row = r;
     grid_cur_col = c;
+    grid__mark_row(r);              # new row repaints — draws the block
     return 0;
 }
 fn grid_cursor_row(): i64 { return grid_cur_row; }
@@ -257,6 +277,7 @@ fn grid_insert_cells(r, c, n): i64 {
         store64(&grid_c + (base + dst) * 8, load64(&grid_c + (base + dst - n) * 8));
         dst = dst - 1;
     }
+    grid__mark_row(r);
     grid_erase_cells(r, c, c + n - 1);
     return 0;
 }
@@ -275,7 +296,37 @@ fn grid_delete_cells(r, c, n): i64 {
         store64(&grid_c + (base + src - n) * 8, load64(&grid_c + (base + src) * 8));
         src = src + 1;
     }
+    grid__mark_row(r);
     grid_erase_cells(r, grid_cols - n, grid_cols - 1);
+    return 0;
+}
+
+# ---- damage (per-row dirty bits; consumed by the renderer) -------------
+
+# 1 if row r is dirty (changed since the last clear), else 0.
+fn grid_row_dirty(r): i64 {
+    if (r < 0) { return 0; }
+    if (r >= GRID_MAX_ROWS) { return 0; }
+    return (grid_dirty_rows >> r) & 1;
+}
+
+# Clear row r's dirty bit (the renderer calls this right after painting it).
+fn grid_clear_row_dirty(r): i64 {
+    if (r < 0) { return 0; }
+    if (r >= GRID_MAX_ROWS) { return 0; }
+    grid_dirty_rows = grid_dirty_rows & ((0 - 1) ^ (1 << r));
+    return 0;
+}
+
+# Mark a single row dirty (public). Used by terminal.cyr for state changes
+# that alter a row's appearance without writing a cell — e.g. cursor
+# show/hide (DECTCEM), which must repaint the cursor's row.
+fn grid_mark_row_dirty(r): i64 { return grid__mark_row(r); }
+
+# Mark every active row dirty (forces a full repaint — init / resize).
+fn grid_mark_all_dirty(): i64 {
+    var r = 0;
+    while (r < grid_rows) { grid__mark_row(r); r = r + 1; }
     return 0;
 }
 
@@ -351,6 +402,7 @@ fn grid_resize(rows, cols): i64 {
     grid_scroll_bot = rows - 1;
     if (grid_cur_row >= rows) { grid_cur_row = rows - 1; }
     if (grid_cur_col >= cols) { grid_cur_col = cols - 1; }
+    grid_mark_all_dirty();   # dimensions changed — the whole frame repaints
     return 0;
 }
 
@@ -368,7 +420,9 @@ fn grid_init(rows, cols): i64 {
     grid_pen_attr = 0;
     grid_pen_fg = 0;
     grid_pen_bg = 0;
+    grid_dirty_rows = 0;
     grid_clear_all();
     grid_tabs_default();
+    grid_mark_all_dirty();   # fresh screen — first frame paints everything
     return 0;
 }

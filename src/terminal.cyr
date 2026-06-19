@@ -40,6 +40,10 @@ fn color_rgb(r, g, b): i64 { return COLOR_TRUE | ((r & 255) << 16) | ((g & 255) 
 
 fn term__sync_pen(): i64 { return grid_set_pen(term_attr, term_fg, term_bg); }
 
+# Cursor visibility (DECTCEM) for the renderer — read through this accessor,
+# never the global. 1 = visible, 0 = hidden.
+fn term_cursor_visible(): i64 { return term_cursor_vis; }
+
 # ---- lifecycle ---------------------------------------------------------
 fn term_init(rows, cols): i64 {
     grid_init(rows, cols);
@@ -357,7 +361,15 @@ fn term__dec_mode(set): i64 {
         else { grid_cursor_set(0, 0); }
     }
     if (m == 7) { term_autowrap = set; }                   # DECAWM
-    if (m == 25) { term_cursor_vis = set; }                # DECTCEM
+    if (m == 25) {                                         # DECTCEM (cursor show/hide)
+        if (set != term_cursor_vis) {
+            term_cursor_vis = set;
+            # The renderer is damage-driven and draws the cursor block purely
+            # from visibility; toggling it writes no cell, so dirty the cursor
+            # row or the block ghosts (hide) / fails to reappear (show).
+            grid_mark_row_dirty(grid_cursor_row());
+        }
+    }
     # alt-screen (1049), bracketed paste (2004), mouse (1000..1006): later bites
     return 0;
 }

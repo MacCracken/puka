@@ -62,12 +62,27 @@ non-blocking `pty_pump` into `term_feed`, `pty_write`/`pty_set_winsize`/
 > anticipated turned out unnecessary for resize (fixed-max backing) — it's a
 > deferred optimization, tracked in state.md, not a milestone gate.
 
-### M3 — Framebuffer renderer + glyphs (0.3.0) — first visible terminal
+### M3 — Framebuffer renderer + glyphs (0.3.0) — ✅ shipped 2026-06-18
 
-- **Render** (`render/fb.cyr`) — grid → framebuffer. Linux KMS/DRM for dev, AGNOS `blit`#39 for native.
-- **Glyphs** via **`kashi`** (bitmap console fonts — CP437 + PSF). Color: 16/256/truecolor cell attributes.
-- Damage tracking (dirty cells) so a frame only repaints what changed.
-- **Acceptance**: the grid renders, cursor visible, colors correct, scrolling smooth.
+The first *visible* terminal. **Done:** `src/render/fb.cyr` — a pure read of the
+grid that resolves the full xterm colour model to RGB (default + 16 ANSI + 6×6×6
+cube + grayscale + truecolor; bold=bright / dim / reverse / hidden), paints cell
+backgrounds, blits real CP437 glyphs via **`kashi`** (freestanding `font_data.cyr`
+core, VGA 8×16), draws the cursor block (DECTCEM-aware), tracks **per-row damage**
+(marked at every grid write chokepoint) so a frame repaints only changed rows, and
+serializes to a PPM (P6) image — the headless, pixel-assertable verification seam.
+`tests/render.tcyr` (44 assertions) + `programs/fb_demo.cyr` (→ `puka_frame.ppm`).
+Multi-agent adversarial review closed (2 findings fixed + regression-tested).
+
+> **Scope note:** 0.3.0 ships the platform-agnostic renderer. The **live on-screen
+> display backend** — pushing the pixel buffer to a real surface (Linux KMS/DRM or
+> fbdev for dev, AGNOS `blit`#39 for native) — is folded into **M5**, since AGNOS is
+> the real display target and the buffer→screen edge is a thin blit over the
+> renderer's `fb_buf()` / `fb_width()` / `fb_height()`, not a rewrite.
+
+- **Glyphs** via **`kashi`** — ✅ wired (built-in CP437 fonts; 16/256/truecolor cell colours resolved). Wide CJK cells paint background only until a wider font lands.
+- **Damage tracking** (per-row dirty bits) — ✅.
+- **Acceptance** (renderer core): the grid renders, cursor visible, colours correct, scrolling repaints correctly — ✅ pixel-tested + visually confirmed. On-screen smoothness is exercised once the M5 display backend lands.
 
 ### M4 — Input encoding (0.4.0) — interactive
 
@@ -75,9 +90,10 @@ non-blocking `pty_pump` into `term_feed`, `pty_write`/`pty_set_winsize`/
 - On AGNOS, source keystrokes from the xHCI/HID input path.
 - **Acceptance**: type in puka, the shell echoes and responds; a full interactive session works on Linux.
 
-### M5 — AGNOS-native bring-up (0.5.0) — the proof-app
+### M5 — AGNOS-native bring-up + on-screen display (0.5.0) — the proof-app
 
 - **AGNOS PTY surface** — the kernel-side pty syscalls puka needs (a Cyrius-native gap, analogous to the `net.cyr` / `vani` agnos-backend gaps; grown per the kernel-growth rules, not POSIX `forkpty` emulation).
+- **Display backend** (from M3) — push the renderer's pixel buffer to a real surface: the AGNOS `blit`#39 framebuffer (native, the proof path) + a Linux fbdev/KMS adjunct for the dev host. A thin blit over `fb_buf()` / `fb_width()` / `fb_height()`; the renderer itself is done (M3). Pull forward if an on-screen Linux session is wanted before AGNOS bring-up.
 - Run puka on the AGNOS framebuffer as a real console, launching agnoshi.
 - **Acceptance**: puka boots a shell on AGNOS iron/QEMU and is interactive — the DOOM/tracker-class proof milestone for the terminal.
 

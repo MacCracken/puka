@@ -13,4 +13,13 @@ output = "puka"
 
 [deps]
 stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench"]
+
+# kashi — AGNOS console-font subsystem (sibling crate). M3 sources bitmap
+# glyphs from its FREESTANDING font-data core only (zero stdlib: store8/load8
+# + arithmetic), exactly as the agnos kernel consumes it. The full library
+# face (PSF/BDF/PCF loaders) is deliberately NOT pulled in — built-in CP437
+# fonts (VGA 8x16 / CGA 8x8 / VGA 9x16) cover the renderer's needs.
+[deps.kashi]
+path = "../kashi"
+modules = ["src/font_data.cyr"]
 ---

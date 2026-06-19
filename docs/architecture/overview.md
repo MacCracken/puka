@@ -60,7 +60,12 @@ Two invariants hold this together:
    fuzzable, and keeps the untrusted-input boundary in one auditable place.
 2. **The grid is the single source of truth.** `terminal.cyr` is the only writer;
    the renderer is a pure read of grid state. Any backend (headless text dump,
-   Linux framebuffer, AGNOS framebuffer, future GPU) renders the *same* grid.
+   Linux framebuffer, AGNOS framebuffer, future GPU) renders the *same* grid. The
+   grid also owns the **per-row damage bitset** (marked at every write chokepoint,
+   consumed + cleared by the renderer each frame), so a frame repaints only the
+   rows that changed — kept in the grid, not the renderer, because the writer is
+   the only thing that knows what changed. Single-threaded ordering (pump →
+   mutate+mark → render → clear) makes this lock-free and tear-free.
 
 ## Modules (planned)
 
@@ -71,7 +76,7 @@ Two invariants hold this together:
 | `grid.cyr` | `Cell` / `Row` / `Screen`, cursor, scroll region, tab stops, scrollback ring | M1 |
 | `terminal.cyr` | VT semantics — applies parser actions to the grid (CUP/ED/EL/SGR/DECSTBM/modes/charsets) | M1 |
 | `pty.cyr` | PTY pair allocation, child spawn (explicit argv), read/write loop. Platform-split | M2 (Linux) / M5 (agnos) |
-| `render/fb.cyr` | grid → framebuffer; damage tracking | M3 |
+| `render/fb.cyr` | grid → RGB pixel buffer: colour resolution, glyph blit (kashi), cursor, per-row damage, PPM dump | **M3 ✅ (renderer core)** |
 | `input.cyr` | keyboard/mouse → escape-sequence encoding | M4 |
 | `main.cyr` | wiring: spawn PTY, pump bytes through parser → terminal → grid → render | M2+ |
 
@@ -94,7 +99,7 @@ Per first-party standards, puka depends on AGNOS crates rather than rolling its 
 
 | Need | Crate | When |
 |---|---|---|
-| Bitmap console glyphs (CP437 / PSF) | `kashi` | M3 |
+| Bitmap console glyphs (CP437 / PSF) | `kashi` | **M3 ✅ (wired: freestanding `font_data.cyr` core)** |
 | Scalable / vector glyphs | `rekha` + `sadish` | post-v1.0 |
 | GPU acceleration | `mabda` / `ai-hwaccel` | M6 (optional) |
 | Errors / structured logging | `sakshi` | as needed |
