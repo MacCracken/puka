@@ -28,10 +28,14 @@ fn main(): i64 {
     term_feed_str("\x1b[1;32mpuka\x1b[0m \x1b[1;31mterminal\x1b[0m \xe2\x9c\x93\r\n");
     term_feed_str("VT parser + cell grid + framebuffer, sovereign Cyrius.\r\n");
     term_feed_str("\r\n");
-    term_feed_str("\x1b[7m  reverse video  \x1b[0m   \x1b[44;1;97m  blue bg  \x1b[0m   \x1b[42;30m  green bg  \x1b[0m\r\n");
+    term_feed_str("\x1b[7m  reverse video  \x1b[0m   ");
+    term_feed_str("\x1b[44;1;97m  blue bg  \x1b[0m   ");
+    term_feed_str("\x1b[42;30m  green bg  \x1b[0m\r\n");
     term_feed_str("\r\n");
-    term_feed_str("256-color: \x1b[38;5;208mO\x1b[38;5;82mr\x1b[38;5;51ma\x1b[38;5;201mn\x1b[38;5;226mg\x1b[38;5;46me\x1b[0m    ");
-    term_feed_str("truecolor: \x1b[38;2;255;128;0mC\x1b[38;2;0;200;255my\x1b[38;2;180;120;255mr\x1b[38;2;120;255;120mi\x1b[38;2;255;90;160mus\x1b[0m\r\n");
+    term_feed_str("256-color: \x1b[38;5;208mO\x1b[38;5;82mr\x1b[38;5;51ma");
+    term_feed_str("\x1b[38;5;201mn\x1b[38;5;226mg\x1b[38;5;46me\x1b[0m    ");
+    term_feed_str("truecolor: \x1b[38;2;255;128;0mC\x1b[38;2;0;200;255my\x1b[38;2;180;120;255mr");
+    term_feed_str("\x1b[38;2;120;255;120mi\x1b[38;2;255;90;160mus\x1b[0m\r\n");
     term_feed_str("\r\n");
     term_feed_str("the quick brown fox jumps over the lazy dog  0123456789  !@#$%^&*()\r\n");
     term_feed_str("\r\nthe cursor block sits at the start of this line -> ");

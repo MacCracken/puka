@@ -158,10 +158,10 @@ around the core. Built bite-by-bite, each verified live on Hyprland.
 - ✅ **GPU plumbing foundation** (0.6.2) — the `pgpu_*` seam over `mabda`'s native AMD GFX9 backend: **GPU render → CPU readback → `wl_shm` → Hyprland**, verified live. `mabda` wired as a git dep (3.2.11). Shader-agnostic foundation; **cells still render on CPU `fb.cyr`**.
 - ✅ **Glyph atlas** (0.6.2) — `atlas.cyr` packs kashi's 256 CP437 glyphs (8×16) into a 128×256 RGBA8 coverage texture for GPU sampling (the data the cell renderer will sample).
 - ✅ **Alternate screen** (0.6.2, DEC 1049/1047/47) — M7 conformance pulled forward (`vim`/`less`/`htop`/`tmux` work): a lazily heap-backed buffer swap.
+- ✅ **Scrollback** (0.6.3) — a lazily heap-backed ring (1000 lines, primary screen only) captures lines scrolling off the top; the renderer reads through viewport-aware accessors; **Shift+PageUp/PageDown** scroll, typing snaps to the live bottom.
 
 **Remaining (toward a daily-drivable v1):**
 
-- **Scrollback ring** *(next)* — primary-screen history + a scroll-back viewport; heap ring (like the alt buffer), disabled on the alt screen.
 - **GPU cell renderer** — **PAUSED pending mabda.** Plumbing + atlas are done; blocked on (1) the native RT `va_map` **64 KiB-align fix** *(filed in `mabda/docs/development/issues/2026-06-19-native-rt-vamap-64kib-align-einval.md`)* so puka's padding workaround drops, and (2) ideally a higher-level shading API — mabda has **no instanced-vertex path** (none roadmapped; 3.2.x closes at 3.2.13) and shaders are **hand-assembled SPIR-V**, so the full-screen grid+atlas pass is a large hand-authored effort otherwise. Architecture: a **single full-screen pass** (compute or fullscreen-FS) reading the grid as a **storage buffer** + the atlas as a **texture** → render target → readback → `wl_shm`. CPU `fb.cyr` stays the permanent fallback. Wire into `puka_term` behind a runtime opt-in.
 - **Zero-copy `zwp_linux_dmabuf_v1`** *(deferred)* — blocked on mabda's PRIME/dmabuf-export accessor (Phase D, unscheduled). Until then the GPU path memcpy's into `wl_shm` (no mabda change needed).
 - **Retire the framebuffer/console edges** — delete the superseded `fbdev.cyr`, the `evdev` *device* layer, and `puka_session.cyr`. (`fb.cyr` and the evdev **keymap** — already lifted to `src/input/keymap.cyr` in 0.6.0 — stay and are reused.)
@@ -171,7 +171,7 @@ around the core. Built bite-by-bite, each verified live on Hyprland.
 
 ### M7 — Conformance + polish (0.7.0 → 0.9.0)
 
-- Full vttest / `ctlseqs` conformance: scrollback ring, origin mode, charset switching (DEC special graphics / `ESC ( B`), mouse tracking (SGR), DA/DSR query responses, bracketed-paste edge cases, grapheme clustering, selection/clipboard (`wl_data_device`). *(The alternate screen — DEC 1049 — already shipped in 0.6.2.)*
+- Full vttest / `ctlseqs` conformance: origin mode, charset switching (DEC special graphics / `ESC ( B`), mouse tracking (SGR), DA/DSR query responses, bracketed-paste edge cases, grapheme clustering, selection/clipboard (`wl_data_device`). *(Alternate screen — DEC 1049 — shipped in 0.6.2; scrollback in 0.6.3.)*
 - Fuzz both the VT parser AND the **Wayland wire parser** (a second untrusted-input boundary — compositor messages) against malformed input.
 
 ### M8 — Hardening + v1.0

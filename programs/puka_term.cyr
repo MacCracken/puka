@@ -153,10 +153,23 @@ fn main(): i64 {
             if ((ev & WIN_EV_CLOSE) != 0) { alive = 0; }
             if ((ev & WIN_EV_RESIZE) != 0) { puka__resize(win); }   # reflow + refit + repaint
         }
-        while (win_next_key(win, &krec) == 1) {       # keyboard -> child
+        while (win_next_key(win, &krec) == 1) {       # keyboard -> child / scrollback
             if (load64(&krec + 8) == 1) {             # press (value 1)
-                var n = input_from_keycode(load64(&krec), load64(&krec + 16), &kbuf);
-                if (n > 0) { pty_write(&kbuf, n); }
+                var code = load64(&krec);
+                var mods = load64(&krec + 16);
+                var handled = 0;
+                if ((mods & MOD_SHIFT) != 0) {        # Shift+PageUp/PageDown scroll history
+                    var page = grid_get_rows() - 1;
+                    if (page < 1) { page = 1; }
+                    if (code == 104) { grid_scroll_view(page); handled = 1; }       # PageUp → back
+                    if (code == 109) { grid_scroll_view(0 - page); handled = 1; }   # PageDown → forward
+                }
+                if (handled == 1) { puka__paint(win); }   # repaint at the new viewport offset
+                else {
+                    if (grid_view_off_get() != 0) { grid_view_reset(); puka__paint(win); }  # typing → live
+                    var n = input_from_keycode(code, mods, &kbuf);
+                    if (n > 0) { pty_write(&kbuf, n); }
+                }
             }
         }
         var rev_pty = (load32(&pfds + 12) >> 16) & 0xFFFF;

@@ -107,9 +107,9 @@ fn fb__decode(val, is_fg): i64 {
 # cursor (cursor reuses the reverse swap, so SGR-reverse under the cursor
 # double-swaps back to normal — matching xterm).
 fn fb__resolve(r, c, is_cursor, out): i64 {
-    var fgv = grid_fg(r, c);
-    var bgv = grid_bg(r, c);
-    var at  = grid_attr(r, c);
+    var fgv = grid_vfg(r, c);                # viewport-aware (history when scrolled back,
+    var bgv = grid_vbg(r, c);                # live grid at the bottom)
+    var at  = grid_vattr(r, c);
     # BOLD = bright: standard palette fg tokens 1..8 (index 0..7) -> 9..16.
     if ((at & ATTR_BOLD) != 0) {
         if (fgv >= 1) { if (fgv <= 8) { fgv = fgv + 8; } }
@@ -267,6 +267,7 @@ fn fb__glyph_draw(cp, x_px, y_px, fg_rgb): i64 {
 
 # 1 iff the cursor is visible AND lands on cell (r,c) within the active grid.
 fn fb__is_cursor(r, c): i64 {
+    if (grid_view_off_get() != 0) { return 0; }       # no cursor while scrolled into history
     if (term_cursor_visible() == 0) { return 0; }
     if (r != grid_cursor_row()) { return 0; }
     if (c != grid_cursor_col()) { return 0; }
@@ -297,9 +298,9 @@ fn fb_render(): i64 {
                 var fg = load64(&out);
                 var bg = load64(&out + 8);
                 fb__fill_rect(px, py, fb_cell_w, fb_cell_h, bg);
-                var cp = grid_glyph(r, c);
+                var cp = grid_vglyph(r, c);
                 if (cp != 0) {                                    # skip wide spacer
-                    if ((grid_attr(r, c) & ATTR_HIDDEN) == 0) {
+                    if ((grid_vattr(r, c) & ATTR_HIDDEN) == 0) {
                         fb__glyph_draw(cp, px, py, fg);
                     }
                 }

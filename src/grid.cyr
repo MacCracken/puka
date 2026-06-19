@@ -21,6 +21,7 @@ enum GridDim {
     GRID_MAX_COLS = 480;   # 3840 px / 8 px-cell = 4K width (was 132 = DECCOLM)
     GRID_MAX_ROWS = 144;   # 2304 px / 16 px-cell ≥ 4K height (was 64; 1080p is 67)
     GRID_DIRTY_WORDS = 3;  # ⌈144/64⌉ — per-row damage bitset spans this many u64
+    SCROLLBACK_LINES = 1000; # primary-screen history ring depth (heap, lazily allocated)
 }
 
 # SGR attribute flag bits (stored in the glyph word's high half).
@@ -236,6 +237,15 @@ fn grid_scroll_down_in(top, bot, n): i64 {
 
 # Scroll the active scroll-region up / down (SU/SD, LF/RI at the margin).
 fn grid_scroll_up(n): i64 {
+    # Capture lines leaving the TOP of the screen into scrollback — only when the
+    # region starts at row 0 (real screen top) and we're on the primary screen.
+    if (grid_scroll_top == 0) { if (grid_alt_active == 0) {
+        var cap = grid_scroll_bot + 1;               # lines available above the bottom margin
+        var k = n;
+        if (k > cap) { k = cap; }
+        var i = 0;
+        while (i < k) { grid__sb_push(i); i = i + 1; }
+    } }
     return grid_scroll_up_in(grid_scroll_top, grid_scroll_bot, n);
 }
 fn grid_scroll_down(n): i64 {
@@ -454,8 +464,80 @@ fn grid_alt_screen(enter): i64 {
     return 0;
 }
 
+# ---- scrollback ring + viewport (primary screen only) ------------------
+# Lines that scroll off the TOP of the screen (full-screen scroll-up, primary
+# screen) are retained in a lazily heap-allocated ring of SCROLLBACK_LINES rows
+# (full-width: glyph|attr + fg|bg words per cell, same layout as grid_g/grid_c).
+# A viewport offset lets the renderer show history: grid_view_off lines scrolled
+# back from the live bottom (0 = live). The alt screen has no scrollback.
+var grid_sb_g = 0;          # heap ring of glyph|attr words (SCROLLBACK_LINES * GRID_MAX_COLS)
+var grid_sb_c = 0;          # heap ring of fg|bg words
+var grid_sb_count = 0;      # lines currently retained (0..SCROLLBACK_LINES)
+var grid_sb_head = 0;       # next write slot (ring)
+var grid_view_off = 0;      # viewport scrollback offset (0 = live bottom)
+
+# Push live grid row `srcrow` into the ring (called as it scrolls off the top).
+fn grid__sb_push(srcrow): i64 {
+    if (grid_sb_g == 0) {                            # lazy alloc on first scroll-off
+        grid_sb_g = alloc(SCROLLBACK_LINES * GRID_MAX_COLS * 8);
+        grid_sb_c = alloc(SCROLLBACK_LINES * GRID_MAX_COLS * 8);
+        if (grid_sb_g == 0) { return 0 - 1; }
+        if (grid_sb_c == 0) { return 0 - 1; }
+    }
+    var dbase = grid_sb_head * GRID_MAX_COLS;
+    var sbase = srcrow * GRID_MAX_COLS;
+    var c = 0;
+    while (c < GRID_MAX_COLS) {
+        store64(grid_sb_g + (dbase + c) * 8, load64(&grid_g + (sbase + c) * 8));
+        store64(grid_sb_c + (dbase + c) * 8, load64(&grid_c + (sbase + c) * 8));
+        c = c + 1;
+    }
+    grid_sb_head = (grid_sb_head + 1) % SCROLLBACK_LINES;
+    if (grid_sb_count < SCROLLBACK_LINES) { grid_sb_count = grid_sb_count + 1; }
+    # If scrolled back, advance the offset so the view stays anchored on the same
+    # history lines as new ones push in below.
+    if (grid_view_off > 0) { if (grid_view_off < grid_sb_count) { grid_view_off = grid_view_off + 1; } }
+    return 0;
+}
+
+# Move the viewport: delta>0 scrolls back into history, <0 toward the live bottom.
+fn grid_scroll_view(delta): i64 {
+    var no = grid_view_off + delta;
+    if (no < 0) { no = 0; }
+    if (no > grid_sb_count) { no = grid_sb_count; }
+    if (no != grid_view_off) { grid_view_off = no; grid_mark_all_dirty(); }
+    return 0;
+}
+fn grid_view_reset(): i64 {                          # snap to the live bottom (on user input)
+    if (grid_view_off != 0) { grid_view_off = 0; grid_mark_all_dirty(); }
+    return 0;
+}
+fn grid_view_off_get(): i64 { return grid_view_off; }
+fn grid_sb_count_get(): i64 { return grid_sb_count; }
+
+# Viewport cell access for the renderer: display row vr (0..rows-1) → the raw word
+# from scrollback history (if scrolled back) or the live grid. At view_off=0 this
+# is exactly the live grid row vr (renderer behaviour unchanged at the bottom).
+fn grid__view_gword(vr, c): i64 {
+    var idx = grid_sb_count - grid_view_off + vr;    # combined-buffer line index
+    if (idx >= grid_sb_count) { return load64(&grid_g + ((idx - grid_sb_count) * GRID_MAX_COLS + c) * 8); }
+    var slot = (grid_sb_head - grid_sb_count + idx + SCROLLBACK_LINES) % SCROLLBACK_LINES;
+    return load64(grid_sb_g + (slot * GRID_MAX_COLS + c) * 8);
+}
+fn grid__view_cword(vr, c): i64 {
+    var idx = grid_sb_count - grid_view_off + vr;
+    if (idx >= grid_sb_count) { return load64(&grid_c + ((idx - grid_sb_count) * GRID_MAX_COLS + c) * 8); }
+    var slot = (grid_sb_head - grid_sb_count + idx + SCROLLBACK_LINES) % SCROLLBACK_LINES;
+    return load64(grid_sb_c + (slot * GRID_MAX_COLS + c) * 8);
+}
+fn grid_vglyph(vr, c): i64 { return grid__view_gword(vr, c) & 0xFFFFFFFF; }
+fn grid_vattr(vr, c): i64 { return (grid__view_gword(vr, c) >> 32) & 0xFFFF; }
+fn grid_vfg(vr, c): i64 { return grid__view_cword(vr, c) & 0xFFFFFFFF; }
+fn grid_vbg(vr, c): i64 { return (grid__view_cword(vr, c) >> 32) & 0xFFFFFFFF; }
+
 fn grid_init(rows, cols): i64 {
     grid_alt_active = 0;                             # always boot on the primary screen
+    grid_sb_count = 0; grid_sb_head = 0; grid_view_off = 0;   # clear scrollback history
     if (rows > GRID_MAX_ROWS) { rows = GRID_MAX_ROWS; }
     if (cols > GRID_MAX_COLS) { cols = GRID_MAX_COLS; }
     if (rows < 1) { rows = 1; }

@@ -5,19 +5,21 @@
 
 ## Version
 
-**0.6.2** — **cut 2026-06-19, awaiting user tag.** Two tracks on the Wayland desktop
-terminal: the **GPU plumbing foundation** (M6 bite 7 — the `pgpu_*` seam over mabda's
-native AMD backend; GPU render → CPU readback → `wl_shm` → Hyprland verified live, 120
-frames, pixel-exact; mabda wired as a 3.2.11 git dep) + the **kashi glyph atlas** (bite
-8a, `tests/atlas.tcyr`), and the **alternate screen** (DEC 1049/1047/47 — `vim`/`less`/
-`tmux` now work; lazily heap-backed buffer swap). The GPU *cell renderer* (bite 8) is
-**paused pending mabda** (the 64 KiB-align `va_map` fix + a higher-level shading API);
-the daily driver still renders cells on CPU `fb.cyr`. Gate: **461 headless tests pass**
-(was 430; +17 alt-screen, +14 atlas), VERSION↔cyrius.cyml↔CHANGELOG all `0.6.2`. The GPU
-pipe is verified by running `gpu_win_probe` on Hyprland (live, not in the headless
-suite). **AGNOS-native** is post-v1.0; the **command center** is v3. (0.6.1 = resize +
-shell-config; 0.6.0 = Wayland MVP; 0.5.0 = M5 framebuffer [superseded]; 0.4.0 = M4
-input; 0.3.0 = M3 renderer; 0.2.0 = M2 PTY; 0.1.0 = M1.)
+**0.6.3** — **cut 2026-06-19, awaiting user tag.** **Scrollback**: a lazily
+heap-allocated ring (`SCROLLBACK_LINES`=1000, primary screen only) captures lines that
+scroll off the top; the renderer reads through viewport-aware accessors (`grid_v*`) —
+live grid at the bottom, history when scrolled back, cursor hidden while back.
+`puka_term` binds **Shift+PageUp/PageDown** (typing snaps to the live bottom). Also
+carried in this cut: the **docs/roadmap handoff sweep** (README + getting-started
+rewritten for the Wayland reality, roadmap M6 reorganized, ADR-0003 records the
+framebuffer→Wayland pivot) and **test-harness entry hygiene** (compliant
+`_entry();`/`SYS_EXIT` across all `tests/*` + `src/test.cyr`). Gate: **477 headless
+tests pass** (was 461; +16 scrollback), VERSION↔cyrius.cyml↔CHANGELOG all `0.6.3`,
+`cyrlint` clean across `src/` + `programs/`. The GPU *cell renderer* (bite 8) remains
+**paused pending mabda**; the daily driver renders cells on CPU `fb.cyr`. **AGNOS-native**
+is post-v1.0; the **command center** is v3. (0.6.2 = GPU foundation + alt-screen; 0.6.1 =
+resize + shell-config; 0.6.0 = Wayland MVP; 0.5.0 = M5 framebuffer [superseded]; 0.4.0 =
+M4 input; 0.3.0 = M3 renderer; 0.2.0 = M2 PTY; 0.1.0 = M1.)
 
 ## Toolchain
 
@@ -26,11 +28,11 @@ input; 0.3.0 = M3 renderer; 0.2.0 = M2 PTY; 0.1.0 = M1.)
 ## Source
 
 - `src/parser.cyr` — VT parser (Williams DEC ANSI state machine). Pure: `vt_feed(byte)` → one typed event.
-- `src/grid.cyr` — cell grid (the screen, single source of truth): cells, cursor, scroll region, tabs, scroll/erase/insert/delete primitives. Ceilings **`GRID_MAX_COLS=480` / `GRID_MAX_ROWS=144`** (4K window at 8×16); the per-row damage bitset is a **3-word array** (`GRID_DIRTY_WORDS`) so rows past 64 work. `grid_alt_screen` swaps the active cell buffer with a **lazily heap-allocated** backup (the alternate-screen primitive — no static cost until used).
+- `src/grid.cyr` — cell grid (the screen, single source of truth): cells, cursor, scroll region, tabs, scroll/erase/insert/delete primitives. Ceilings **`GRID_MAX_COLS=480` / `GRID_MAX_ROWS=144`** (4K window at 8×16); the per-row damage bitset is a **3-word array** (`GRID_DIRTY_WORDS`) so rows past 64 work. `grid_alt_screen` swaps the active cell buffer with a **lazily heap-allocated** backup (the alternate-screen primitive — no static cost until used). **Scrollback**: a lazily heap-allocated ring (`SCROLLBACK_LINES`=1000, primary only) captures top lines on `grid_scroll_up`; `grid_scroll_view`/`grid_view_reset` move a viewport offset; `grid_v*` accessors serve history-or-live cells to the renderer.
 - `src/unicode.cyr` — UTF-8 decode/encode + `char_width` (wcwidth, UAX#11).
 - `src/terminal.cyr` — the driver: parser events → grid mutations (cursor/erase/SGR/scroll/modes/resize) + headless text renderer. Exposes `term_cursor_visible()` (DECTCEM, dirties the cursor row on toggle), `term_app_cursor_get()` (DECCKM) and `term_bracket_paste_get()` (mode 2004) for the renderer/encoder. **Alternate screen** (DEC 1049/1047/47) via `term__alt_screen` (save cursor → swap → clear → home / restore).
 - `src/pty.cyr` — PTY + process plumbing (Linux): open/spawn/pump/write/winsize/wait/close. The child **inherits the full parent environment** (`/proc/self/environ`) with `TERM` overridden to `xterm-256color`; `pty_login_argv0` optionally sets argv[0] (e.g. `-zsh`) for a login shell. Linux-guarded; the agnos backend is post-v1.0.
-- `src/render/fb.cyr` — framebuffer renderer (M3): grid → RGB pixel buffer. Pure read of the grid; colour resolution (default/16/256/truecolor + bold/dim/reverse/hidden), background paint, kashi glyph blit (VGA 8×16), cursor block, per-row damage consumption, PPM (P6) dump. Integer-only, every pixel write bounds-clamped. `fb_resize()` refits the buffer to new grid dims (**grow-only** — reused below the high-water mark, the allocator has no `free`).
+- `src/render/fb.cyr` — framebuffer renderer (M3): grid → RGB pixel buffer. Pure read of the grid; colour resolution (default/16/256/truecolor + bold/dim/reverse/hidden), background paint, kashi glyph blit (VGA 8×16), cursor block, per-row damage consumption, PPM (P6) dump. Integer-only, every pixel write bounds-clamped. `fb_resize()` refits the buffer to new grid dims (**grow-only** — reused below the high-water mark, the allocator has no `free`). Reads cells through the **viewport-aware** `grid_v*` accessors (history when scrolled back; identical to the live grid at the bottom) and hides the cursor while scrolled back.
 - `src/input.cyr` — keyboard→escape-sequence encoder (M4): `input_encode(sym, mods, out)` (disjoint keysym range; xterm modifier formula via `input__xtmod`) + `input_paste(text, len, cap, out)` (bracketed-paste 2004 wrap + ESC/0x9B strip + cap bound). Pure; reads terminal modes via getters.
 - **Desktop window backend (M6 / 0.6.0) — the live Wayland edge:**
   - `src/platform/window.cyr` — the cross-platform `win_*` seam (open / present_begin / present_commit / poll_events / next_key / **resize_apply** / close). `win_poll_events` raises `WIN_EV_RESIZE` on a configured size change; `win_resize_apply` adopts it + refits the buffer. Platform-generic names → extracts to `aethersafha`. The engine never references `src/platform/`; mabda's GPU ctx is passed *through* `win_open`.
@@ -54,7 +56,7 @@ marked at every write chokepoint and consumed by the renderer
 
 ## Tests
 
-- `tests/parser.tcyr` (70), `tests/grid.tcyr` (76, resize + per-row damage + **multi-word bitset rows≥64**), `tests/unicode.tcyr` (28), `tests/terminal.tcyr` (72, + DECCKM/2004 getters + **alt-screen 1049/1047/47**), `tests/render.tcyr` (54 — palette/resolve/paint/glyph/cursor/PPM + `fb_resize` grow/shrink), `tests/atlas.tcyr` (14 — kashi glyph atlas vs `kashi_glyph_row`, bit-for-bit), `tests/input.tcyr` (67 — byte-exact + `vt_feed` round-trips + paste), `tests/fbdev.tcyr` (25 — pixel pack + stride/clamp blit vs a fake fb), `tests/evdev.tcyr` (49 — synthetic-event decode + L/R modifiers), `tests/pty.tcyr` (2) + `tests/input_pty.tcyr` (2, real PTY echo — both skip-clean), `tests/puka.tcyr` (2 smoke) — **461 assertions, all green** (`cyrius test`).
+- `tests/parser.tcyr` (70), `tests/grid.tcyr` (92, resize + per-row damage + multi-word bitset rows≥64 + **scrollback ring/viewport**), `tests/unicode.tcyr` (28), `tests/terminal.tcyr` (72, + DECCKM/2004 getters + **alt-screen 1049/1047/47**), `tests/render.tcyr` (54 — palette/resolve/paint/glyph/cursor/PPM + `fb_resize` grow/shrink), `tests/atlas.tcyr` (14 — kashi glyph atlas vs `kashi_glyph_row`, bit-for-bit), `tests/input.tcyr` (67 — byte-exact + `vt_feed` round-trips + paste), `tests/fbdev.tcyr` (25 — pixel pack + stride/clamp blit vs a fake fb), `tests/evdev.tcyr` (49 — synthetic-event decode + L/R modifiers), `tests/pty.tcyr` (2) + `tests/input_pty.tcyr` (2, real PTY echo — both skip-clean), `tests/puka.tcyr` (2 smoke) — **477 assertions, all green** (`cyrius test`).
 - `tests/puka.bcyr` / `tests/puka.fcyr` — bench / fuzz stubs (fuzzing the parser against adversarial input is the M-hardening target).
 - **The Wayland subsystem (M6) has no headless tests** — it needs a live compositor, so it is verified by running `programs/puka_term.cyr` on Hyprland (the pure `wire.cyr` codec gets unit tests against captured byte-vectors in M7). The 410 above are the engine + framebuffer cores.
 
@@ -62,7 +64,7 @@ marked at every write chokepoint and consumed by the renderer
 
 - **Large static data warning** (~1.2MB): grid backing store (~1.08MB — two `480×144` u64 cell arrays, raised in bite 6 from 132×64) + kashi's font BSS (~99KB — its glyph tables are u64-unit byte arrays). The renderer's pixel buffer + the `wl_shm` present buffer are **heap/memfd-allocated** (grow-only), not static. Acceptable for a desktop binary; heap-allocating the grid remains a deferred optimization (would also let `GRID_MAX_*` grow without BSS cost).
 - **Wide CJK glyphs render blank**: kashi's built-in fonts cover CP437 (0x20..0xFF) only, so a width-2 cell paints its background but no glyph until a wider font (PSF/runtime-loaded or `rekha`) lands. The grid/width handling is already correct.
-- Deferred (M7 conformance / post-v1.0): DA/DSR query responses, charset designators (ESC ( B), scrollback ring, origin-mode edge cases, mouse tracking, grapheme clustering; non-US keymaps + CapsLock in evdev; AGNOS-native edges (display/input/PTY) are post-v1.0. **Alt-screen (1049/1047/47) is done.**
+- Deferred (M7 conformance / post-v1.0): DA/DSR query responses, charset designators (ESC ( B), origin-mode edge cases, mouse tracking, grapheme clustering, selection/clipboard; non-US keymaps + CapsLock in evdev; AGNOS-native edges (display/input/PTY) are post-v1.0. **Alt-screen (1049/1047/47) and scrollback are done.**
 
 ## Dependencies
 
@@ -96,8 +98,9 @@ atlas** (bite 8a), and the **alternate screen** (DEC 1049). In flight:
    but the native path needs the **64 KiB-align `va_map` fix** (filed) and ideally a
    higher-level shading API (no instanced path; a full-screen grid+atlas shader is
    otherwise hand-assembled SPIR-V). Resume when those land. CPU `fb.cyr` renders cells.
-2. **Conformance (M7 pulled forward)** — alt-screen ✅; **scrollback** next, then charsets
-   (ESC ( B), mouse tracking, DA/DSR responses. The daily-driver gaps for vim/less/tmux.
+2. **Conformance (M7 pulled forward)** — alt-screen ✅, scrollback ✅; next: charset
+   designators (ESC ( B), mouse tracking (SGR), DA/DSR responses, selection/clipboard
+   (`wl_data_device`). The remaining daily-driver gaps for vim/less/tmux.
 3. **Retire the framebuffer edges** (bite 10) + a hardening audit of the Wayland wire
    parser (the new untrusted-input boundary).
 

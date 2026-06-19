@@ -4,6 +4,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.3] — 2026-06-19
+
+**Scrollback.** Lines that scroll off the top of the primary screen are retained and
+viewable — **Shift+PageUp/PageDown** scrolls through history; typing snaps back to the
+live bottom. Plus the docs/roadmap handoff sweep and test-harness entry hygiene from
+the same cycle.
+
+### Added
+- **Scrollback ring + viewport** — a lazily heap-allocated ring (`SCROLLBACK_LINES`=1000, primary screen only — the alt screen has none) captures lines scrolling off the top (`grid_scroll_up` when the region starts at row 0). The renderer (`fb.cyr`) reads through viewport-aware accessors (`grid_vglyph`/`grid_vfg`/…) — identical to the live grid at the bottom, history when scrolled back; the cursor hides while scrolled back. The viewport stays anchored as new lines push in. `puka_term`: **Shift+PageUp/PageDown** scroll by a page; any keystroke to the child resets to the live bottom. 16 conformance assertions in `tests/grid.tcyr` (capture, viewport mapping, anchoring, alt-screen exclusion, reset).
+
 ### Changed
 - **Docs + roadmap handoff sweep** — README and `getting-started.md` rewritten for the 0.6.2 Wayland-desktop reality (build/run `puka_term` on Hyprland, real architecture + deps, `/dev/fb0` warning); roadmap M6 reorganized into shipped-by-version vs remaining (GPU cell renderer marked **paused pending mabda**, bite-10 narrowed, alt-screen recorded); `overview.md` data-flow + module table refreshed; new **ADR-0003** records the framebuffer-console → Wayland-desktop pivot.
 - **Test-harness entry hygiene** — every `tests/*.{tcyr,bcyr,fcyr}` + `src/test.cyr` now use the compliant `_entry();` + `SYS_EXIT` pattern (was `var X = main(); syscall(60, …)`), matching the programs and CLAUDE.md. No behaviour change; 461 assertions still green.

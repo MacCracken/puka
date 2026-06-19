@@ -32,7 +32,7 @@ fn emit_str(s): i64 { syscall(1, 1, s, strlen(s)); return 0; }
 fn main(): i64 {
     alloc_init();
 
-    var kbd_path = "/dev/input/event0";       # TODO(argv): pick YOUR keyboard's eventN
+    var kbd_path = "/dev/input/event0";  # eventN for YOUR keyboard (superseded; retire bite 10, roadmap)
 
     # (1) framebuffer
     if (fbdev_open() < 0) { emit_str("puka_session: no /dev/fb0 (need a Linux VT) — exiting\n"); return 0; }
