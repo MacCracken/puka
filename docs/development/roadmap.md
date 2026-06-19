@@ -154,8 +154,8 @@ on Hyprland:
 - **Bite 1** ✅ — speak the Wayland wire protocol: connect + `wl_registry` roundtrip (68 globals enumerated on Hyprland), SCM_RIGHTS fd-passing.
 - **Bite 2** ✅ — a titled, mapped window: bind `wl_compositor`/`wl_shm`/`xdg_wm_base`, the xdg-shell configure/ack lifecycle, a memfd-backed `wl_shm` buffer.
 - **Bite 3** ✅ — the grid rendered into the window (`fb.cyr` → XRGB8888 → `wl_shm`; kashi glyphs, SGR colour, cursor).
-- **Bites 4–5** ✅ (**0.6.0**) — the interactive MVP: the `poll()` loop over the Wayland fd + the PTY master hosting `/bin/sh`; `wl_keyboard` → `input_encode` → child (raw evdev keycodes, no +8); damage-aware repaint (only changed rows).
-- **Bite 6** — window **resize** (reflow on `xdg_toplevel.configure` → `term_resize` + `pty_set_winsize`); raise the grid ceilings (`GRID_MAX_*`) so a maximized window isn't letterboxed.
+- **Bites 4–5** ✅ (**0.6.0**) — the interactive MVP: the `poll()` loop over the Wayland fd + the PTY master hosting the user's `$SHELL` (login shell, full env inheritance); `wl_keyboard` → `input_encode` → child (raw evdev keycodes, no +8); damage-aware repaint (only changed rows).
+- **Bite 6** ✅ — window **resize**: `xdg_toplevel.configure` → `WIN_EV_RESIZE` → `win_resize_apply` (refit `wl_shm`) → `term_resize` + `fb_resize` + `pty_set_winsize` + full repaint. Grid ceilings raised `GRID_MAX_COLS` 132→**480** / `GRID_MAX_ROWS` 64→**144** (4K; damage bitset now a 3-word array); buffers grow-only (allocator has no `free`).
 - **Bites 7–8** — **mabda GPU** rendering: a kashi glyph atlas + an instanced cell-quad pipeline → a GTT render target, presented via `wl_shm`, then **zero-copy `zwp_linux_dmabuf_v1`** (needs a ~30-line `mabda` dmabuf-export accessor). `wl_shm` software rendering stays the permanent non-AMD fallback.
 - **Bite 10** — retire the 0.5.0 framebuffer edges; lift the keymap table into `src/input/keymap.cyr`.
 - **Cross-plat:** the `win_*` seam takes X11 / macOS / AGNOS backends later; the Wayland code extracts to **`aethersafha`** when that crate becomes a real second consumer.

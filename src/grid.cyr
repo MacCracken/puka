@@ -18,8 +18,9 @@
 # terminal.cyr before calling in.
 
 enum GridDim {
-    GRID_MAX_COLS = 132;   # DECCOLM max width
-    GRID_MAX_ROWS = 64;    # generous height ceiling
+    GRID_MAX_COLS = 480;   # 3840 px / 8 px-cell = 4K width (was 132 = DECCOLM)
+    GRID_MAX_ROWS = 144;   # 2304 px / 16 px-cell ≥ 4K height (was 64; 1080p is 67)
+    GRID_DIRTY_WORDS = 3;  # ⌈144/64⌉ — per-row damage bitset spans this many u64
 }
 
 # SGR attribute flag bits (stored in the glyph word's high half).
@@ -35,10 +36,10 @@ enum GridAttr {
 }
 
 # Backing store. Module-global => GRID_MAX_COLS*GRID_MAX_ROWS u64 each
-# (8448 cells -> ~66KB per word array). Index = row*GRID_MAX_COLS + col.
-var grid_g[8448];   # glyph|attr words
-var grid_c[8448];   # fg|bg words
-var grid_tabs[132]; # tab-stop flags, one byte per column (store8)
+# (480*144 = 69120 cells -> ~540KB per word array). Index = row*GRID_MAX_COLS + col.
+var grid_g[69120];  # glyph|attr words
+var grid_c[69120];  # fg|bg words
+var grid_tabs[480]; # tab-stop flags, one byte per column (store8)
 
 var grid_rows = 0;
 var grid_cols = 0;
@@ -50,12 +51,12 @@ var grid_pen_attr = 0;     # current SGR pen — applied to printed + erased cel
 var grid_pen_fg = 0;       # 0 = default color
 var grid_pen_bg = 0;
 
-# Per-row damage bitset (one bit per row; GRID_MAX_ROWS=64 fits one u64).
-# The grid is the single writer, so it marks rows dirty at the write sites;
-# the renderer (render/fb.cyr) is a pure read that consumes + clears these
+# Per-row damage bitset — GRID_DIRTY_WORDS u64 (bit r = row r dirty; word r/64,
+# bit r%64). The grid is the single writer, so it marks rows dirty at the write
+# sites; the renderer (render/fb.cyr) is a pure read that consumes + clears these
 # bits each frame so it only repaints rows that changed. Single-threaded:
 # pump -> mutate+mark -> render reads/paints/clears, no lock, no torn read.
-var grid_dirty_rows = 0;
+var grid_dirty_rows[3];   # GRID_DIRTY_WORDS
 
 # ---- internal cell ops -------------------------------------------------
 
@@ -66,7 +67,9 @@ fn grid__idx(r, c): i64 { return r * GRID_MAX_COLS + c; }
 fn grid__mark_row(r): i64 {
     if (r < 0) { return 0; }
     if (r >= GRID_MAX_ROWS) { return 0; }
-    grid_dirty_rows = grid_dirty_rows | (1 << r);
+    var w = r / 64;
+    var bit = r % 64;
+    store64(&grid_dirty_rows + w * 8, load64(&grid_dirty_rows + w * 8) | (1 << bit));
     return 0;
 }
 
@@ -307,14 +310,18 @@ fn grid_delete_cells(r, c, n): i64 {
 fn grid_row_dirty(r): i64 {
     if (r < 0) { return 0; }
     if (r >= GRID_MAX_ROWS) { return 0; }
-    return (grid_dirty_rows >> r) & 1;
+    var w = r / 64;
+    var bit = r % 64;
+    return (load64(&grid_dirty_rows + w * 8) >> bit) & 1;
 }
 
 # Clear row r's dirty bit (the renderer calls this right after painting it).
 fn grid_clear_row_dirty(r): i64 {
     if (r < 0) { return 0; }
     if (r >= GRID_MAX_ROWS) { return 0; }
-    grid_dirty_rows = grid_dirty_rows & ((0 - 1) ^ (1 << r));
+    var w = r / 64;
+    var bit = r % 64;
+    store64(&grid_dirty_rows + w * 8, load64(&grid_dirty_rows + w * 8) & ((0 - 1) ^ (1 << bit)));
     return 0;
 }
 
@@ -420,7 +427,8 @@ fn grid_init(rows, cols): i64 {
     grid_pen_attr = 0;
     grid_pen_fg = 0;
     grid_pen_bg = 0;
-    grid_dirty_rows = 0;
+    var dw = 0;
+    while (dw < GRID_DIRTY_WORDS) { store64(&grid_dirty_rows + dw * 8, 0); dw = dw + 1; }
     grid_clear_all();
     grid_tabs_default();
     grid_mark_all_dirty();   # fresh screen — first frame paints everything

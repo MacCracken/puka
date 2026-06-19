@@ -93,6 +93,22 @@ fn puka__drain_pty(): i64 {
     return total;
 }
 
+# Adopt a compositor resize: refit the present buffer, reflow the grid + the
+# renderer, SIGWINCH the child with the new (clamped) dims, then repaint fully.
+fn puka__resize(win): i64 {
+    if (win_resize_apply(win) < 0) { return 0 - 1; }   # new win_w/win_h + shm refit
+    var cols = win_w / 8;
+    var rows = win_h / 16;
+    if (cols < 1) { cols = 1; }
+    if (rows < 1) { rows = 1; }
+    term_resize(rows, cols);                            # clamps to GRID_MAX_* internally
+    fb_resize();                                        # refit the pixel buffer to the grid
+    pty_set_winsize(pty_master, grid_get_rows(), grid_get_cols());   # SIGWINCH the child
+    shm_fill(0x000000);                                # clear the new buffer + any margins
+    puka__paint(win);                                  # full repaint (resize marked all dirty)
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     wl__emit_str("puka_term — opening a window on the compositor...\n");
@@ -102,11 +118,11 @@ fn main(): i64 {
 
     var cols = win_w / 8;
     var rows = win_h / 16;
-    if (cols > 132) { cols = 132; }
-    if (rows > 64)  { rows = 64; }
     if (cols < 1) { cols = 1; }
     if (rows < 1) { rows = 1; }
-    term_init(rows, cols);
+    term_init(rows, cols);                            # clamps to GRID_MAX_* internally
+    cols = grid_get_cols();                           # adopt the clamped truth
+    rows = grid_get_rows();
     fb_init(8, 16);
     var shell = getenv("SHELL");                     # the user's login shell (zsh/bash/…)
     if (shell == 0) { shell = "/bin/sh"; }           # POSIX fallback
@@ -135,6 +151,7 @@ fn main(): i64 {
         if (rev_win != 0) {
             var ev = win_poll_events(win);            # parse wayland; queue keys; ping/close
             if ((ev & WIN_EV_CLOSE) != 0) { alive = 0; }
+            if ((ev & WIN_EV_RESIZE) != 0) { puka__resize(win); }   # reflow + refit + repaint
         }
         while (win_next_key(win, &krec) == 1) {       # keyboard -> child
             if (load64(&krec + 8) == 1) {             # press (value 1)

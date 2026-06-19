@@ -168,6 +168,26 @@ fn main() {
     assert_gt(got, 11, "ppm file read back");
     assert_bytes(&hdr, "P6\n8 8\n255\n", 11, "ppm header is exact");
 
+    test_group("fb_resize: grow + shrink track grid dims (no realloc on shrink)");
+    term_init(4, 8);
+    fb_init(8, 16);
+    assert_eq(fb_width(), 64, "fb_width = 8 cols * 8 px");
+    assert_eq(fb_height(), 64, "fb_height = 4 rows * 16 px");
+    term_resize(20, 40);                              # grow past the initial high-water
+    assert_eq(fb_resize(), 0, "fb_resize(grow) ok");
+    assert_eq(fb_width(), 320, "fb_width tracks grown cols (40*8)");
+    assert_eq(fb_height(), 320, "fb_height tracks grown rows (20*16)");
+    grid_put_cell(0, 0, 0x41);                        # 'A' top-left, default fg
+    fb_render();
+    assert_gt(count_color(0, 0, 0xC0C0C0), 0, "glyph renders into the grown buffer");
+    term_resize(2, 4);                                # shrink — reuses the buffer, tighter stride
+    assert_eq(fb_resize(), 0, "fb_resize(shrink) ok");
+    assert_eq(fb_width(), 32, "fb_width tracks shrunk cols (4*8)");
+    assert_eq(fb_height(), 32, "fb_height tracks shrunk rows (2*16)");
+    grid_put_cell(0, 0, 0x41);
+    fb_render();                                      # must not corrupt with the tighter stride
+    assert_gt(count_color(0, 0, 0xC0C0C0), 0, "glyph renders after shrink");
+
     return assert_summary();
 }
 

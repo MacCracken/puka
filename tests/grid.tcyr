@@ -127,9 +127,12 @@ fn main() {
     assert_eq(grid_cursor_col(), 39, "cursor clamped to new last col");
     assert_eq(grid_scroll_bot_get(), 9, "scroll region reset to full height");
     grid_resize(99, 99);
-    assert_eq(grid_get_rows(), 64, "grow clamps to max rows");
+    assert_eq(grid_get_rows(), 99, "grow to 99 rows (within the raised ceiling)");
     assert_eq(grid_get_cols(), 99, "grow to 99 cols");
     assert_eq(grid_glyph(5, 50), 0x20, "newly-exposed cell is blank");
+    grid_resize(9999, 9999);
+    assert_eq(grid_get_rows(), GRID_MAX_ROWS, "grow clamps to max rows");
+    assert_eq(grid_get_cols(), GRID_MAX_COLS, "grow clamps to max cols");
 
     test_group("damage: per-row dirty tracking");
     grid_init(10, 20);
@@ -155,6 +158,22 @@ fn main() {
     assert_eq(grid_row_dirty(9), 1, "scroll marks the last row");
     assert_eq(grid_row_dirty(0 - 1), 0, "negative row dirty query -> 0");
     assert_eq(grid_row_dirty(9999), 0, "out-of-range row dirty query -> 0");
+
+    test_group("damage: multi-word bitset (rows >= 64)");
+    grid_init(100, 20);                          # spans dirty word 0 (0..63) and 1 (64..99)
+    clear_dirty(100);
+    grid_put_cell(70, 2, 0x41);                  # write a row in the 2nd word
+    assert_eq(grid_row_dirty(70), 1, "row 70 (word 1) marks dirty");
+    assert_eq(grid_row_dirty(6), 0, "row 6 (word 0) stays clean across the word boundary");
+    assert_eq(grid_row_dirty(69), 0, "row 69 stays clean");
+    assert_eq(grid_row_dirty(71), 0, "row 71 stays clean");
+    grid_put_cell(63, 0, 0x42);                  # last bit of word 0
+    grid_put_cell(64, 0, 0x43);                  # first bit of word 1
+    assert_eq(grid_row_dirty(63), 1, "row 63 (word 0 MSB) marks dirty");
+    assert_eq(grid_row_dirty(64), 1, "row 64 (word 1 LSB) marks dirty");
+    grid_clear_row_dirty(70);
+    assert_eq(grid_row_dirty(70), 0, "cleared row 70 is clean");
+    assert_eq(grid_row_dirty(63), 1, "clearing row 70 left row 63 dirty");
 
     return assert_summary();
 }

@@ -38,6 +38,7 @@ enum FbCursorStyle {
 
 # ---- module state ------------------------------------------------------
 var fb_buf_ptr = 0;        # heap base of the W*H*3 RGB buffer (0 = uninitialized)
+var fb_cap     = 0;        # allocated bytes (high-water; fb_resize grows, never shrinks)
 var fb_cell_w  = 8;        # cell width  in px (default VGA 8x16)
 var fb_cell_h  = 16;       # cell height in px
 var fb_w       = 0;        # framebuffer width  = cols * fb_cell_w
@@ -180,6 +181,7 @@ fn fb_init(cell_w, cell_h): i64 {
     if (sz / 3 != fb_w * fb_h) { return 0 - 1; }   # overflow backstop (defensive)
     fb_buf_ptr = alloc(sz);
     if (fb_buf_ptr == 0) { return 0 - 1; }
+    fb_cap = sz;
     # zero exactly sz bytes: word sweep then byte tail (no over-write assumption)
     var nwords = sz / 8;
     var i = 0;
@@ -187,6 +189,33 @@ fn fb_init(cell_w, cell_h): i64 {
     var j = nwords * 8;
     while (j < sz) { store8(fb_buf_ptr + j, 0); j = j + 1; }
     grid_mark_all_dirty();
+    return 0;
+}
+
+# Re-fit the pixel buffer to the CURRENT grid dims after a window resize (the
+# grid was already grid_resize'd). Grow-only: the buffer is reallocated to a new
+# high-water size (rare — the allocator has no free, so per-drag realloc would
+# leak; growth converges as the user finds their max window), otherwise the
+# existing buffer is reused with a tighter stride (fb__plot strides by fb_w). No
+# zeroing: fb_render repaints every cell of every (now all-dirty) row, and the
+# present blits only the grid region. Returns 0, or -1 on bad size / OOM.
+fn fb_resize(): i64 {
+    var nw = grid_get_cols() * fb_cell_w;
+    var nh = grid_get_rows() * fb_cell_h;
+    if (nw <= 0) { return 0 - 1; }
+    if (nh <= 0) { return 0 - 1; }
+    var sz = nw * nh * 3;
+    if (sz <= 0) { return 0 - 1; }
+    if (sz / 3 != nw * nh) { return 0 - 1; }       # overflow backstop
+    if (sz > fb_cap) {                              # grow to a new high-water (rare)
+        var p = alloc(sz);
+        if (p == 0) { return 0 - 1; }
+        fb_buf_ptr = p;
+        fb_cap = sz;
+    }
+    fb_w = nw;
+    fb_h = nh;
+    grid_mark_all_dirty();                          # full repaint at the new size
     return 0;
 }
 
