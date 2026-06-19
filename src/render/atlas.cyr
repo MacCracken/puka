@@ -1,0 +1,64 @@
+# atlas.cyr — kashi glyph atlas for GPU sampling (M6 bite 8).
+#
+# Packs kashi's 256 CP437 glyphs (VGA 8x16) into a 16x16 grid → a 128x256 RGBA8
+# coverage texture the GPU shader samples. Glyph g lives at cell (g%16, g/16);
+# a pixel is opaque white (0xFFFFFFFF) where the glyph bitmap bit is set and
+# transparent (0x00000000) elsewhere. The shader samples this coverage and
+# multiplies by the per-cell foreground colour (so one atlas serves every colour).
+#
+# Pure CPU + a pure READ of kashi's freestanding font core (same `kashi_glyph_row`
+# the CPU renderer uses) — no mabda, no GPU. The texture upload + sampling shader
+# are the next steps; this is the data they consume. Co-compiled after
+# lib/kashi_font_data.cyr; includes nothing.
+
+enum AtlasDim {
+    ATLAS_COLS    = 16;        # glyphs per atlas row
+    ATLAS_GLYPH_W = 8;         # VGA cell width
+    ATLAS_GLYPH_H = 16;        # VGA cell height
+    ATLAS_W       = 128;       # ATLAS_COLS * ATLAS_GLYPH_W
+    ATLAS_H       = 256;       # (256/ATLAS_COLS) * ATLAS_GLYPH_H = 16 * 16
+}
+
+# Fill `out` (ATLAS_W*ATLAS_H*4 = 131072 bytes, 128 KiB → 64 KiB-aligned) with the
+# RGBA8 atlas for kashi font `font_id` (0 = VGA 8x16). store32 writes LE bytes, so
+# 0xFFFFFFFF = white opaque and 0 = transparent black; the coverage lives in any
+# channel the shader reads. Returns 0.
+fn atlas_build_kashi(out, font_id): i64 {
+    var n = ATLAS_W * ATLAS_H;
+    var i = 0;
+    while (i < n) { store32(out + i * 4, 0); i = i + 1; }       # clear to transparent
+    var g = 0;
+    while (g < 256) {
+        var cx = (g % ATLAS_COLS) * ATLAS_GLYPH_W;              # cell origin (px)
+        var cy = (g / ATLAS_COLS) * ATLAS_GLYPH_H;
+        var row = 0;
+        while (row < ATLAS_GLYPH_H) {
+            var bits = kashi_glyph_row(font_id, g, row);        # bit7 = leftmost px
+            if (bits != 0) {
+                var col = 0;
+                while (col < ATLAS_GLYPH_W) {
+                    if ((bits & (1 << (7 - col))) != 0) {
+                        var px = (cy + row) * ATLAS_W + (cx + col);
+                        store32(out + px * 4, 0xFFFFFFFF);
+                    }
+                    col = col + 1;
+                }
+            }
+            row = row + 1;
+        }
+        g = g + 1;
+    }
+    return 0;
+}
+
+# Atlas geometry (for the texture create + the shader's UV math).
+fn atlas_w(): i64 { return ATLAS_W; }
+fn atlas_h(): i64 { return ATLAS_H; }
+fn atlas_bytes(): i64 { return ATLAS_W * ATLAS_H * 4; }
+fn atlas_cols(): i64 { return ATLAS_COLS; }
+fn atlas_glyph_w(): i64 { return ATLAS_GLYPH_W; }
+fn atlas_glyph_h(): i64 { return ATLAS_GLYPH_H; }
+
+# Top-left pixel of glyph cp within the atlas (for UV / readback math).
+fn atlas_cell_x(cp): i64 { return (cp % ATLAS_COLS) * ATLAS_GLYPH_W; }
+fn atlas_cell_y(cp): i64 { return (cp / ATLAS_COLS) * ATLAS_GLYPH_H; }

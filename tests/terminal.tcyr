@@ -172,6 +172,41 @@ fn main() {
     term_feed_str("\x1b[?2004l");               # DECRST bracketed paste
     assert_eq(term_bracket_paste_get(), 0, "CSI ?2004l resets bracketed paste");
 
+    test_group("alt-screen (DEC 1049): save cursor / clear / restore");
+    term_init(24, 80);
+    assert_eq(grid_in_alt(), 0, "primary screen after init");
+    term_feed_str("\x1b[HP");                    # 'P' at home on the primary screen
+    assert_eq(grid_glyph(0, 0), 0x50, "primary has 'P' at home");
+    term_feed_str("\x1b[3;4H");                  # cursor -> (2,3)
+    term_feed_str("\x1b[?1049h");                # enter: save cursor, swap, clear, home
+    assert_eq(grid_in_alt(), 1, "1049h enters the alt screen");
+    assert_eq(grid_glyph(0, 0), 0x20, "alt screen starts cleared");
+    assert_eq(grid_cursor_row(), 0, "alt cursor homed (row)");
+    assert_eq(grid_cursor_col(), 0, "alt cursor homed (col)");
+    term_feed_str("X");                          # draw on the alt screen
+    assert_eq(grid_glyph(0, 0), 0x58, "'X' drawn on the alt screen");
+    term_feed_str("\x1b[?1049h");                # idempotent: already alt -> no re-clear
+    assert_eq(grid_glyph(0, 0), 0x58, "repeated 1049h does not re-clear");
+    term_feed_str("\x1b[?1049l");                # exit: swap back, restore cursor
+    assert_eq(grid_in_alt(), 0, "1049l returns to the primary screen");
+    assert_eq(grid_glyph(0, 0), 0x50, "primary content restored ('P')");
+    assert_eq(grid_cursor_row(), 2, "cursor restored (row)");
+    assert_eq(grid_cursor_col(), 3, "cursor restored (col)");
+    term_feed_str("\x1b[?1049l");                # idempotent exit
+    assert_eq(grid_in_alt(), 0, "repeated 1049l stays on primary");
+    term_feed_str("\x1b[?1049h");               # re-enter: freshly cleared (no stale 'X')
+    assert_eq(grid_glyph(0, 0), 0x20, "alt re-entry is freshly cleared");
+    term_feed_str("\x1b[?1049l");
+
+    test_group("alt-screen (DEC 47): buffer swap preserves primary");
+    term_init(24, 80);
+    term_feed_str("\x1b[HP");                     # 'P' on primary
+    term_feed_str("\x1b[?47h");                   # swap to alt (no save/clear)
+    assert_eq(grid_in_alt(), 1, "47h enters alt");
+    term_feed_str("\x1b[?47l");                   # swap back
+    assert_eq(grid_in_alt(), 0, "47l returns to primary");
+    assert_eq(grid_glyph(0, 0), 0x50, "primary preserved across the 47 swap");
+
     return assert_summary();
 }
 

@@ -34,6 +34,8 @@ var term_fg = 0;
 var term_bg = 0;
 var term_saved_row = 0;    # DECSC / ANSI.SYS save-cursor
 var term_saved_col = 0;
+var term_alt_saved_row = 0; # mode-1049 cursor save (separate from DECSC)
+var term_alt_saved_col = 0;
 
 # ---- color helpers -----------------------------------------------------
 fn color_palette(idx): i64 { return idx + 1; }
@@ -67,6 +69,8 @@ fn term_init(rows, cols): i64 {
     term_bg = 0;
     term_saved_row = 0;
     term_saved_col = 0;
+    term_alt_saved_row = 0;
+    term_alt_saved_col = 0;
     term__sync_pen();
     return 0;
 }
@@ -378,7 +382,37 @@ fn term__dec_mode(set): i64 {
         }
     }
     if (m == 2004) { term_bracket_paste = set; }           # bracketed paste (input.cyr)
-    # alt-screen (1049), mouse (1000..1006): later bites
+    if (m == 1049) { term__alt_screen(set); }              # alt-screen + save cursor + clear
+    if (m == 47) { grid_alt_screen(set); }                 # legacy alt-screen (buffer only)
+    if (m == 1047) {                                        # alt-screen, clear on enter
+        grid_alt_screen(set);
+        if (set == 1) { grid_clear_all(); grid_cursor_set(0, 0); }
+    }
+    # mouse (1000..1006): later bite
+    return 0;
+}
+
+# DEC 1049: the full-screen-app idiom (vim/less/htop/tmux). Enter saves the
+# cursor, switches to the alt buffer, and clears it; exit switches back and
+# restores the cursor. Guarded so a repeated set/reset is a no-op (no double
+# save/restore). The buffer swap preserves the primary screen (grid.cyr).
+fn term__alt_screen(set): i64 {
+    if (set == 1) {
+        if (grid_in_alt() == 0) {
+            term_alt_saved_row = grid_cursor_row();
+            term_alt_saved_col = grid_cursor_col();
+            grid_alt_screen(1);
+            grid_clear_all();
+            grid_cursor_set(0, 0);
+            term_pending_wrap = 0;
+        }
+    } else {
+        if (grid_in_alt() == 1) {
+            grid_alt_screen(0);
+            grid_cursor_set(term_alt_saved_row, term_alt_saved_col);
+            term_pending_wrap = 0;
+        }
+    }
     return 0;
 }
 

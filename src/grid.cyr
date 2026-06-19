@@ -413,7 +413,49 @@ fn grid_resize(rows, cols): i64 {
     return 0;
 }
 
+# ---- alternate screen buffer (DEC 1049 / 1047 / 47) --------------------
+# Full-screen apps (vim / less / htop / tmux) draw on a separate buffer so the
+# primary screen is restored intact on exit. The inactive screen lives in a
+# lazily heap-allocated backup; switching SWAPS active<->backup. Heap, not a
+# second static array — costs nothing until alt-screen is first used.
+var grid_alt_active = 0;
+var grid_alt_g = 0;        # heap backup of the inactive buffer's glyph words
+var grid_alt_c = 0;        # heap backup of the inactive buffer's fg|bg words
+
+fn grid_in_alt(): i64 { return grid_alt_active; }
+
+# Switch to (enter=1) / from (enter=0) the alternate screen: swap the active cell
+# buffer with the heap backup (preserving the inactive screen), mark all dirty.
+# No-op if already in that state. Cursor save + clear-on-enter are the caller's
+# job (mode-1049 semantics live in terminal.cyr). Returns 0, or -1 on OOM.
+fn grid_alt_screen(enter): i64 {
+    if (enter == grid_alt_active) { return 0; }
+    var n = GRID_MAX_COLS * GRID_MAX_ROWS;
+    if (grid_alt_g == 0) {
+        grid_alt_g = alloc(n * 8);
+        grid_alt_c = alloc(n * 8);
+        if (grid_alt_g == 0) { return 0 - 1; }
+        if (grid_alt_c == 0) { return 0 - 1; }
+        var z = 0;                                  # alloc may reuse a chunk → zero it
+        while (z < n) { store64(grid_alt_g + z * 8, 0); store64(grid_alt_c + z * 8, 0); z = z + 1; }
+    }
+    var i = 0;
+    while (i < n) {
+        var tg = load64(&grid_g + i * 8);
+        store64(&grid_g + i * 8, load64(grid_alt_g + i * 8));
+        store64(grid_alt_g + i * 8, tg);
+        var tc = load64(&grid_c + i * 8);
+        store64(&grid_c + i * 8, load64(grid_alt_c + i * 8));
+        store64(grid_alt_c + i * 8, tc);
+        i = i + 1;
+    }
+    grid_alt_active = enter;
+    grid_mark_all_dirty();
+    return 0;
+}
+
 fn grid_init(rows, cols): i64 {
+    grid_alt_active = 0;                             # always boot on the primary screen
     if (rows > GRID_MAX_ROWS) { rows = GRID_MAX_ROWS; }
     if (cols > GRID_MAX_COLS) { cols = GRID_MAX_COLS; }
     if (rows < 1) { rows = 1; }
