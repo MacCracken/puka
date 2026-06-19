@@ -4,6 +4,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-06-19
+
+**Daily-driver polish — resize + real shell config.** The 0.6.0 MVP gains the two
+things a kitty replacement needs day one: the window **reflows** on resize (drag /
+maximize / tile), and the hosted shell now loads **your** config (`$SHELL` as a login
+shell with the full environment, so `.zprofile`/`.zshrc`/starship all source). GPU
+rendering gets its own cut next (M6 bites 7–8).
+
 ### Added
 - **Window resize** (M6 bite 6) — puka now reflows when the compositor resizes the window (drag, maximize, tile). `xdg_toplevel.configure` → `win_poll_events` raises `WIN_EV_RESIZE` → `win_resize_apply` adopts the new size and refits the `wl_shm` present buffer → `term_resize` reflows the grid, `fb_resize` refits the pixel buffer, `pty_set_winsize` SIGWINCHes the child, full repaint. Buffers are **grow-only** (the bump allocator has no `free`, so per-drag realloc would leak; growth converges to the high-water mark — `shm`'s memfd/pool are explicitly torn down on grow, so it never leaks).
 - **Raised grid ceilings** — `GRID_MAX_COLS` 132 → **480**, `GRID_MAX_ROWS` 64 → **144** (covers a 4K window at 8×16; even a 1080p window is 67 rows, past the old 64 cap). The per-row damage bitset is now a **3-word array** (was a single u64, which capped rows at 64). Static data grows ~1 MB (the larger cell backing store) — acceptable for a desktop binary.

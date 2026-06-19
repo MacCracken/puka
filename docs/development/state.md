@@ -5,25 +5,19 @@
 
 ## Version
 
-**0.6.0** — **cut 2026-06-18, awaiting user tag.** Contents: **the Wayland desktop
-terminal (interactive MVP)** — puka is now a real **window in a Wayland compositor**
-(Hyprland) hosting a live `/bin/sh`, the **first windowed Cyrius program**, speaking
-the Wayland wire protocol from scratch (no libwayland / toolkit / FFI). New:
-`src/platform/window.cyr` (the cross-platform `win_*` backend seam → future
-`aethersafha`), `src/platform/wayland/` (`wire.cyr` codec + `client.cyr`
-connect/`wl_registry`/xdg-shell/`wl_seat`/`wl_keyboard` + SCM_RIGHTS + `shm.cyr`),
-`src/render/pixfmt.cyr` (RGB→XRGB8888 + damage-aware row blit), `src/input/keymap.cyr`
-(shared evdev-keycode→bytes bridge), `programs/puka_term.cyr` (a `poll()` loop over
-the Wayland fd + the PTY master; `wl_keyboard` → `input_encode` → child; damage-aware
-repaint). **Verified live on Hyprland**: typing works, the shell responds, snappy.
-This **supersedes** the 0.5.0 framebuffer/console approach (a desktop terminal is a
-compositor client, not a `/dev/fb0` console). Gate: **410 headless tests pass**
-(engine untouched), fmt/lint clean (0 warnings), VERSION↔cyrius.cyml↔CHANGELOG all
-`0.6.0`. The Wayland subsystem is verified live (it needs a compositor → not in the
-headless suite). **mabda GPU** rendering + window **resize** are the next bites;
-**AGNOS-native** is post-v1.0; the **command center** is v3. (0.5.0 = M5 framebuffer
+**0.6.1** — **cut 2026-06-19, awaiting user tag.** Daily-driver polish on the 0.6.0
+Wayland MVP: **window resize** (M6 bite 6 — reflow on drag/maximize/tile via
+`WIN_EV_RESIZE` → `win_resize_apply` + `term_resize` + `fb_resize` + `pty_set_winsize`;
+grid ceilings raised `GRID_MAX_COLS` 132→**480** / `GRID_MAX_ROWS` 64→**144**, damage
+bitset widened to a 3-word array; buffers grow-only) and the **shell-config fix** (the
+hosted shell is now the user's **`$SHELL` as a login shell** with the **full inherited
+environment** — `TERM` overridden — so `.zprofile`/`.zshrc`/starship source). Gate:
+**430 headless tests pass** (was 410; +20 from the multi-word-bitset + `fb_resize`
+groups), fmt/lint clean (0 warnings), VERSION↔cyrius.cyml↔CHANGELOG all `0.6.1`. Live
+resize (shm refit + present) is verified by dragging on Hyprland (not in the headless
+suite). **mabda GPU** rendering is the next cut (bites 7–8); **AGNOS-native** is
+post-v1.0; the **command center** is v3. (0.6.0 = Wayland MVP; 0.5.0 = M5 framebuffer
 [superseded]; 0.4.0 = M4 input; 0.3.0 = M3 renderer; 0.2.0 = M2 PTY; 0.1.0 = M1.)
-Version map: M(n) → 0.n.0.
 
 ## Toolchain
 
