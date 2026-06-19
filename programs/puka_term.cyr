@@ -26,6 +26,33 @@ include "src/platform/window.cyr"
 
 enum PukaLoop { SYS_POLL = 7; POLLIN = 1; POLLHUP = 0x10; }
 
+var puka_argv0[8];           # "-<shell>\0" login-shell argv[0] (8 u64 = 64 bytes)
+
+# Build a login-shell argv[0] = "-" + basename(shellpath) into puka_argv0 and
+# return it. The leading dash is what makes zsh/bash a LOGIN shell (sources
+# .zprofile/.zlogin in addition to the interactive .zshrc) — the convention every
+# terminal uses for its top-level shell. e.g. "/usr/bin/zsh" → "-zsh".
+fn puka__login_argv0(shellpath): i64 {
+    var bn = shellpath;
+    var i = 0;
+    var go = 1;
+    while (go == 1) {
+        var c = load8(shellpath + i);
+        if (c == 0) { go = 0; }
+        else { if (c == 0x2F) { bn = shellpath + i + 1; } i = i + 1; }   # '/' → basename
+    }
+    store8(&puka_argv0, 0x2D);                            # '-'
+    var j = 0;
+    var more = 1;
+    while (more == 1) {
+        var ch = load8(bn + j);
+        if (ch == 0) { more = 0; }
+        else { if (j < 62) { store8(&puka_argv0 + 1 + j, ch); } j = j + 1; }
+    }
+    store8(&puka_argv0 + 1 + j, 0);
+    return &puka_argv0;
+}
+
 # Render + present only the rows that changed (damage-aware) — a one-line echo
 # copies ~16 px rows, not the whole 1260x683 buffer (the fix for input lag).
 fn puka__paint(win): i64 {
@@ -81,16 +108,17 @@ fn main(): i64 {
     if (rows < 1) { rows = 1; }
     term_init(rows, cols);
     fb_init(8, 16);
+    var shell = getenv("SHELL");                     # the user's login shell (zsh/bash/…)
+    if (shell == 0) { shell = "/bin/sh"; }           # POSIX fallback
+    pty_login_argv0 = puka__login_argv0(shell);      # "-zsh" → sources .zprofile/.zshrc
     wl__emit_str("window "); wl__emit_uint(win_w); wl__emit_str("x"); wl__emit_uint(win_h);
     wl__emit_str(" -> grid "); wl__emit_uint(cols); wl__emit_str("x"); wl__emit_uint(rows);
-    wl__emit_str("; hosting /bin/sh.\n");
+    wl__emit_str("; hosting "); wl__emit_str(shell); wl__emit_str(" (login).\n");
 
     if (pty_open() < 0) { wl__emit_str("pty_open failed\n"); win_close(win); return 1; }
-    if (pty_spawn("/bin/sh", 0, 0, rows, cols) < 0) {
+    if (pty_spawn(shell, 0, 0, rows, cols) < 0) {
         wl__emit_str("shell spawn failed\n"); pty_close(); win_close(win); return 1;
     }
-    var banner = "echo puka: a sovereign Cyrius terminal, live on Wayland; echo; ls /\n";
-    pty_write(banner, strlen(banner));               # startup output (type for yourself too)
     shm_fill(0x000000);                              # clear the whole buffer + margins ONCE
     puka__paint(win);                                # first frame (all rows dirty -> full blit)
 

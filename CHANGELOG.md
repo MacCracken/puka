@@ -4,6 +4,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **The hosted shell now loads the user's config** (`.zprofile`/`.zshrc`, starship, etc.). Two compounding bugs starved it: `puka_term` execed `/bin/sh` (which never reads `.zshrc`), and `pty_spawn` gave the child an environment of **only** `TERM` — no `$HOME`, `$PATH`, or `$SHELL`, so even zsh couldn't find its rc or resolve `starship`. Now:
+  - `pty_spawn` **inherits the full parent environment** (read from `/proc/self/environ`), overriding only `TERM` → `xterm-256color` (puka's advertised capability, not the launching terminal's). Benefits every PTY consumer, not just the desktop loop.
+  - `puka_term` execs the user's **`$SHELL`** (fallback `/bin/sh`) as a **login shell** via the new `pty_login_argv0` override (argv[0] = `-zsh`), so the full `.zprofile → .zshrc` chain sources. The auto-typed `/bin/sh` demo banner is retired — the real shell prints its own prompt.
+  - Note: powerline/nerd-font glyphs in a starship prompt still render blank — kashi's built-in font is CP437 8×16 only (a separate font-coverage gap, not a config-loading bug).
+
 ## [0.6.0] — 2026-06-18
 
 **The Wayland desktop terminal — direction corrected.** puka is now a real window

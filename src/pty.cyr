@@ -32,6 +32,19 @@ var pty_master = 0;          # master fd (0 = unset; valid fds are >0 after stdi
 var pty_child_pid = 0;
 var pty_slave_path[32];      # "/dev/pts/<n>\0" — module-global (256 bytes; first ~16 used)
 
+# argv[0] override: if non-zero, the child execs with this as argv[0] instead of
+# `path`. A terminal sets it to "-zsh" (leading dash) to spawn a LOGIN shell so
+# the user's full startup chain (.zprofile → .zshrc → starship) sources. Default
+# 0 = argv[0] is `path` (non-interactive demos/tests keep their behaviour).
+var pty_login_argv0 = 0;
+
+# Child environment, inherited from the parent (/proc/self/environ) with TERM
+# overridden to what puka advertises. pty_env_buf holds the raw NUL-separated
+# KEY=VALUE block (1024 u64 = 8192 bytes); pty_env_ptrs is the execve char**
+# (128 u64 = 128 slots: ~126 inherited vars + our TERM + the NULL terminator).
+var pty_env_buf[1024];
+var pty_env_ptrs[128];
+
 fn pty__nap(): i64 {
     var ts[16];
     store64(&ts, 0);
@@ -101,9 +114,49 @@ fn pty_open(): i64 {
     return m;
 }
 
+# Build the child's envp from the parent environment, inheriting every variable
+# EXCEPT TERM (which puka owns — it advertises xterm-256color, not whatever
+# launched puka). Reads /proc/self/environ (NUL-separated KEY=VALUE) into
+# pty_env_buf, records an in-place pointer per entry into pty_env_ptrs, appends
+# our TERM, NULL-terminates, and returns &pty_env_ptrs for execve. Called in the
+# child after fork (its /proc/self/environ is the inherited parent env). Linux.
+# A child with no HOME/PATH/SHELL is why .zshrc/starship never loaded.
+fn pty__build_child_env(): i64 {
+    var fd = sys_open("/proc/self/environ", 0, 0);     # O_RDONLY
+    var n = 0;
+    if (fd >= 0) { n = file_read(fd, &pty_env_buf, 8191); sys_close(fd); }
+    if (n < 0) { n = 0; }
+    store8(&pty_env_buf + n, 0);                        # hard NUL backstop
+    var np = 0;
+    var pos = 0;
+    while (pos < n) {
+        # Each entry starts at `pos` and is NUL-terminated by /proc. Drop TERM=.
+        var is_term = 0;
+        if (load8(&pty_env_buf + pos) == 0x54 && load8(&pty_env_buf + pos + 1) == 0x45 &&
+            load8(&pty_env_buf + pos + 2) == 0x52 && load8(&pty_env_buf + pos + 3) == 0x4D &&
+            load8(&pty_env_buf + pos + 4) == 0x3D) { is_term = 1; }
+        if (is_term == 0) {
+            if (np < 125) {                            # leave room for TERM + NULL
+                store64(&pty_env_ptrs + np * 8, &pty_env_buf + pos);
+                np = np + 1;
+            }
+        }
+        var go = 1;                                    # advance past this entry's NUL
+        while (go == 1) {
+            if (pos >= n) { go = 0; }
+            else { if (load8(&pty_env_buf + pos) == 0) { go = 0; } else { pos = pos + 1; } }
+        }
+        pos = pos + 1;
+    }
+    store64(&pty_env_ptrs + np * 8, "TERM=xterm-256color"); np = np + 1;
+    store64(&pty_env_ptrs + np * 8, 0);
+    return &pty_env_ptrs;
+}
+
 # Fork a child wired to the slave (setsid + TIOCSCTTY + dup2 → 0,1,2) and
-# execve(path, [path, arg1?, arg2?], [TERM=...]). Returns child pid, or
-# negative on failure. Must call pty_open() first.
+# execve(path, [argv0, arg1?, arg2?], inherited-env). argv0 is `path` unless
+# pty_login_argv0 is set (login shell). Returns child pid, or negative on
+# failure. Must call pty_open() first.
 fn pty_spawn(path, arg1, arg2, rows, cols): i64 {
     if (pty_master <= 0) { return 0 - 1; }
     var pid = sys_fork();
@@ -121,15 +174,15 @@ fn pty_spawn(path, arg1, arg2, rows, cols): i64 {
         if (s > 2) { sys_close(s); }
         sys_close(pty_master);
         var argv[40];
-        store64(&argv, path);
+        var a0 = path;
+        if (pty_login_argv0 != 0) { a0 = pty_login_argv0; }   # "-zsh" → login shell
+        store64(&argv, a0);
         var ai = 1;
         if (arg1 != 0) { store64(&argv + ai * 8, arg1); ai = ai + 1; }
         if (arg2 != 0) { store64(&argv + ai * 8, arg2); ai = ai + 1; }
         store64(&argv + ai * 8, 0);
-        var envp[16];
-        store64(&envp, "TERM=xterm-256color");
-        store64(&envp + 8, 0);
-        sys_execve(path, &argv, &envp);
+        var env = pty__build_child_env();                     # inherit HOME/PATH/…, our TERM
+        sys_execve(path, &argv, env);
         sys_exit(127);            # execve failed
     }
     pty_child_pid = pid;
