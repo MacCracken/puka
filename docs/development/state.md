@@ -5,19 +5,19 @@
 
 ## Version
 
-**0.6.1** — **cut 2026-06-19, awaiting user tag.** Daily-driver polish on the 0.6.0
-Wayland MVP: **window resize** (M6 bite 6 — reflow on drag/maximize/tile via
-`WIN_EV_RESIZE` → `win_resize_apply` + `term_resize` + `fb_resize` + `pty_set_winsize`;
-grid ceilings raised `GRID_MAX_COLS` 132→**480** / `GRID_MAX_ROWS` 64→**144**, damage
-bitset widened to a 3-word array; buffers grow-only) and the **shell-config fix** (the
-hosted shell is now the user's **`$SHELL` as a login shell** with the **full inherited
-environment** — `TERM` overridden — so `.zprofile`/`.zshrc`/starship source). Gate:
-**430 headless tests pass** (was 410; +20 from the multi-word-bitset + `fb_resize`
-groups), fmt/lint clean (0 warnings), VERSION↔cyrius.cyml↔CHANGELOG all `0.6.1`. Live
-resize (shm refit + present) is verified by dragging on Hyprland (not in the headless
-suite). **mabda GPU** rendering is the next cut (bites 7–8); **AGNOS-native** is
-post-v1.0; the **command center** is v3. (0.6.0 = Wayland MVP; 0.5.0 = M5 framebuffer
-[superseded]; 0.4.0 = M4 input; 0.3.0 = M3 renderer; 0.2.0 = M2 PTY; 0.1.0 = M1.)
+**0.6.2** — **cut 2026-06-19, awaiting user tag.** Two tracks on the Wayland desktop
+terminal: the **GPU plumbing foundation** (M6 bite 7 — the `pgpu_*` seam over mabda's
+native AMD backend; GPU render → CPU readback → `wl_shm` → Hyprland verified live, 120
+frames, pixel-exact; mabda wired as a 3.2.11 git dep) + the **kashi glyph atlas** (bite
+8a, `tests/atlas.tcyr`), and the **alternate screen** (DEC 1049/1047/47 — `vim`/`less`/
+`tmux` now work; lazily heap-backed buffer swap). The GPU *cell renderer* (bite 8) is
+**paused pending mabda** (the 64 KiB-align `va_map` fix + a higher-level shading API);
+the daily driver still renders cells on CPU `fb.cyr`. Gate: **461 headless tests pass**
+(was 430; +17 alt-screen, +14 atlas), VERSION↔cyrius.cyml↔CHANGELOG all `0.6.2`. The GPU
+pipe is verified by running `gpu_win_probe` on Hyprland (live, not in the headless
+suite). **AGNOS-native** is post-v1.0; the **command center** is v3. (0.6.1 = resize +
+shell-config; 0.6.0 = Wayland MVP; 0.5.0 = M5 framebuffer [superseded]; 0.4.0 = M4
+input; 0.3.0 = M3 renderer; 0.2.0 = M2 PTY; 0.1.0 = M1.)
 
 ## Toolchain
 

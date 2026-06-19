@@ -4,6 +4,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.2] — 2026-06-19
+
+**GPU foundation + the alternate screen.** Two tracks land: puka now drives `mabda`'s
+native AMD GPU end-to-end (render → `wl_shm` → Hyprland, verified) as a shader-agnostic
+**foundation** — the actual GPU *cell* renderer is paused pending mabda maturing (a
+64 KiB-align `va_map` fix + a higher-level shading API). And the **alternate screen**
+(DEC 1049) closes the biggest daily-driver gap — `vim`/`less`/`htop`/`tmux` work
+correctly now. The daily driver still renders cells on the CPU `fb.cyr` path.
+
 ### Added
 - **GPU plumbing foundation** (M6 bite 7) — puka now drives `mabda`'s native AMD GFX9 backend end-to-end: **GPU render → CPU readback → `wl_shm` → Hyprland window**, verified live (a GPU-rendered frame presented through the compositor, 120 sustained frames, pixel-exact). New `src/platform/gpu/gpu.cyr` — the puka-generic `pgpu_*` seam (init / target / render / readback-with-RGBA8→XRGB8888-swizzle / release), the GPU analogue of the `win_*` seam (extracts to `aethersafha`). `mabda` wired as a git dep at **3.2.11** (the `wgpu` FFI backend stays forbidden; native AMD only); puka's `[deps] stdlib` extended to mabda's superset (`args/hashmap/tagged/fnptr/mmap/dynlib/sakshi`). Probes: `programs/gpu_probe.cyr` (headless render→readback) and `programs/gpu_win_probe.cyr` (the full windowed pipe). **The daily-driver `puka_term` is unchanged — cells still render on the CPU `fb.cyr` path**; this is the shader-agnostic foundation the bite-8 grid renderer builds on.
   - *Architecture correction (recon 2026-06-19):* mabda has **no instanced-vertex path and none is roadmapped** (3.2.x closes at 3.2.13). But texture sampling (3.2.2–3.2.3) and the SPIR-V→GFX9 compiler (3.2.11) are HW-verified on Cezanne, so bite 8 renders the grid via a **single full-screen pass** (compute or fullscreen-FS reading the grid as a storage buffer + the kashi atlas as a texture), not instanced quads.
