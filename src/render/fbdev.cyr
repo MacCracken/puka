@@ -1,0 +1,221 @@
+# fbdev.cyr — Linux /dev/fb0 framebuffer presentation backend (M5).
+#
+# Blits puka's W*H*3 packed-RGB render buffer (fb_buf(): R,G,B per pixel,
+# row-major) onto a mmap'd Linux framebuffer, converting to the device's pixel
+# layout (bpp + RGB bitfields from FBIOGET_VSCREENINFO). The display half of
+# the live Linux terminal — the M5 sibling of the (post-v1.0) AGNOS blit#39 path.
+#
+# PURE core (headless, device-free, tested against an in-memory fake fb):
+#   fbdev__chan, fbdev__pack, fbdev__store_pixel, fbdev_blit_core.
+# LINUX-GUARDED edge (#ifdef CYRIUS_TARGET_LINUX; non-Linux stubs -> -1):
+#   fbdev_open / fbdev_present / fbdev_width/height/bpp / fbdev_close.
+#
+# Sovereign: a thin open/ioctl/mmap edge mirroring src/pty.cyr's syscall idioms.
+# Co-compiled: consumer includes parser/grid/unicode/terminal/kashi/fb.cyr then
+# this file (it calls fb_buf/fb_width/fb_height). fbdev.cyr includes nothing.
+
+enum FbDevAbi {
+    FB_SYS_IOCTL        = 16;        # x86_64 SYS_ioctl
+    FB_SYS_MMAP         = 9;         # x86_64 SYS_mmap
+    FB_SYS_MUNMAP       = 11;        # x86_64 SYS_munmap
+    FB_O_RDWR           = 2;
+    FBIOGET_VSCREENINFO = 0x4600;    # read fb_var_screeninfo (160 bytes)
+    FBIOGET_FSCREENINFO = 0x4602;    # read fb_fix_screeninfo (80 bytes)
+    FB_PROT_RW          = 3;         # PROT_READ|PROT_WRITE
+    FB_MAP_SHARED       = 1;         # writes must reach the device
+    # fb_var_screeninfo field byte-offsets (all u32, read with load32):
+    FBV_XRES            = 0;
+    FBV_YRES            = 4;
+    FBV_BPP             = 24;
+    FBV_RED_OFF         = 32;   FBV_RED_LEN   = 36;
+    FBV_GREEN_OFF       = 44;   FBV_GREEN_LEN = 48;
+    FBV_BLUE_OFF        = 56;   FBV_BLUE_LEN  = 60;
+    # fb_fix_screeninfo field byte-offsets (has unsigned-long fields — NOT all-u32):
+    FBF_SMEM_LEN        = 24;        # u32 — mmap LENGTH
+    FBF_LINE_LENGTH     = 48;        # u32 — row stride in bytes (NEVER xres*bpp/8)
+}
+
+# ---- module state ------------------------------------------------------
+var fbdev_fd     = 0 - 1;   # /dev/fb0 fd (-1 = closed)
+var fbdev_mem    = 0;       # mmap base (0 = unmapped)
+var fbdev_mapsz  = 0;       # bytes mmap'd (== smem_len; for munmap)
+var fbdev_xres   = 0;
+var fbdev_yres   = 0;
+var fbdev_bpp    = 0;       # bits per pixel (16/24/32)
+var fbdev_stride = 0;       # line_length (row stride in bytes)
+var fbdev_xoff   = 0;       # blit origin x (px)
+var fbdev_yoff   = 0;       # blit origin y (px)
+var fbdev_ro = 0; var fbdev_rl = 0;   # red.offset / red.length
+var fbdev_go = 0; var fbdev_gl = 0;   # green
+var fbdev_bo = 0; var fbdev_bl = 0;   # blue
+
+# ---- pure cores --------------------------------------------------------
+
+# Scale an 8-bit channel to a `len`-bit field: the top `len` bits of val8.
+# len 8 -> val8; len 5 -> val8>>3; len 6 -> val8>>2; len 0 -> 0.
+fn fbdev__chan(val8, len): i64 {
+    if (len <= 0) { return 0; }
+    if (len >= 8) { return val8 & 0xFF; }
+    return (val8 & 0xFF) >> (8 - len);
+}
+
+# Pack r,g,b (0..255 each) into the device pixel word via the var bitfields —
+# generic over ALL truecolor layouts (never hardcodes BGR vs RGB).
+fn fbdev__pack(r, g, b, ro, rl, go, gl, bo, bl): i64 {
+    var pix = 0;
+    pix = pix | (fbdev__chan(r, rl) << ro);
+    pix = pix | (fbdev__chan(g, gl) << go);
+    pix = pix | (fbdev__chan(b, bl) << bo);
+    return pix;
+}
+
+# Convert one RGB pixel to device format and store it at dst+off as bpp/8 bytes,
+# little-endian (store8 byte-by-byte: endianness-explicit, same on test + device).
+# `bpp` here is BITS (16/24/32) — the single pixel-format chokepoint.
+fn fbdev__store_pixel(dst, off, r, g, b, bpp, ro, rl, go, gl, bo, bl): i64 {
+    var pix = fbdev__pack(r, g, b, ro, rl, go, gl, bo, bl);
+    if (bpp == 32) {
+        store8(dst + off,     pix & 0xFF);
+        store8(dst + off + 1, (pix >> 8)  & 0xFF);
+        store8(dst + off + 2, (pix >> 16) & 0xFF);
+        store8(dst + off + 3, (pix >> 24) & 0xFF);
+        return 0;
+    }
+    if (bpp == 24) {
+        store8(dst + off,     pix & 0xFF);
+        store8(dst + off + 1, (pix >> 8)  & 0xFF);
+        store8(dst + off + 2, (pix >> 16) & 0xFF);
+        return 0;
+    }
+    # 16bpp (e.g. RGB565): two bytes
+    store8(dst + off,     pix & 0xFF);
+    store8(dst + off + 1, (pix >> 8) & 0xFF);
+    return 0;
+}
+
+# PURE blit: copy the W*H*3 packed-RGB src (pixel (sx,sy) at src_rgb+(sy*sw+sx)*3
+# as R,G,B) into `dst`, whose rows are `line_len` bytes apart, at pixel offset
+# (xoff,yoff), clamped to (dw,dh); bytes-per-pixel = bpp/8 (bpp is BITS). Returns
+# pixels written. The whole device edge, made testable vs an in-memory fake fb.
+# Every dst write is bounds-clamped (untrusted geometry).
+fn fbdev_blit_core(src_rgb, sw, sh, dst, dw, dh, line_len, bpp,
+                   xoff, yoff, ro, rl, go, gl, bo, bl): i64 {
+    var bypp = bpp / 8;                 # bytes per pixel (2/3/4)
+    var written = 0;
+    var sy = 0;
+    while (sy < sh) {
+        var dy = sy + yoff;
+        if (dy >= dh) { sy = sh; }      # past the bottom edge: stop (no break)
+        else {
+            if (dy >= 0) {
+                var rowbase = dy * line_len;
+                var sx = 0;
+                while (sx < sw) {
+                    var dx = sx + xoff;
+                    if (dx >= 0) {
+                        if (dx < dw) {
+                            var sp = (sy * sw + sx) * 3;
+                            var r = load8(src_rgb + sp);
+                            var g = load8(src_rgb + sp + 1);
+                            var b = load8(src_rgb + sp + 2);
+                            var off = rowbase + dx * bypp;
+                            fbdev__store_pixel(dst, off, r, g, b, bpp,
+                                               ro, rl, go, gl, bo, bl);
+                            written = written + 1;
+                        }
+                    }
+                    sx = sx + 1;
+                }
+            }
+            sy = sy + 1;
+        }
+    }
+    return written;
+}
+
+# ---- Linux-guarded device layer ----------------------------------------
+
+#ifdef CYRIUS_TARGET_LINUX
+
+# Open /dev/fb0, read fix+var screeninfo, mmap the framebuffer. 0 ok / -1 fail.
+fn fbdev_open(): i64 {
+    var fd = sys_open("/dev/fb0", FB_O_RDWR, 0);
+    if (fd < 0) { return 0 - 1; }
+
+    var finf[80];                                  # fb_fix_screeninfo (80 bytes)
+    if (syscall(FB_SYS_IOCTL, fd, FBIOGET_FSCREENINFO, &finf) < 0) {
+        sys_close(fd); return 0 - 1;
+    }
+    var vinf[160];                                 # fb_var_screeninfo (160 bytes)
+    if (syscall(FB_SYS_IOCTL, fd, FBIOGET_VSCREENINFO, &vinf) < 0) {
+        sys_close(fd); return 0 - 1;
+    }
+
+    fbdev_xres   = load32(&vinf + FBV_XRES);
+    fbdev_yres   = load32(&vinf + FBV_YRES);
+    fbdev_bpp    = load32(&vinf + FBV_BPP);
+    fbdev_stride = load32(&finf + FBF_LINE_LENGTH);
+    fbdev_ro = load32(&vinf + FBV_RED_OFF);   fbdev_rl = load32(&vinf + FBV_RED_LEN);
+    fbdev_go = load32(&vinf + FBV_GREEN_OFF); fbdev_gl = load32(&vinf + FBV_GREEN_LEN);
+    fbdev_bo = load32(&vinf + FBV_BLUE_OFF);  fbdev_bl = load32(&vinf + FBV_BLUE_LEN);
+
+    var smem_len = load32(&finf + FBF_SMEM_LEN);
+    if (smem_len <= 0) { sys_close(fd); return 0 - 1; }
+
+    # Validate the (untrusted, device-reported) geometry before the blit trusts
+    # it — fail closed on anything inconsistent. Only 16/24/32 bpp keep bypp
+    # (=bpp/8) and fbdev__store_pixel's byte count in lockstep; and the rows must
+    # fit the stride and the whole image must fit the mmap, or the clamped blit
+    # (which only bounds to xres/yres) could overrun device memory.
+    if (fbdev_bpp != 16) { if (fbdev_bpp != 24) { if (fbdev_bpp != 32) { sys_close(fd); return 0 - 1; } } }
+    if (fbdev_xres <= 0)   { sys_close(fd); return 0 - 1; }
+    if (fbdev_yres <= 0)   { sys_close(fd); return 0 - 1; }
+    if (fbdev_stride <= 0) { sys_close(fd); return 0 - 1; }
+    if (fbdev_xres * (fbdev_bpp / 8) > fbdev_stride) { sys_close(fd); return 0 - 1; }
+    if (fbdev_yres * fbdev_stride > smem_len)        { sys_close(fd); return 0 - 1; }
+
+    # mmap(0, smem_len, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0)
+    var base = syscall(FB_SYS_MMAP, 0, smem_len, FB_PROT_RW, FB_MAP_SHARED, fd, 0);
+    # mmap failure returns -errno in [-4095,-1].
+    if (base == (0 - 1)) { sys_close(fd); return 0 - 1; }
+    if (base < 0) { if (base > (0 - 4096)) { sys_close(fd); return 0 - 1; } }
+
+    fbdev_fd    = fd;
+    fbdev_mem   = base;
+    fbdev_mapsz = smem_len;
+    fbdev_xoff  = 0;
+    fbdev_yoff  = 0;
+    return 0;
+}
+
+# Paint the rendered buffer onto the device. The mmap IS the device — no extra
+# syscall. Returns pixels written, or -1 if not open.
+fn fbdev_present(): i64 {
+    if (fbdev_mem == 0) { return 0 - 1; }
+    return fbdev_blit_core(fb_buf(), fb_width(), fb_height(),
+                           fbdev_mem, fbdev_xres, fbdev_yres,
+                           fbdev_stride, fbdev_bpp, fbdev_xoff, fbdev_yoff,
+                           fbdev_ro, fbdev_rl, fbdev_go, fbdev_gl, fbdev_bo, fbdev_bl);
+}
+
+fn fbdev_width(): i64  { return fbdev_xres; }
+fn fbdev_height(): i64 { return fbdev_yres; }
+fn fbdev_bpp(): i64    { return fbdev_bpp; }
+
+fn fbdev_close(): i64 {
+    if (fbdev_mem != 0) { syscall(FB_SYS_MUNMAP, fbdev_mem, fbdev_mapsz); fbdev_mem = 0; }
+    if (fbdev_fd >= 0)  { sys_close(fbdev_fd); fbdev_fd = 0 - 1; }
+    fbdev_mapsz = 0;
+    return 0;
+}
+
+#endif
+
+#ifndef CYRIUS_TARGET_LINUX
+fn fbdev_open(): i64    { return 0 - 1; }
+fn fbdev_present(): i64 { return 0 - 1; }
+fn fbdev_width(): i64   { return 0; }
+fn fbdev_height(): i64  { return 0; }
+fn fbdev_bpp(): i64     { return 0; }
+fn fbdev_close(): i64   { return 0; }
+#endif

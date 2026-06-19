@@ -1,0 +1,93 @@
+# puka_session.cyr — M5 capstone: a live interactive terminal on a Linux
+# framebuffer + evdev keyboard, hosting a shell. Single-threaded busy-poll, no
+# threads. The whole thing is Linux-guarded and skip-clean: on a host without
+# /dev/fb0 or a readable keyboard device it prints a reason and exits 0.
+#
+# This is the first build of puka you can actually USE — but only on a real
+# Linux VT in graphics mode (the dev/CI sandbox has no framebuffer). It cannot
+# be exercised headlessly; run it on the console:
+#
+#   Build:  cyrius build programs/puka_session.cyr build/puka_session
+#   Run  :  sudo ./build/puka_session /dev/input/eventN     # N = your keyboard
+#           (needs read access to the evdev device + write access to /dev/fb0;
+#            run from a text VT, not under X/Wayland)
+#
+# The keyboard device path is the FIRST thing to get right — pick the eventN
+# that is your keyboard (see /proc/bus/input/devices). It is set below; edit
+# KBD_PATH or pass it as argv[1] once arg wiring lands.
+
+include "src/parser.cyr"
+include "src/grid.cyr"
+include "src/unicode.cyr"
+include "src/terminal.cyr"
+include "lib/kashi_font_data.cyr"
+include "src/render/fb.cyr"
+include "src/render/fbdev.cyr"
+include "src/input.cyr"
+include "src/input/evdev.cyr"
+include "src/pty.cyr"
+
+fn emit_str(s): i64 { syscall(1, 1, s, strlen(s)); return 0; }
+
+fn main(): i64 {
+    alloc_init();
+
+    var kbd_path = "/dev/input/event0";       # TODO(argv): pick YOUR keyboard's eventN
+
+    # (1) framebuffer
+    if (fbdev_open() < 0) { emit_str("puka_session: no /dev/fb0 (need a Linux VT) — exiting\n"); return 0; }
+
+    # (2) grid geometry from the panel, at the 8x16 cell, clamped to grid limits
+    var cols = fbdev_width() / 8;
+    var rows = fbdev_height() / 16;
+    if (cols > 132) { cols = 132; }
+    if (rows > 64)  { rows = 64; }
+    if (cols < 1) { cols = 1; }
+    if (rows < 1) { rows = 1; }
+    term_init(rows, cols);
+    if (fb_init(8, 16) < 0) { emit_str("puka_session: fb_init failed\n"); fbdev_close(); return 0; }
+
+    # (3) keyboard (grabs the device exclusively)
+    if (evdev_open(kbd_path) < 0) {
+        emit_str("puka_session: cannot open keyboard device — exiting\n");
+        fbdev_close(); return 0;
+    }
+
+    # (4) PTY + shell
+    if (pty_open() < 0) { emit_str("puka_session: no PTY — exiting\n"); evdev_close(); fbdev_close(); return 0; }
+    if (pty_spawn("/bin/sh", 0, 0, rows, cols) < 0) {
+        emit_str("puka_session: shell spawn failed\n");
+        pty_close(); evdev_close(); fbdev_close(); return 0;
+    }
+
+    # (5) the loop — busy-poll keyboard + PTY, render on change, 1ms nap.
+    var kbuf[256];
+    var st[8];
+    fb_render(); fbdev_present();              # first frame (blank screen + cursor)
+    var alive = 1;
+    while (alive == 1) {
+        var kbytes = evdev_poll(&kbuf, 256);   # raw keys -> input_encode -> bytes
+        if (kbytes > 0) { pty_write(&kbuf, kbytes); }
+
+        var consumed = pty_pump(1);            # drain child output -> grid (max_idle=1)
+        if (consumed > 0) { fb_render(); fbdev_present(); }
+
+        pty__nap();                            # 1ms nanosleep (reuse pty.cyr)
+
+        # WNOHANG: 0 = child still running; >0 = exited; <0 = error (e.g. ECHILD).
+        # Exit on ANY non-zero result so a waitpid error can never hang the loop
+        # with the keyboard left grabbed.
+        var w = sys_waitpid(pty_child_pid, &st, 1);
+        if (w != 0) { alive = 0; }
+    }
+
+    # (6) cleanup
+    pty_close();
+    evdev_close();                             # ungrabs the keyboard
+    fbdev_close();
+    emit_str("puka_session: shell exited.\n");
+    return 0;
+}
+
+fn _entry(): i64 { var rc = main(); syscall(SYS_EXIT, rc); return 0; }
+_entry();

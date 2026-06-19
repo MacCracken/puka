@@ -1,0 +1,257 @@
+# evdev.cyr — Linux /dev/input/eventN raw-scancode keyboard source (M5).
+#
+# Reads 24-byte struct input_event records, decodes US-QWERTY scancodes to a
+# puka (sym, mods), runs them through input_encode (input.cyr), and emits the
+# child PTY bytes. Modifier state is tracked across events. The input half of
+# the live Linux terminal — the M5 sibling of the (post-v1.0) AGNOS xHCI/HID path.
+#
+# PURE core (headless, synthetic-record tested, no device):
+#   evdev__is_mod, evdev__keymap, evdev__decode.
+# LINUX-GUARDED edge (#ifdef CYRIUS_TARGET_LINUX; non-Linux stubs -> -1):
+#   evdev_open / evdev_poll / evdev_mods / evdev_close.
+#
+# Co-compiled: consumer includes parser/grid/unicode/terminal/input.cyr then this
+# file (it calls input_encode and uses KEY_*/MOD_*). evdev.cyr includes nothing.
+# US-QWERTY only; CapsLock/NumLock deferred. Trust boundary: adversarial device.
+
+enum EvdevAbi {
+    EV_SYS_IOCTL  = 16;
+    EV_O_RDONLY   = 0;
+    EV_O_NONBLOCK = 0x800;
+    EVIOCGRAB     = 0x40044590;   # grab the device exclusively (arg = ptr to int 1/0)
+    EV_KEY        = 1;
+    EVREC_TYPE    = 16;           # input_event byte offsets (24-byte record)
+    EVREC_VALUE   = 20;
+    EVREC_SIZE    = 24;
+    # modifier scancodes
+    KC_LEFTSHIFT  = 42;   KC_RIGHTSHIFT = 54;
+    KC_LEFTCTRL   = 29;   KC_RIGHTCTRL  = 97;
+    KC_LEFTALT    = 56;   KC_RIGHTALT   = 100;
+    KC_LEFTMETA   = 125;  KC_RIGHTMETA  = 126;
+}
+
+# ---- module state ------------------------------------------------------
+var evdev_fd = 0 - 1;
+var evdev_mod[1];        # 1 u64 cell; low byte holds the current MOD_* bitmask
+
+# ---- pure cores --------------------------------------------------------
+
+# Modifier scancode -> a distinct PHYSICAL-key bit (one per L/R key), else 0.
+# Tracking left and right independently (rather than collapsing to one MOD_ bit)
+# keeps the state correct when BOTH of a pair are held and one is released.
+fn evdev__mod_physbit(code): i64 {
+    if (code == KC_LEFTSHIFT)  { return 1; }      # bit 0
+    if (code == KC_RIGHTSHIFT) { return 2; }      # bit 1
+    if (code == KC_LEFTCTRL)   { return 4; }      # bit 2
+    if (code == KC_RIGHTCTRL)  { return 8; }      # bit 3
+    if (code == KC_LEFTALT)    { return 16; }     # bit 4
+    if (code == KC_RIGHTALT)   { return 32; }     # bit 5
+    if (code == KC_LEFTMETA)   { return 64; }     # bit 6
+    if (code == KC_RIGHTMETA)  { return 128; }    # bit 7
+    return 0;
+}
+
+# Physical-key down-set -> the MOD_* bitmask (a group's bit is set iff its L or R
+# key is held).
+fn evdev__derive_mods(phys): i64 {
+    var m = 0;
+    if ((phys & 3) != 0)   { m = m | MOD_SHIFT; }     # left | right shift
+    if ((phys & 12) != 0)  { m = m | MOD_CTRL; }      # left | right ctrl
+    if ((phys & 48) != 0)  { m = m | MOD_ALT; }       # left | right alt
+    if ((phys & 192) != 0) { m = m | MOD_META; }      # left | right meta
+    return m;
+}
+
+# US-QWERTY scancode -> puka sym (codepoint, or a KEY_* >= 0x110000). `shift`
+# selects the shifted glyph for printables. Tab returns 0x09 here (decode maps
+# Shift+Tab -> Backtab). Unknown code -> -1 (emit nothing). A bounded branch
+# ladder — inherently safe against an out-of-range keycode.
+fn evdev__keymap(code, shift): i64 {
+    # named ASCII control / whitespace
+    if (code == 1)  { return 0x1B; }            # ESC
+    if (code == 14) { return 0x7F; }            # Backspace -> DEL
+    if (code == 15) { return 0x09; }            # Tab
+    if (code == 28) { return 0x0D; }            # Enter -> CR
+    if (code == 57) { return 0x20; }            # Space
+
+    # letters (shift -> uppercase)
+    if (code == 30) { if (shift != 0) { return 0x41; } return 0x61; }   # a
+    if (code == 48) { if (shift != 0) { return 0x42; } return 0x62; }   # b
+    if (code == 46) { if (shift != 0) { return 0x43; } return 0x63; }   # c
+    if (code == 32) { if (shift != 0) { return 0x44; } return 0x64; }   # d
+    if (code == 18) { if (shift != 0) { return 0x45; } return 0x65; }   # e
+    if (code == 33) { if (shift != 0) { return 0x46; } return 0x66; }   # f
+    if (code == 34) { if (shift != 0) { return 0x47; } return 0x67; }   # g
+    if (code == 35) { if (shift != 0) { return 0x48; } return 0x68; }   # h
+    if (code == 23) { if (shift != 0) { return 0x49; } return 0x69; }   # i
+    if (code == 36) { if (shift != 0) { return 0x4A; } return 0x6A; }   # j
+    if (code == 37) { if (shift != 0) { return 0x4B; } return 0x6B; }   # k
+    if (code == 38) { if (shift != 0) { return 0x4C; } return 0x6C; }   # l
+    if (code == 50) { if (shift != 0) { return 0x4D; } return 0x6D; }   # m
+    if (code == 49) { if (shift != 0) { return 0x4E; } return 0x6E; }   # n
+    if (code == 24) { if (shift != 0) { return 0x4F; } return 0x6F; }   # o
+    if (code == 25) { if (shift != 0) { return 0x50; } return 0x70; }   # p
+    if (code == 16) { if (shift != 0) { return 0x51; } return 0x71; }   # q
+    if (code == 19) { if (shift != 0) { return 0x52; } return 0x72; }   # r
+    if (code == 31) { if (shift != 0) { return 0x53; } return 0x73; }   # s
+    if (code == 20) { if (shift != 0) { return 0x54; } return 0x74; }   # t
+    if (code == 22) { if (shift != 0) { return 0x55; } return 0x75; }   # u
+    if (code == 47) { if (shift != 0) { return 0x56; } return 0x76; }   # v
+    if (code == 17) { if (shift != 0) { return 0x57; } return 0x77; }   # w
+    if (code == 45) { if (shift != 0) { return 0x58; } return 0x78; }   # x
+    if (code == 21) { if (shift != 0) { return 0x59; } return 0x79; }   # y
+    if (code == 44) { if (shift != 0) { return 0x5A; } return 0x7A; }   # z
+
+    # digit row (shift -> symbol)
+    if (code == 2)  { if (shift != 0) { return 0x21; } return 0x31; }   # 1 !
+    if (code == 3)  { if (shift != 0) { return 0x40; } return 0x32; }   # 2 @
+    if (code == 4)  { if (shift != 0) { return 0x23; } return 0x33; }   # 3 #
+    if (code == 5)  { if (shift != 0) { return 0x24; } return 0x34; }   # 4 $
+    if (code == 6)  { if (shift != 0) { return 0x25; } return 0x35; }   # 5 %
+    if (code == 7)  { if (shift != 0) { return 0x5E; } return 0x36; }   # 6 ^
+    if (code == 8)  { if (shift != 0) { return 0x26; } return 0x37; }   # 7 &
+    if (code == 9)  { if (shift != 0) { return 0x2A; } return 0x38; }   # 8 *
+    if (code == 10) { if (shift != 0) { return 0x28; } return 0x39; }   # 9 (
+    if (code == 11) { if (shift != 0) { return 0x29; } return 0x30; }   # 0 )
+    if (code == 12) { if (shift != 0) { return 0x5F; } return 0x2D; }   # - _
+    if (code == 13) { if (shift != 0) { return 0x2B; } return 0x3D; }   # = +
+
+    # punctuation
+    if (code == 26) { if (shift != 0) { return 0x7B; } return 0x5B; }   # [ {
+    if (code == 27) { if (shift != 0) { return 0x7D; } return 0x5D; }   # ] }
+    if (code == 39) { if (shift != 0) { return 0x3A; } return 0x3B; }   # ; :
+    if (code == 40) { if (shift != 0) { return 0x22; } return 0x27; }   # ' "
+    if (code == 41) { if (shift != 0) { return 0x7E; } return 0x60; }   # ` ~
+    if (code == 43) { if (shift != 0) { return 0x7C; } return 0x5C; }   # \ |
+    if (code == 51) { if (shift != 0) { return 0x3C; } return 0x2C; }   # , <
+    if (code == 52) { if (shift != 0) { return 0x3E; } return 0x2E; }   # . >
+    if (code == 53) { if (shift != 0) { return 0x3F; } return 0x2F; }   # / ?
+    if (code == 55) { return 0x2A; }                                   # KP *
+
+    # navigation -> named keys
+    if (code == 103) { return KEY_UP; }
+    if (code == 108) { return KEY_DOWN; }
+    if (code == 106) { return KEY_RIGHT; }
+    if (code == 105) { return KEY_LEFT; }
+    if (code == 102) { return KEY_HOME; }
+    if (code == 107) { return KEY_END; }
+    if (code == 110) { return KEY_INSERT; }
+    if (code == 111) { return KEY_DELETE; }
+    if (code == 104) { return KEY_PGUP; }
+    if (code == 109) { return KEY_PGDN; }
+
+    # function keys
+    if (code == 59) { return KEY_F1; }   if (code == 60) { return KEY_F2; }
+    if (code == 61) { return KEY_F3; }   if (code == 62) { return KEY_F4; }
+    if (code == 63) { return KEY_F5; }   if (code == 64) { return KEY_F6; }
+    if (code == 65) { return KEY_F7; }   if (code == 66) { return KEY_F8; }
+    if (code == 67) { return KEY_F9; }   if (code == 68) { return KEY_F10; }
+    if (code == 87) { return KEY_F11; }  if (code == 88) { return KEY_F12; }
+
+    return 0 - 1;        # unknown
+}
+
+# Decode ONE 24-byte input_event at ev_ptr against the 1-byte mod-state at
+# st_ptr, emitting child bytes into out. Returns bytes written (0 = nothing).
+# Modifier keys update *st_ptr (press sets / release clears the bit) and emit
+# nothing. Release of a normal key emits nothing; press(1)/autorepeat(2) -> keymap
+# + input_encode. SHIFT is consumed by glyph selection for printables (cleared
+# from the mods passed) but passed through for named keys (so xterm CSI 1;<n> is
+# built). Shift+Tab -> Backtab. Untrusted device: unknown codes -> nothing.
+fn evdev__decode(ev_ptr, st_ptr, out): i64 {
+    var w0    = load32(ev_ptr + EVREC_TYPE);          # type @16 (low 16) | code @18 (high 16)
+    var type  = w0 & 0xFFFF;
+    if (type != EV_KEY) { return 0; }
+    var code  = (w0 >> 16) & 0xFFFF;
+    var value = load32(ev_ptr + EVREC_VALUE);
+
+    var pbit = evdev__mod_physbit(code);
+    if (pbit != 0) {
+        var phys = load8(st_ptr + 1);                  # physical L/R down-set (byte 1)
+        if (value == 1) { phys = phys | pbit; }
+        if (value == 0) { phys = phys & (0 - 1 - pbit); }
+        store8(st_ptr + 1, phys);
+        store8(st_ptr, evdev__derive_mods(phys));      # byte 0 = derived MOD_ mask
+        return 0;
+    }
+
+    if (value == 0) { return 0; }                      # release of a normal key
+    if (value != 1) { if (value != 2) { return 0; } }  # only press / autorepeat
+
+    var mods = load8(st_ptr);
+    var shift = mods & MOD_SHIFT;
+    var sym = evdev__keymap(code, shift);
+    if (sym < 0) { return 0; }                         # unknown keycode
+
+    if (code == 15) {                                  # Tab: Shift+Tab -> Backtab (ESC[Z)
+        if (shift != 0) { sym = KEY_BACKTAB; }
+        return input_encode(sym, mods & (0 - 1 - MOD_SHIFT), out);
+    }
+    if (sym >= 0x110000) {                             # named key: pass full mods (incl SHIFT)
+        return input_encode(sym, mods, out);
+    }
+    # printable: SHIFT already consumed by glyph selection -> drop it (CTRL/ALT/META pass through)
+    return input_encode(sym, mods & (0 - 1 - MOD_SHIFT), out);
+}
+
+# ---- Linux-guarded device layer ----------------------------------------
+
+#ifdef CYRIUS_TARGET_LINUX
+
+# Open /dev/input/eventN read-only + non-blocking, and grab it (EVIOCGRAB 1) so
+# keystrokes don't also reach the host VT. Returns fd, or -1.
+fn evdev_open(path): i64 {
+    var fd = sys_open(path, EV_O_RDONLY | EV_O_NONBLOCK, 0);
+    if (fd < 0) { return 0 - 1; }
+    var grab[8];
+    store64(&grab, 1);
+    syscall(EV_SYS_IOCTL, fd, EVIOCGRAB, &grab);       # best-effort; ignore failure
+    evdev_fd = fd;
+    store8(&evdev_mod, 0);          # byte 0: derived MOD_ mask
+    store8(&evdev_mod + 1, 0);      # byte 1: physical L/R down-set
+    return fd;
+}
+
+# Non-blocking: read whole 24-byte records, decode each into out (bounded by cap).
+# EAGAIN / no data -> 0 (like pty_pump's EAGAIN path). Returns bytes for pty_write.
+fn evdev_poll(out, cap): i64 {
+    if (evdev_fd < 0) { return 0; }
+    var rec[768];                                      # 32 records * 24 bytes
+    var n = file_read(evdev_fd, &rec, 768);
+    if (n <= 0) { return 0; }                          # EAGAIN (<0) or EOF (0)
+    var total = 0;
+    var i = 0;
+    while (i + EVREC_SIZE <= n) {                       # whole records only; drop a short tail
+        # Reserve headroom: one decoded key emits up to ~9 bytes (a modified F-key),
+        # so only decode while >= 16 bytes remain — never overrun `out` even if an
+        # adversarial device floods events. No headroom -> drop the rest this poll.
+        if (total + 16 > cap) { i = n; }
+        else {
+            total = total + evdev__decode(&rec + i, &evdev_mod, out + total);
+            i = i + EVREC_SIZE;
+        }
+    }
+    return total;
+}
+
+fn evdev_mods(): i64 { return load8(&evdev_mod); }
+
+fn evdev_close(): i64 {
+    if (evdev_fd >= 0) {
+        var ungrab[8];
+        store64(&ungrab, 0);
+        syscall(EV_SYS_IOCTL, evdev_fd, EVIOCGRAB, &ungrab);
+        sys_close(evdev_fd);
+        evdev_fd = 0 - 1;
+    }
+    return 0;
+}
+
+#endif
+
+#ifndef CYRIUS_TARGET_LINUX
+fn evdev_open(path): i64     { return 0 - 1; }
+fn evdev_poll(out, cap): i64 { return 0; }
+fn evdev_mods(): i64         { return 0; }
+fn evdev_close(): i64        { return 0; }
+#endif

@@ -114,18 +114,17 @@ PTY echo) + `programs/input_demo.cyr`. Adversarial review closed.
 - Mouse tracking (SGR) deferred to M6.
 - **Acceptance** (encoder): every key/modifier sequence is byte-exact and parses back through puka's parser; encoded keys drive a real child end-to-end — ✅. The live "type at a keyboard" session lands with the M5 key source.
 
-### M5 — Linux live terminal (0.5.0) — the first *usable* puka
+### M5 — Linux live terminal (0.5.0) — ✅ shipped 2026-06-18
 
-The live edges over the M1–M4 core: puka runs as a **real interactive terminal on
-a Linux framebuffer/VT**, with no host terminal underneath. The pre-AGNOS proof
-that the whole stack works end to end — and the first build of puka you can
-actually *use*. Each edge keeps a headless-testable core and a Linux-guarded,
-skip-clean device layer (the M2/M3/M4 discipline).
+The live edges over the M1–M4 core: puka runs as a **real interactive terminal on a
+Linux framebuffer/VT**, no host terminal underneath — the pre-AGNOS proof, and the
+first build you can actually *use*. Each edge keeps a headless-testable core + a
+Linux-guarded, skip-clean device layer (the M2/M3/M4 discipline).
 
-- **Display backend** (`render/fbdev.cyr`) — blit the renderer's RGB pixel buffer to the Linux framebuffer: open `/dev/fb0`, read var/fix screeninfo (resolution, bpp, line length), `mmap` it, and convert+blit `fb_buf()` (24-bit RGB) into the device format (32/24/16 bpp, stride-aware). The pure blit/format-conversion logic is headless-testable against an in-memory fake framebuffer; the device open/mmap is Linux-guarded + skip-clean. Damage-aware (blit only dirty rows). KMS/DRM is an optional alternative path.
-- **Key source** (`input/evdev.cyr`) — read raw key events from Linux evdev (`/dev/input/eventN`): decode `input_event` records + a scancode→keysym keymap while tracking modifier-key state, then `input_encode(sym, mods, …)` → `pty_write`. The decode logic is headless-testable (feed synthetic `input_event` bytes → assert keysym/mods); the device read is Linux-guarded + skip-clean.
-- **Interactive loop** — the single-threaded event loop: poll the evdev fd + the PTY master, encode keys → child, `pty_pump` child output → grid, render dirty rows → framebuffer. Spawn `$SHELL`; handle resize.
-- **Acceptance**: launch puka on a Linux VT/framebuffer, get a shell prompt, type and run commands, see correct colour/glyph/cursor output — a real interactive session, the DOOM/tracker-class proof on Linux.
+- **Display** (`src/render/fbdev.cyr`) — ✅ blits `fb_buf()` (24-bit RGB) to `/dev/fb0`: pure pixel-pack + stride/offset/clamp blit generic over 16/24/32-bpp truecolor layouts (via the `FBIOGET_VSCREENINFO` bitfields), tested against an in-memory fake fb; Linux-guarded open/ioctl/mmap/present with the device geometry validated before the blit trusts it. The ABI struct offsets were validated read-only against real hardware (2560×1440 XRGB8888).
+- **Key source** (`src/input/evdev.cyr`) — ✅ decodes raw `/dev/input/eventN` `input_event` records via a US-QWERTY keymap with independent L/R modifier tracking → `input_encode` → `pty_write`; `EVIOCGRAB`s the device. Pure decode tested on synthetic events; untrusted-device-bounded.
+- **Interactive loop** (`programs/puka_session.cyr`) — ✅ single-threaded busy-poll: evdev → child, `pty_pump` → grid, `fb_render` → `fbdev_present`; spawns `/bin/sh`, exits on child death.
+- **Tests**: `tests/fbdev.tcyr` (25) + `tests/evdev.tcyr` (49). Adversarial review closed (4 fixes). **Acceptance** (live session: shell prompt, type & run, correct output) is exercised on a bare Linux VT — it cannot run under a compositor or in CI, so it is verified on real hardware rather than in the headless suite.
 
 ### M6 — Conformance + polish (0.6.0 → 0.9.0)
 

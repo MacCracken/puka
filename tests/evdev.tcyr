@@ -1,0 +1,124 @@
+# evdev.tcyr — Linux evdev keyboard decode tests (M5).
+# Pure/headless: feeds synthetic 24-byte input_event records through
+# evdev__decode and asserts the exact bytes input_encode emits, plus modifier
+# tracking. NO device is opened here — evdev_open grabs the keyboard
+# exclusively (EVIOCGRAB), which must never run inside the test suite; the
+# device layer is exercised only by programs/puka_session.cyr, run deliberately.
+
+include "src/parser.cyr"
+include "src/grid.cyr"
+include "src/unicode.cyr"
+include "src/terminal.cyr"
+include "src/input.cyr"
+include "src/input/evdev.cyr"
+
+var tev[24];    # synthetic input_event (module-global cells; first 24 bytes used)
+var tst[1];     # mod-state byte
+var tout[16];   # decode output
+
+# Build a synthetic input_event: type@16 (low16) | code@18 (high16) | value@20.
+fn mk_ev(type, code, value): i64 {
+    store64(&tev, 0); store64(&tev + 8, 0);                              # timeval (ignored)
+    store64(&tev + 16, (type & 0xFFFF) | ((code & 0xFFFF) << 16) | (value << 32));
+    return 0;
+}
+
+# Decode one event against tst into tout; return bytes emitted.
+fn dec(type, code, value): i64 {
+    mk_ev(type, code, value);
+    return evdev__decode(&tev, &tst, &tout);
+}
+
+# Reset mod-state: byte0 (derived MOD_ mask) + byte1 (physical L/R down-set).
+fn rst(): i64 { store8(&tst + 0, 0); store8(&tst + 1, 0); return 0; }
+
+fn main() {
+    alloc_init();
+    term_init(24, 80);
+
+    test_group("letter + shift tracking");
+    rst();
+    assert_eq(dec(1, 30, 1), 1, "A press -> 1 byte");
+    assert_eq(load8(&tout), 0x61, "  'a' (unshifted)");
+    assert_eq(dec(1, 42, 1), 0, "LShift press emits nothing");
+    assert_eq(load8(&tst) & MOD_SHIFT, MOD_SHIFT, "  SHIFT now set");
+    assert_eq(dec(1, 30, 1), 1, "A press with shift");
+    assert_eq(load8(&tout), 0x41, "  'A' (shifted)");
+    assert_eq(dec(1, 42, 0), 0, "LShift release emits nothing");
+    assert_eq(load8(&tst) & MOD_SHIFT, 0, "  SHIFT now clear");
+    assert_eq(dec(1, 30, 1), 1, "A press, no shift");
+    assert_eq(load8(&tout), 0x61, "  'a' again");
+
+    test_group("Ctrl folds to C0");
+    rst();
+    assert_eq(dec(1, 29, 1), 0, "LCtrl press emits nothing");
+    assert_eq(load8(&tst) & MOD_CTRL, MOD_CTRL, "  CTRL set");
+    assert_eq(dec(1, 46, 1), 1, "Ctrl+C -> 1 byte");
+    assert_eq(load8(&tout), 0x03, "  0x03 (ETX)");
+
+    test_group("arrows: plain CSI + modified");
+    rst();
+    assert_eq(dec(1, 103, 1), 3, "Up -> 3 bytes");
+    assert_eq(load8(&tout), 0x1B, "  ESC");
+    assert_eq(load8(&tout + 1), 0x5B, "  [");
+    assert_eq(load8(&tout + 2), 0x41, "  A");
+    dec(1, 42, 1);                                  # Shift down
+    assert_eq(dec(1, 103, 1), 6, "Shift+Up -> 6 bytes (CSI 1;2 A)");
+    assert_eq(load8(&tout + 2), 0x31, "  '1'");
+    assert_eq(load8(&tout + 3), 0x3B, "  ';'");
+    assert_eq(load8(&tout + 4), 0x32, "  '2'");
+    assert_eq(load8(&tout + 5), 0x41, "  A");
+
+    test_group("enter / tab / backtab");
+    rst();
+    assert_eq(dec(1, 28, 1), 1, "Enter -> 1 byte");
+    assert_eq(load8(&tout), 0x0D, "  CR");
+    assert_eq(dec(1, 15, 1), 1, "Tab -> 1 byte");
+    assert_eq(load8(&tout), 0x09, "  HT");
+    dec(1, 42, 1);                                  # Shift down
+    assert_eq(dec(1, 15, 1), 3, "Shift+Tab -> 3 bytes");
+    assert_eq(load8(&tout), 0x1B, "  ESC");
+    assert_eq(load8(&tout + 1), 0x5B, "  [");
+    assert_eq(load8(&tout + 2), 0x5A, "  Z (BackTab)");
+
+    test_group("digit/symbol shift + punctuation");
+    rst();
+    assert_eq(dec(1, 2, 1), 1, "1 -> 1 byte");
+    assert_eq(load8(&tout), 0x31, "  '1'");
+    dec(1, 42, 1);
+    assert_eq(dec(1, 2, 1), 1, "Shift+1 -> 1 byte");
+    assert_eq(load8(&tout), 0x21, "  '!'");
+    rst();
+    assert_eq(dec(1, 53, 1), 1, "slash -> '/'");
+    assert_eq(load8(&tout), 0x2F, "  '/'");
+
+    test_group("release + SYN + unknown are no-ops");
+    rst();
+    assert_eq(dec(1, 30, 0), 0, "A release emits nothing");
+    assert_eq(dec(0, 0, 0), 0, "EV_SYN emits nothing");
+    assert_eq(dec(1, 9999, 1), 0, "unknown keycode emits nothing");
+
+    test_group("autorepeat emits");
+    rst();
+    assert_eq(dec(1, 30, 2), 1, "A autorepeat -> 1 byte");
+    assert_eq(load8(&tout), 0x61, "  'a'");
+
+    test_group("L/R modifier pair: releasing one keeps the other");
+    rst();
+    dec(1, 42, 1);                                  # LShift down
+    dec(1, 54, 1);                                  # RShift down
+    assert_eq(load8(&tst) & MOD_SHIFT, MOD_SHIFT, "both shifts held -> SHIFT set");
+    dec(1, 42, 0);                                  # LShift up (RShift still down)
+    assert_eq(load8(&tst) & MOD_SHIFT, MOD_SHIFT, "one released -> SHIFT still set");
+    assert_eq(dec(1, 30, 1), 1, "A press");
+    assert_eq(load8(&tout), 0x41, "  still 'A' (RShift held)");
+    dec(1, 54, 0);                                  # RShift up
+    assert_eq(load8(&tst) & MOD_SHIFT, 0, "both released -> SHIFT clear");
+    assert_eq(dec(1, 30, 1), 1, "A press");
+    assert_eq(load8(&tout), 0x61, "  'a' again (no shift)");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

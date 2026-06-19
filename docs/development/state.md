@@ -5,19 +5,20 @@
 
 ## Version
 
-**0.4.0** — **cut 2026-06-18, awaiting user tag.** Contents: **M4 (input
-encoding)** — `src/input.cyr`, a pure keyboard→escape-sequence encoder
-(`input_encode` / `input_paste`), byte-exact against xterm `ctlseqs` and
-round-tripped through puka's own parser: printable/control/alt, cursor & nav &
-function keys, the xterm modifier formula, DECCKM application-cursor mode, and
-bracketed paste (mode 2004) with anti-injection sanitization. Release gate green:
-**336 tests pass**, fmt/lint clean (0 warnings), multi-agent adversarial review
-closed (1 low-sev hardening applied + regression-tested), VERSION↔cyrius.cyml↔
-CHANGELOG all `0.4.0`. The **live raw-key source** (Linux evdev / AGNOS xHCI-HID)
-+ interactive loop ride with the **M5** display backend — 0.4.0 ships the
-platform-agnostic encoder + a proven PTY round-trip (encoded keys → child → echo →
-grid). (0.3.0 = M3 renderer; 0.2.0 = M2 PTY; 0.1.0 = M1 VT core.) Version map:
-M(n) → 0.n.0.
+**0.5.0** — **cut 2026-06-18, awaiting user tag.** Contents: **M5 (Linux live
+terminal)** — the live edges over the M1–M4 core: `src/render/fbdev.cyr` (blit the
+RGB buffer to `/dev/fb0`, generic over 16/24/32-bpp truecolor layouts),
+`src/input/evdev.cyr` (decode raw `/dev/input` scancodes → `input_encode`, US
+keymap + independent L/R modifiers), and `programs/puka_session.cyr` (the
+single-threaded interactive loop hosting `/bin/sh`). puka now runs as a real
+interactive terminal on a Linux framebuffer/VT. Release gate green: **410 tests
+pass**, fmt/lint clean (0 warnings), multi-agent adversarial review closed (4
+fixes applied + regression-tested), the fbdev ABI offsets validated read-only
+against real hardware (2560×1440 XRGB8888), VERSION↔cyrius.cyml↔CHANGELOG all
+`0.5.0`. The pure cores are headless-tested; the device layers are Linux-guarded;
+the live on-screen session runs on a bare Linux VT (user-side — it can't run under
+a compositor or in CI). **AGNOS-native bring-up is post-v1.0.** (0.4.0 = M4 input;
+0.3.0 = M3 renderer; 0.2.0 = M2 PTY; 0.1.0 = M1 VT core.) Version map: M(n) → 0.n.0.
 
 ## Toolchain
 
@@ -32,10 +33,13 @@ M(n) → 0.n.0.
 - `src/pty.cyr` — PTY + process plumbing (Linux): open/spawn/pump/write/winsize/wait/close. Linux-guarded; the agnos backend is post-v1.0.
 - `src/render/fb.cyr` — framebuffer renderer (M3): grid → RGB pixel buffer. Pure read of the grid; colour resolution (default/16/256/truecolor + bold/dim/reverse/hidden), background paint, kashi glyph blit (VGA 8×16), cursor block, per-row damage consumption, PPM (P6) dump. Integer-only, every pixel write bounds-clamped.
 - `src/input.cyr` — keyboard→escape-sequence encoder (M4): `input_encode(sym, mods, out)` (disjoint keysym range; xterm modifier formula via `input__xtmod`) + `input_paste(text, len, cap, out)` (bracketed-paste 2004 wrap + ESC/0x9B strip + cap bound). Pure; reads terminal modes via getters.
+- `src/render/fbdev.cyr` — Linux `/dev/fb0` display backend (M5): pure RGB→device-format pixel pack + bounds-clamped blit (16/24/32-bpp, stride-aware) over `fb_buf()`; Linux-guarded open/ioctl(screeninfo)/mmap/present, with device geometry validated before the blit trusts it.
+- `src/input/evdev.cyr` — Linux `/dev/input/eventN` keyboard source (M5): pure `input_event` decode + US-QWERTY keymap + independent L/R modifier tracking → `input_encode`; Linux-guarded open/read/`EVIOCGRAB`. Untrusted-device-bounded.
 - `src/main.cyr` — demo entry: drives a canned stream through the full pipe, prints the rendered grid.
 - `programs/pty_demo.cyr` — live demo: runs `/bin/ls /` inside a PTY, re-renders the captured grid.
 - `programs/fb_demo.cyr` — framebuffer demo: drives a styled grid through the pipe and writes `puka_frame.ppm` (the first visible render).
 - `programs/input_demo.cyr` — input demo: "types" into `/bin/cat` via `input_encode` → `pty_write`, pumps the echo, re-renders (the input path end to end).
+- `programs/puka_session.cyr` — **M5 capstone**: the live interactive terminal — spawns `/bin/sh`, busy-polls evdev + the PTY master, encodes keys → child, pumps output → grid, renders → `/dev/fb0`. Run on a bare Linux VT.
 
 `src/grid.cyr` additionally owns the **per-row damage bitset** (`grid_dirty_rows`),
 marked at every write chokepoint and consumed by the renderer
@@ -43,14 +47,14 @@ marked at every write chokepoint and consumed by the renderer
 
 ## Tests
 
-- `tests/parser.tcyr` (70), `tests/grid.tcyr` (66, resize + per-row damage), `tests/unicode.tcyr` (28), `tests/terminal.tcyr` (55, + DECCKM/2004 getters), `tests/render.tcyr` (44 — palette/decode/resolve/paint/glyph/cursor/PPM), `tests/input.tcyr` (67 — byte-exact + `vt_feed` round-trips + paste), `tests/pty.tcyr` (2) + `tests/input_pty.tcyr` (2, real PTY echo — both skip-clean), `tests/puka.tcyr` (2 smoke) — **336 assertions, all green** (`cyrius test`).
+- `tests/parser.tcyr` (70), `tests/grid.tcyr` (66, resize + per-row damage), `tests/unicode.tcyr` (28), `tests/terminal.tcyr` (55, + DECCKM/2004 getters), `tests/render.tcyr` (44 — palette/resolve/paint/glyph/cursor/PPM), `tests/input.tcyr` (67 — byte-exact + `vt_feed` round-trips + paste), `tests/fbdev.tcyr` (25 — pixel pack + stride/clamp blit vs a fake fb), `tests/evdev.tcyr` (49 — synthetic-event decode + L/R modifiers), `tests/pty.tcyr` (2) + `tests/input_pty.tcyr` (2, real PTY echo — both skip-clean), `tests/puka.tcyr` (2 smoke) — **410 assertions, all green** (`cyrius test`).
 - `tests/puka.bcyr` / `tests/puka.fcyr` — bench / fuzz stubs (fuzzing the parser against adversarial input is the M-hardening target).
 
 ## Carry-forward / known
 
 - **Large static data warning** (~240KB): grid backing store (~142KB) + kashi's font BSS (~99KB — its glyph tables are u64-unit byte arrays). The renderer's pixel buffer is **heap-allocated** (`alloc`), not static. Acceptable; heap-allocating the grid remains a deferred optimization.
 - **Wide CJK glyphs render blank**: kashi's built-in fonts cover CP437 (0x20..0xFF) only, so a width-2 cell paints its background but no glyph until a wider font (PSF/runtime-loaded or `rekha`) lands. The grid/width handling is already correct.
-- Deferred (later milestones): live on-screen display backend (open M3 item, below); DA/DSR query responses, charset designators (ESC ( B), alt-screen (1049); mouse/bracketed-paste modes are M6.
+- Deferred (M6 conformance / post-v1.0): DA/DSR query responses, charset designators (ESC ( B), alt-screen (1049), scrollback ring, origin-mode edge cases, mouse tracking, grapheme clustering; non-US keymaps + CapsLock in evdev; AGNOS-native edges (display/input/PTY) are post-v1.0.
 
 ## Dependencies
 
@@ -70,23 +74,17 @@ Planned (own-the-stack, not yet wired): `rekha`+`sadish` (vector glyphs, post-v1
 
 _None yet._ Phase-2 command center (post-v1.0) will be the first.
 
-**M5 (→ 0.5.0) — Linux live terminal: the first *usable* puka.** The
-platform-agnostic core is complete through M4 (parse → grid → render → encode), all
-headless-testable. M5 wires the two **live Linux edges** over it so puka runs as a
-real interactive terminal on a Linux framebuffer/VT:
-1. **Display** (`render/fbdev.cyr`) — blit `fb_buf()` (24-bit RGB) into the Linux
-   framebuffer (`/dev/fb0` mmap; var/fix screeninfo; 32/24/16-bpp + stride
-   conversion; damage-aware). Pure blit logic headless-testable vs an in-memory
-   fake fb; the device open/mmap is Linux-guarded + skip-clean.
-2. **Key source** (`input/evdev.cyr`) — decode Linux evdev `input_event` records +
-   a scancode→keysym keymap (tracking modifiers) → `input_encode` → `pty_write`.
-   Decode logic headless-testable; the device read is Linux-guarded + skip-clean.
-3. **Interactive loop** — poll evdev + PTY master, encode → child, pump → grid,
-   render dirty rows → framebuffer; spawn `$SHELL`.
+**M6 (→ 0.6.0 … 0.9.0) — conformance + polish.** With the full Linux terminal
+working end to end (M1–M5), M6 makes it *correct and complete*: a curated vttest /
+`ctlseqs` conformance pass; **alternate screen** (1049); scrollback ring; origin
+mode; charset switching (DEC special graphics); DA/DSR query responses (now that
+there's a host writer); mouse tracking (SGR); grapheme clustering; and **fuzzing the
+parser hard** against malformed/truncated/adversarial input (the untrusted-input
+boundary). Then **M7** is the v1.0 hardening sweep + engine-API freeze.
 
-**AGNOS-native bring-up moved to post-v1.0** (AGNOS lacks a console environment to
-host puka). v1.0 is a Linux-complete terminal; the AGNOS edges (`blit`#39 + xHCI/HID
-+ kernel PTY) drop in behind the same seams when AGNOS is ready. See
+**AGNOS-native bring-up stays post-v1.0** (AGNOS lacks a console environment to host
+puka). v1.0 is a Linux-complete terminal; the AGNOS edges (`blit`#39 + xHCI/HID +
+kernel PTY) drop in behind the same seams when AGNOS is ready. See
 [`roadmap.md`](roadmap.md).
 
 The grid backing store stays fixed-max (resize is a dim-change), so heap-

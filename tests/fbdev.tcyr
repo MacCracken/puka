@@ -1,0 +1,100 @@
+# fbdev.tcyr — Linux framebuffer blit core tests (M5).
+# Pure/headless: asserts the RGB->device pixel conversion and the stride/offset/
+# clamp blit against an in-memory fake framebuffer (no real device). A Linux-
+# guarded smoke at the end SKIPs cleanly when /dev/fb0 is absent (CI/sandbox).
+
+include "src/parser.cyr"
+include "src/grid.cyr"
+include "src/unicode.cyr"
+include "src/terminal.cyr"
+include "lib/kashi_font_data.cyr"
+include "src/render/fb.cyr"
+include "src/render/fbdev.cyr"
+
+fn zero_buf(buf, n): i64 { var i = 0; while (i < n) { store8(buf + i, 0); i = i + 1; } return 0; }
+
+fn skip(reason) {
+    syscall(1, 1, "SKIP fbdev: ", 12);
+    syscall(1, 1, reason, strlen(reason));
+    syscall(1, 1, "\n", 1);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("channel scaling (8-bit -> field width)");
+    assert_eq(fbdev__chan(0xFF, 8), 0xFF, "len 8 keeps the byte");
+    assert_eq(fbdev__chan(0xFF, 5), 0x1F, "len 5 -> top 5 bits");
+    assert_eq(fbdev__chan(0xFF, 6), 0x3F, "len 6 -> top 6 bits");
+    assert_eq(fbdev__chan(0x80, 0), 0, "len 0 -> 0");
+
+    test_group("store_pixel 32bpp XRGB8888 (R16 G8 B0)");
+    var dpx[16];
+    zero_buf(&dpx, 16);
+    fbdev__store_pixel(&dpx, 0, 0xAA, 0xBB, 0xCC, 32, 16, 8, 8, 8, 0, 8);
+    assert_eq(load8(&dpx + 0), 0xCC, "byte0 = B");
+    assert_eq(load8(&dpx + 1), 0xBB, "byte1 = G");
+    assert_eq(load8(&dpx + 2), 0xAA, "byte2 = R");
+    assert_eq(load8(&dpx + 3), 0x00, "byte3 = X");
+
+    test_group("store_pixel 24bpp (R16 G8 B0)");
+    zero_buf(&dpx, 16);
+    fbdev__store_pixel(&dpx, 0, 0xAA, 0xBB, 0xCC, 24, 16, 8, 8, 8, 0, 8);
+    assert_eq(load8(&dpx + 0), 0xCC, "byte0 = B");
+    assert_eq(load8(&dpx + 1), 0xBB, "byte1 = G");
+    assert_eq(load8(&dpx + 2), 0xAA, "byte2 = R");
+
+    test_group("store_pixel 16bpp RGB565 (R11/5 G5/6 B0/5)");
+    zero_buf(&dpx, 16);
+    fbdev__store_pixel(&dpx, 0, 0xFF, 0xFF, 0xFF, 16, 11, 5, 5, 6, 0, 5);
+    assert_eq(load8(&dpx + 0), 0xFF, "white low byte");
+    assert_eq(load8(&dpx + 1), 0xFF, "white high byte");
+    zero_buf(&dpx, 16);
+    fbdev__store_pixel(&dpx, 0, 0xFF, 0x00, 0x00, 16, 11, 5, 5, 6, 0, 5);
+    assert_eq(load8(&dpx + 0), 0x00, "red565 low byte");
+    assert_eq(load8(&dpx + 1), 0xF8, "red565 high byte (0xF800)");
+
+    test_group("blit: stride + per-pixel placement (32bpp, line_len 16)");
+    var src[12];
+    store8(&src + 0, 0x11); store8(&src + 1, 0x22); store8(&src + 2, 0x33);   # (0,0)
+    store8(&src + 3, 0x44); store8(&src + 4, 0x55); store8(&src + 5, 0x66);   # (1,0)
+    store8(&src + 6, 0x77); store8(&src + 7, 0x88); store8(&src + 8, 0x99);   # (0,1)
+    store8(&src + 9, 0xAA); store8(&src + 10, 0xBB); store8(&src + 11, 0xCC); # (1,1)
+    var dst[64];
+    zero_buf(&dst, 64);
+    var w = fbdev_blit_core(&src, 2, 2, &dst, 2, 2, 16, 32, 0, 0, 16, 8, 8, 8, 0, 8);
+    assert_eq(w, 4, "all 4 pixels written");
+    assert_eq(load8(&dst + 0), 0x33, "(0,0) B at row0 col0");
+    assert_eq(load8(&dst + 2), 0x11, "(0,0) R");
+    assert_eq(load8(&dst + 4), 0x66, "(1,0) B at row0 col1 (x*4)");
+    assert_eq(load8(&dst + 16), 0x99, "(0,1) B at row1 (stride 16)");
+    assert_eq(load8(&dst + 20), 0xCC, "(1,1) B at row1 col1");
+
+    test_group("blit: x/y offset + clamp");
+    zero_buf(&dst, 64);
+    var w2 = fbdev_blit_core(&src, 2, 2, &dst, 2, 2, 16, 32, 1, 1, 16, 8, 8, 8, 0, 8);
+    assert_eq(w2, 1, "only (0,0) fits at offset (1,1); rest clamped");
+    assert_eq(load8(&dst + 20), 0x33, "(0,0)->device (1,1) at row1 col1 = +20");
+    assert_eq(load8(&dst + 0), 0x00, "device (0,0) untouched");
+
+    test_group("fbdev device smoke (skip-clean)");
+#ifdef CYRIUS_TARGET_LINUX
+    if (fbdev_open() < 0) {
+        skip("/dev/fb0 unavailable");
+        assert(1, "skipped: no framebuffer device");
+    } else {
+        assert_gt(fbdev_width(), 0, "real fb reports a width");
+        fbdev_close();
+    }
+#endif
+#ifndef CYRIUS_TARGET_LINUX
+    skip("fbdev is Linux-only");
+    assert(1, "skipped: non-linux target");
+#endif
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

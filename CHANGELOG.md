@@ -4,6 +4,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-06-18
+
+**M5 — Linux live terminal.** The live edges over the M1–M4 core: puka now runs as
+a real interactive terminal on a Linux framebuffer + evdev keyboard, with no host
+terminal underneath — the first build you can actually *use*. The pure cores are
+headless-tested; the device layers are Linux-guarded + skip-clean; the on-screen
+session runs on a bare Linux VT. (AGNOS-native bring-up is post-v1.0.)
+
+### Added
+- **`src/render/fbdev.cyr`** — Linux `/dev/fb0` display backend. Blits the renderer's 24-bit RGB buffer (`fb_buf()`) onto the mmap'd framebuffer, converting to the device's pixel layout (bpp + RGB bitfields from `FBIOGET_VSCREENINFO`) generically over any truecolor format (32/24/16-bpp, stride-aware). The pure pack/blit core is headless-tested against an in-memory fake fb; the open/ioctl/mmap device layer is Linux-guarded. The ABI struct offsets were validated read-only against real hardware (2560×1440 XRGB8888 `amdgpudrmfb`). Device geometry (`bpp ∈ {16,24,32}`, rows-fit-stride, image-fits-mmap) is validated before the blit trusts it.
+- **`src/input/evdev.cyr`** — Linux `/dev/input/eventN` raw keyboard source. Decodes 24-byte `input_event` records via a US-QWERTY keymap with independent left/right modifier tracking, feeds `input_encode`, and emits child PTY bytes; `EVIOCGRAB`s the device so keystrokes don't leak to the host VT. The pure decode + keymap core is headless-tested on synthetic events; the open/read device layer is Linux-guarded. Untrusted device input is bounds-checked (whole records only, output headroom, unknown keycodes dropped).
+- **`programs/puka_session.cyr`** — the interactive capstone: spawns `/bin/sh` in a PTY, busy-polls the keyboard + master fd (single-threaded, no threads), encodes keys → child, pumps child output → grid, renders dirty rows → framebuffer. Runs on a bare Linux VT (not under X/Wayland).
+- **`tests/fbdev.tcyr`** (25) — pixel-pack + stride/offset/clamp blit against a fake framebuffer. **`tests/evdev.tcyr`** (49) — synthetic-event decode: shift/ctrl/alt, L/R-pair release, arrows/F-keys/nav, digit/symbol shift, no-ops.
+
+### Reviewed
+- Multi-agent adversarial review (fbdev bounds / untrusted-device / session-loop / idiom), each finding independently verified. Four fixes applied + regression-tested: validate device bpp + geometry before the blit (untrusted screeninfo → OOB guard); independent L/R modifier tracking (a held pair no longer mis-clears on one release); the `evdev_poll` output headroom guard; and the session loop exits on any `waitpid` result (no hang with the keyboard left grabbed).
+
 ## [0.4.0] — 2026-06-18
 
 **M4 — input encoding.** The keyboard half of the terminal: a pure, headless
