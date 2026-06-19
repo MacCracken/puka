@@ -1,0 +1,95 @@
+# gpu_win_probe.cyr — bite 7 foundation: the FULL GPU plumbing, end to end.
+#
+# GPU render (mabda native AMD) -> CPU readback (RGBA8 -> XRGB8888 swizzle) ->
+# wl_shm -> a real Wayland window on Hyprland. Proves the cut-#2 path the daily
+# driver will use once bite 8's grid+atlas shader replaces pgpu_render's solid
+# placeholder. The frame is a solid red fill, GPU-rendered every frame; if a red
+# window appears on the compositor AND the in-process shm check passes, the
+# plumbing is live.
+#
+# Bounded: renders ~120 frames (~2s at 60Hz) then tears down cleanly, or exits on
+# window close. Verifies shm pixel(0,0) == 0x00FF0000 (XRGB red) in-process so the
+# result is checkable without eyes on the window.
+#
+# Build:  cyrius build programs/gpu_win_probe.cyr build/gpu_win_probe
+# Run  :  WAYLAND_DISPLAY=wayland-1 ./build/gpu_win_probe   (inside a Wayland session)
+
+include "src/platform/wayland/wire.cyr"
+include "src/platform/wayland/client.cyr"
+include "src/platform/wayland/shm.cyr"
+include "src/platform/window.cyr"
+include "lib/mabda.cyr"
+include "src/platform/gpu/gpu.cyr"
+
+enum GpuWinLoop { SYS_POLL = 7; POLLIN = 1; MAX_FRAMES = 120; }
+
+fn gw__emit(s): i64 { syscall(1, 1, s, strlen(s)); return 0; }
+fn gw__emit_i64(n): i64 {
+    var buf[32]; memset(&buf, 0, 32);
+    var len = fmt_int_buf(n, &buf);
+    syscall(1, 1, &buf, len);
+    return 0;
+}
+
+# GPU render -> readback into the wl_shm buffer -> present the whole window.
+fn gw__frame(win): i64 {
+    if (pgpu_render() != 0) { return 0 - 1; }
+    var dst = win_present_begin(win);
+    if (dst == 0) { return 0 - 1; }
+    pgpu_readback_xrgb(dst, win_w);
+    win_present_commit(win, 0, 0, win_w, win_h);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    color_init();
+    gw__emit("puka gpu_win_probe — GPU -> wl_shm -> Hyprland\n");
+
+    win_backend_select();
+    var win = win_open("puka-gpu", 8, 80, 24, 8, 16, 0);
+    if (win == 0) { gw__emit("FAIL: win_open (no $WAYLAND_DISPLAY?)\n"); return 1; }
+    gw__emit("window "); gw__emit_i64(win_w); gw__emit("x"); gw__emit_i64(win_h); gw__emit("\n");
+
+    if (pgpu_init() == 0) { gw__emit("FAIL: pgpu_init (no AMD GPU)\n"); win_close(win); return 2; }
+    gw__emit("PASS: GPU context + pipeline\n");
+
+    if (pgpu_target(win_w, win_h) == 0) { gw__emit("FAIL: pgpu_target\n"); pgpu_release(); win_close(win); return 3; }
+    gw__emit("PASS: target vis "); gw__emit_i64(pgpu_vis_w()); gw__emit("x"); gw__emit_i64(pgpu_vis_h());
+    gw__emit(" (alloc "); gw__emit_i64(pgpu_alloc_w()); gw__emit(" wide, 64KiB-aligned)\n");
+    shm_fill(0x000000);                              # clear the ≤255px pad / ≤1px odd margin once
+
+    # first GPU frame + present
+    if (gw__frame(win) != 0) { gw__emit("FAIL: first frame (GPU dispatch / present)\n"); pgpu_release(); win_close(win); return 4; }
+
+    # verify the shm buffer actually got red XRGB pixels from the GPU
+    var px0 = load32(win_present_begin(win));
+    gw__emit("shm pixel(0,0) = 0x"); gw__emit_i64(px0);
+    if ((px0 & 0xFFFFFF) == 0xFF0000) { gw__emit("  PASS (XRGB red)\n"); }
+    else { gw__emit("  FAIL (expected 0xFF0000)\n"); pgpu_release(); win_close(win); return 5; }
+
+    # bounded frame loop — keep GPU-rendering until N frames or close
+    var pfds[8];
+    var frames = 0;
+    var alive = 1;
+    while (alive == 1) {
+        store32(&pfds, win_fd(win)); store32(&pfds + 4, POLLIN);
+        syscall(SYS_POLL, &pfds, 1, 0 - 1);
+        var ev = win_poll_events(win);
+        if ((ev & WIN_EV_CLOSE) != 0) { alive = 0; }
+        if ((ev & WIN_EV_FRAME) != 0) {
+            frames = frames + 1;
+            if (frames >= MAX_FRAMES) { alive = 0; }
+            else { gw__frame(win); }
+        }
+    }
+    gw__emit("rendered "); gw__emit_i64(frames); gw__emit(" GPU frames; tearing down.\n");
+
+    pgpu_release();
+    win_close(win);
+    gw__emit("OK — GPU -> wl_shm -> compositor plumbing live.\n");
+    return 0;
+}
+
+fn _entry(): i64 { var rc = main(); syscall(SYS_EXIT, rc); return 0; }
+_entry();

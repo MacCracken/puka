@@ -1,0 +1,153 @@
+# gpu_probe.cyr — bite 7 foundation: prove puka can compile + run mabda's native
+# AMD GFX9 render path end-to-end (GPU render → CPU readback) on this box.
+#
+# A faithful mirror of mabda's own `programs/native_render_e2e.cyr` (the
+# HW-verified template), but built from PUKA's tree against the resolved
+# `lib/mabda.cyr` (3.2.11) amalgam. It clears an offscreen 256x256 RGBA8 render
+# target to red via the fullscreen-triangle VS + solid-red FS, then reads
+# pixel(0,0) back through the GTT mapping and checks it is (FF,00,00,FF).
+#
+# This is the de-risk gate: if this prints "GPU render path live", the mabda
+# integration compiles + the native render→readback works from puka, and the
+# `pgpu_*` seam + the wl_shm-present probe can build on it. It does NOT touch the
+# daily-driver puka_term, and it presents nothing — pure render→readback.
+#
+# Build:  cyrius build programs/gpu_probe.cyr build/gpu_probe
+# Run  :  ./build/gpu_probe        (dispatches PM4 on the AMD render node)
+# Exit :  0 = pixel(0,0) red verified; 1..11 = stage failures (see below)
+
+include "lib/mabda.cyr"
+
+fn gp__emit(s): i64 { syscall(1, 1, s, strlen(s)); return 0; }
+fn gp__emit_i64(n): i64 {
+    var buf[32];
+    memset(&buf, 0, 32);
+    var len = fmt_int_buf(n, &buf);
+    syscall(1, 1, &buf, len);
+    return 0;
+}
+fn gp__emit_hex8(v): i64 {
+    var digits = "0123456789ABCDEF";
+    var buf[2];
+    store8(&buf + 0, load8(digits + ((v / 16) & 0xF)));
+    store8(&buf + 1, load8(digits + (v & 0xF)));
+    syscall(1, 1, &buf, 2);
+    return 0;
+}
+fn gp__mono_ns(): i64 {
+    var ts[16];
+    syscall(228, 1, &ts);
+    return load64(&ts + 0) * 1000000000 + load64(&ts + 8);
+}
+
+fn main(): i64 {
+    alloc_init();
+    color_init();
+    gp__emit("puka gpu_probe — mabda native AMD render path (3.2.11)\n");
+    gp__emit("------------------------------------------------------\n");
+
+    # ---- 1. native GPU context (opens /dev/dri/renderD*, allocs ctx/IB/fence) ----
+    var ctx_res = gpu_context_new_native();
+    if (is_err_result(ctx_res) == 1) { gp__emit("FAIL: gpu_context_new_native (no AMD render node?)\n"); return 1; }
+    var ctx = payload(ctx_res);
+    var fd = native_ctx_fd(ctx);
+    gp__emit("PASS: native ctx (fd="); gp__emit_i64(fd); gp__emit(")\n");
+
+    # ---- 2. vertex shader BO (fullscreen triangle) ----
+    var vs_size = 4096;
+    var vs_bo[16];
+    var rc = native_bo_create_gtt(fd, vs_size, &vs_bo);
+    if (rc != 0) { gp__emit("FAIL: vs bo create\n"); gpu_context_release(ctx); return 2; }
+    var vs_handle = load64(&vs_bo + 0);
+    var vs_addr   = load64(&vs_bo + 8);
+    memset(vs_addr, 0, vs_size);
+    native_gfx9_shader_fullscreen_triangle_vs(vs_addr, 0);
+    var vs_va = 0xFFFF800100000000;
+    rc = native_gem_va_map(fd, vs_handle, vs_va, vs_size, _NATIVE_PERM_SHADER);
+    if (rc != 0) { gp__emit("FAIL: vs va_map\n"); gpu_context_release(ctx); return 2; }
+    gp__emit("PASS: vs shader mapped\n");
+
+    # ---- 3. fragment shader BO (solid red) ----
+    var fs_size = 4096;
+    var fs_bo[16];
+    rc = native_bo_create_gtt(fd, fs_size, &fs_bo);
+    if (rc != 0) { gp__emit("FAIL: fs bo create\n"); gpu_context_release(ctx); return 3; }
+    var fs_handle = load64(&fs_bo + 0);
+    var fs_addr   = load64(&fs_bo + 8);
+    memset(fs_addr, 0, fs_size);
+    native_gfx9_shader_solid_red(fs_addr, 0);
+    var fs_va = 0xFFFF800100001000;
+    rc = native_gem_va_map(fd, fs_handle, fs_va, fs_size, _NATIVE_PERM_SHADER);
+    if (rc != 0) { gp__emit("FAIL: fs va_map\n"); gpu_context_release(ctx); return 3; }
+    gp__emit("PASS: fs shader mapped\n");
+
+    # ---- 4. (handle, va) pairs ----
+    var vs_mod[16];
+    native_buf_pair_write(&vs_mod, vs_handle, vs_va);
+    var fs_mod[16];
+    native_buf_pair_write(&fs_mod, fs_handle, fs_va);
+
+    # ---- 5. offscreen render target (GTT-mapped, CPU-readable) ----
+    var W = 256;
+    var H = 256;
+    var rt = gpu_render_target_create_2d_rgba8(ctx, W, H);
+    if (rt == 0) { gp__emit("FAIL: render_target_create\n"); return 4; }
+    var rt_addr = load64(rt + NATIVE_RT_FIELD_ADDR);
+    gp__emit("PASS: render target 256x256\n");
+    memset(rt_addr, 0x55, W * H * 4);                # sentinel: if read back, GPU never wrote
+
+    # ---- 6. pipeline ----
+    var pipe = gpu_render_pipeline_create(ctx, &vs_mod, &fs_mod, 0);
+    if (pipe == 0) { gp__emit("FAIL: pipeline_create\n"); gpu_render_target_release(ctx, rt); return 5; }
+    gp__emit("PASS: render pipeline\n");
+
+    # ---- 7. pass begin ----
+    var clear = color_new(F64_1, F64_0, F64_0, F64_1);
+    var pass = gpu_render_pass_begin(ctx, rt, clear);
+    if (pass == 0) { gp__emit("FAIL: pass_begin\n"); gpu_render_pipeline_release(ctx, pipe); gpu_render_target_release(ctx, rt); return 6; }
+    gp__emit("PASS: render pass begin\n");
+
+    # ---- 8. draw (synchronous; blocks on the GFX-ring syncobj) ----
+    var t0 = gp__mono_ns();
+    rc = gpu_render_pass_draw(ctx, pass, pipe, 3, 1);
+    var ms = (gp__mono_ns() - t0) / 1000000;
+    gp__emit("dispatch: "); gp__emit_i64(ms); gp__emit(" ms");
+    if (ms >= 9000) { gp__emit(" (likely TDR — IB hung the ring)"); }
+    gp__emit("\n");
+    if (rc != 0) {
+        gp__emit("FAIL: pass_draw rc="); gp__emit_i64(rc); gp__emit("\n");
+        gpu_render_pass_end(ctx, pass); gpu_render_pipeline_release(ctx, pipe); gpu_render_target_release(ctx, rt);
+        return 7;
+    }
+    gp__emit("PASS: draw signaled\n");
+    gpu_render_pass_end(ctx, pass);
+
+    # ---- 9. readback pixel(0,0): RGBA8_UNORM, byte0=R byte1=G byte2=B byte3=A ----
+    var r = load8(rt_addr + 0);
+    var g = load8(rt_addr + 1);
+    var b = load8(rt_addr + 2);
+    var a = load8(rt_addr + 3);
+    gp__emit("pixel(0,0) = ("); gp__emit_hex8(r); gp__emit(", "); gp__emit_hex8(g);
+    gp__emit(", "); gp__emit_hex8(b); gp__emit(", "); gp__emit_hex8(a); gp__emit(")\n");
+
+    var exit_rc = 0;
+    if (r != 0xFF) { gp__emit("FAIL: red != FF (pipeline state / cache flush)\n"); exit_rc = 8; }
+    if (exit_rc == 0 && g != 0x00) { gp__emit("FAIL: green != 00\n"); exit_rc = 9; }
+    if (exit_rc == 0 && b != 0x00) { gp__emit("FAIL: blue != 00\n"); exit_rc = 10; }
+    if (exit_rc == 0 && a != 0xFF) { gp__emit("FAIL: alpha != FF\n"); exit_rc = 11; }
+
+    # ---- 10. teardown ----
+    gpu_render_pipeline_release(ctx, pipe);
+    gpu_render_target_release(ctx, rt);
+    native_gem_va_unmap(fd, fs_handle, fs_va, fs_size);
+    native_bo_release_gtt(fd, fs_handle, fs_addr, fs_size);
+    native_gem_va_unmap(fd, vs_handle, vs_va, vs_size);
+    native_bo_release_gtt(fd, vs_handle, vs_addr, vs_size);
+    gpu_context_release(ctx);
+
+    if (exit_rc == 0) { gp__emit("\nOK — GPU render path live from puka (render -> readback verified)\n"); }
+    return exit_rc;
+}
+
+fn _entry(): i64 { var rc = main(); syscall(SYS_EXIT, rc); return 0; }
+_entry();

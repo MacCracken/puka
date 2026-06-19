@@ -12,7 +12,10 @@ test = "src/test.cyr"
 output = "puka"
 
 [deps]
-stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench"]
+# Base set + the extras mabda's amalgam needs (args/hashmap/tagged/fnptr/mmap/
+# dynlib/sakshi) so `dist/mabda.cyr` resolves its stdlib globals (MAP_SHARED,
+# O_RDWR, the Result/fnptr types, the GTT mmap helpers, sakshi logging).
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "args", "hashmap", "tagged", "fnptr", "mmap", "dynlib", "sakshi"]
 
 # kashi — AGNOS console-font subsystem. M3 sources bitmap glyphs from its
 # FREESTANDING font-data core only (zero stdlib: store8/load8 + arithmetic).
@@ -25,4 +28,14 @@ stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "b
 git     = "https://github.com/MacCracken/kashi.git"
 tag     = "1.0.2"
 modules = ["src/font_data.cyr"]
+
+# mabda — sovereign GPU foundation crate (native AMD GFX9 backend; the wgpu FFI
+# backend is FORBIDDEN). M6 bite 7: GPU plumbing (context → offscreen render
+# target → CPU readback → wl_shm present). Pinned to 3.2.11 (texture sampling +
+# the SPIR-V→GFX9 compiler are HW-verified on Cezanne at this tag). The amalgam
+# `dist/mabda.cyr` resolves to lib/mabda.cyr; consume only the @public gpu_* API.
+[deps.mabda]
+git     = "https://github.com/MacCracken/mabda.git"
+tag     = "3.2.11"
+modules = ["dist/mabda.cyr"]
 ---

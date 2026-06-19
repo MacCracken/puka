@@ -1,0 +1,151 @@
+# gpu.cyr — puka-generic GPU seam over mabda's native AMD GFX9 backend.
+#
+# Names are pgpu_* (never mabda's gpu_*/native_*) so the engine, renderer, and
+# window backend bind THIS contract, never mabda directly — the same discipline
+# as the win_* seam, and it extracts to `aethersafha` the same way. The wgpu FFI
+# backend is forbidden; this is the sovereign native path only.
+#
+# Bite 7 (plumbing): context + offscreen render target + a placeholder solid
+# draw + a CPU readback that converts the target's RGBA8 to puka's XRGB8888
+# wl_shm format. Bite 8 swaps pgpu_render's solid pipeline for a grid+atlas
+# shader; nothing else in the seam changes. If pgpu_init() returns 0 (no AMD
+# GPU), the caller stays on the CPU fb.cyr → wl_shm path.
+#
+# Co-compiled AFTER lib/mabda.cyr (uses gpu_*/native_*/color_* + F64_* consts);
+# includes nothing itself (mirrors the other src seams).
+
+var pgpu_ctx = 0;            # mabda GpuContext (0 = uninitialized / no GPU)
+var pgpu_pipe = 0;          # placeholder solid pipeline (grid shader replaces it)
+var pgpu_vs_h = 0; var pgpu_vs_va = 0; var pgpu_vs_addr = 0;
+var pgpu_fs_h = 0; var pgpu_fs_va = 0; var pgpu_fs_addr = 0;
+var pgpu_rt = 0;            # current render target (0 = none)
+var pgpu_rt_w = 0; var pgpu_rt_h = 0;    # ALLOCATED (padded) target dims = readback stride
+var pgpu_vw = 0; var pgpu_vh = 0;        # VISIBLE even dims (the top-left we read back)
+
+enum PgpuAbi {
+    PGPU_SHADER_BYTES = 4096;            # one GTT page per shader BO
+    PGPU_VS_VA        = 0xFFFF800100000000;
+    PGPU_FS_VA        = 0xFFFF800100001000;
+}
+
+# Open the native AMD context and build the placeholder solid pipeline
+# (fullscreen-triangle VS + solid-red FS — the verified bring-up shaders).
+# Returns 1 on success, 0 if there is no usable AMD GPU (caller → CPU fallback).
+fn pgpu_init(): i64 {
+    var res = gpu_context_new_native();
+    if (is_err_result(res) == 1) { return 0; }
+    pgpu_ctx = payload(res);
+    var fd = native_ctx_fd(pgpu_ctx);
+
+    var vbo[16];
+    if (native_bo_create_gtt(fd, PGPU_SHADER_BYTES, &vbo) != 0) { return 0; }
+    pgpu_vs_h = load64(&vbo); pgpu_vs_addr = load64(&vbo + 8);
+    memset(pgpu_vs_addr, 0, PGPU_SHADER_BYTES);
+    native_gfx9_shader_fullscreen_triangle_vs(pgpu_vs_addr, 0);
+    pgpu_vs_va = PGPU_VS_VA;
+    if (native_gem_va_map(fd, pgpu_vs_h, pgpu_vs_va, PGPU_SHADER_BYTES, _NATIVE_PERM_SHADER) != 0) { return 0; }
+
+    var fbo[16];
+    if (native_bo_create_gtt(fd, PGPU_SHADER_BYTES, &fbo) != 0) { return 0; }
+    pgpu_fs_h = load64(&fbo); pgpu_fs_addr = load64(&fbo + 8);
+    memset(pgpu_fs_addr, 0, PGPU_SHADER_BYTES);
+    native_gfx9_shader_solid_red(pgpu_fs_addr, 0);
+    pgpu_fs_va = PGPU_FS_VA;
+    if (native_gem_va_map(fd, pgpu_fs_h, pgpu_fs_va, PGPU_SHADER_BYTES, _NATIVE_PERM_SHADER) != 0) { return 0; }
+
+    var vmod[16]; native_buf_pair_write(&vmod, pgpu_vs_h, pgpu_vs_va);
+    var fmod[16]; native_buf_pair_write(&fmod, pgpu_fs_h, pgpu_fs_va);
+    pgpu_pipe = gpu_render_pipeline_create(pgpu_ctx, &vmod, &fmod, 0);
+    if (pgpu_pipe == 0) { return 0; }
+    return 1;
+}
+
+fn pgpu_ready(): i64 { if (pgpu_ctx != 0) { return 1; } return 0; }
+
+# (Re)create the offscreen render target sized for a req_w x req_h window.
+#
+# Two native-mabda quirks are absorbed here so callers pass raw window dims:
+#  - odd dims are rejected (the viewport math uses an integer width/2), and
+#  - the RT byte-size must be 64 KiB-aligned or va_map returns EINVAL (powers of
+#    two pass by luck; a real size like 1260x682x4 = 3360 KiB does not — a
+#    mabda-side bug: its GTT/va_map size should round up to 64 KiB).
+# Workaround: ALLOCATE the target padded up to a 256-pixel multiple per axis
+# (256*256*4 = 256 KiB, always 64 KiB-aligned, and even), and remember the EVEN
+# VISIBLE w x h (the window, rounded down to even) that we render + read back from
+# the padded target's top-left. The ≤255px pad is never shown; a ≤1px odd-dim
+# margin in the window is cleared by the caller (shm_fill). Returns the GTT-mapped
+# RGBA8 base pointer, or 0 on failure.
+fn pgpu_target(req_w, req_h): i64 {
+    if (pgpu_ctx == 0) { return 0; }
+    var vw = (req_w / 2) * 2;
+    var vh = (req_h / 2) * 2;
+    if (vw < 2) { vw = 2; }
+    if (vh < 2) { vh = 2; }
+    var aw = ((req_w + 255) / 256) * 256;        # 64 KiB-aligned, even alloc dims
+    var ah = ((req_h + 255) / 256) * 256;
+    if (pgpu_rt != 0) { gpu_render_target_release(pgpu_ctx, pgpu_rt); pgpu_rt = 0; }
+    pgpu_rt = gpu_render_target_create_2d_rgba8(pgpu_ctx, aw, ah);
+    if (pgpu_rt == 0) { return 0; }
+    pgpu_rt_w = aw; pgpu_rt_h = ah;
+    pgpu_vw = vw; pgpu_vh = vh;
+    return load64(pgpu_rt + NATIVE_RT_FIELD_ADDR);
+}
+
+fn pgpu_vis_w(): i64 { return pgpu_vw; }          # visible (presentable) width
+fn pgpu_vis_h(): i64 { return pgpu_vh; }          # visible (presentable) height
+fn pgpu_alloc_w(): i64 { return pgpu_rt_w; }      # padded alloc width (readback stride)
+
+fn pgpu_target_addr(): i64 {
+    if (pgpu_rt == 0) { return 0; }
+    return load64(pgpu_rt + NATIVE_RT_FIELD_ADDR);
+}
+
+# Render one frame into the current target. PLACEHOLDER: a solid fill via the
+# bring-up pipeline (bite 8 swaps in the grid+atlas shader). Synchronous — blocks
+# on the GFX-ring syncobj. Returns 0 on success, non-zero on dispatch failure/TDR.
+fn pgpu_render(): i64 {
+    if (pgpu_rt == 0) { return 0 - 1; }
+    var clear = color_new(F64_1, F64_0, F64_0, F64_1);
+    var pass = gpu_render_pass_begin(pgpu_ctx, pgpu_rt, clear);
+    if (pass == 0) { return 0 - 1; }
+    var rc = gpu_render_pass_draw(pgpu_ctx, pass, pgpu_pipe, 3, 1);
+    gpu_render_pass_end(pgpu_ctx, pass);
+    return rc;
+}
+
+# Copy the VISIBLE top-left (pgpu_vw x pgpu_vh) of the padded target into a puka
+# XRGB8888 wl_shm buffer, converting format. The target is RGBA8_UNORM (bytes
+# [R,G,B,A]); wl_shm XRGB8888 is store32 -> [B,G,R,0] on LE, so we pack
+# (R<<16)|(G<<8)|B per pixel. Reads at the padded target stride (pgpu_rt_w),
+# writes at dst_stride_px (the window width). The cut-#2 readback memcpy.
+fn pgpu_readback_xrgb(dst, dst_stride_px): i64 {
+    if (pgpu_rt == 0) { return 0 - 1; }
+    var src = load64(pgpu_rt + NATIVE_RT_FIELD_ADDR);
+    var y = 0;
+    while (y < pgpu_vh) {
+        var srow = src + y * pgpu_rt_w * 4;
+        var drow = dst + y * dst_stride_px * 4;
+        var x = 0;
+        while (x < pgpu_vw) {
+            var r = load8(srow + x * 4 + 0);
+            var g = load8(srow + x * 4 + 1);
+            var b = load8(srow + x * 4 + 2);
+            store32(drow + x * 4, (r << 16) | (g << 8) | b);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return 0;
+}
+
+fn pgpu_release(): i64 {
+    if (pgpu_ctx == 0) { return 0; }
+    var fd = native_ctx_fd(pgpu_ctx);
+    if (pgpu_pipe != 0) { gpu_render_pipeline_release(pgpu_ctx, pgpu_pipe); pgpu_pipe = 0; }
+    if (pgpu_rt != 0) { gpu_render_target_release(pgpu_ctx, pgpu_rt); pgpu_rt = 0; }
+    if (pgpu_fs_h != 0) { native_gem_va_unmap(fd, pgpu_fs_h, pgpu_fs_va, PGPU_SHADER_BYTES); native_bo_release_gtt(fd, pgpu_fs_h, pgpu_fs_addr, PGPU_SHADER_BYTES); pgpu_fs_h = 0; }
+    if (pgpu_vs_h != 0) { native_gem_va_unmap(fd, pgpu_vs_h, pgpu_vs_va, PGPU_SHADER_BYTES); native_bo_release_gtt(fd, pgpu_vs_h, pgpu_vs_addr, PGPU_SHADER_BYTES); pgpu_vs_h = 0; }
+    gpu_context_release(pgpu_ctx);
+    pgpu_ctx = 0;
+    return 0;
+}
