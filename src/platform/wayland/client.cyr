@@ -1,0 +1,183 @@
+# client.cyr — Wayland AF_UNIX connection + registry roundtrip (sovereign).
+#
+# Connects to $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY over a unix-domain stream socket
+# and runs the wl_display handshake: get_registry + sync, then dispatches events
+# until the sync callback fires — at which point every global the compositor
+# advertises has been seen. This is the foundation of the Wayland window backend
+# (bite 1); the window/surface/input/present layers build on this connection.
+#
+# Co-compiled after wire.cyr (uses the wire codec) + stdlib (getenv/file_read/
+# file_write/sys_socket/sys_connect/sys_close/strlen). Includes nothing itself.
+# The wire parser is an UNTRUSTED-input boundary (compositor messages): every
+# message is size/bounds-checked before any field is read.
+
+enum WlAbi {
+    WL_AF_UNIX        = 1;
+    WL_SOCK_STREAM    = 1;
+    WL_DISPLAY_ID     = 1;     # wl_display always has object id 1 (implicit)
+    # wl_display requests
+    WL_DISPLAY_SYNC   = 0;
+    WL_DISPLAY_GETREG = 1;
+    # wl_display events
+    WL_DISPLAY_ERROR  = 0;
+    WL_DISPLAY_DELETE = 1;
+    # wl_registry events
+    WL_REG_GLOBAL     = 0;
+    WL_REG_REMOVE     = 1;
+    # wl_callback event
+    WL_CB_DONE        = 0;
+}
+
+var wl_fd      = 0 - 1;
+var wl_rbuf[1024];          # recv accumulation buffer (module-global: 8192 bytes)
+var wl_rlen    = 0;         # valid bytes currently in wl_rbuf
+var wl_sbuf[64];            # send scratch (512 bytes)
+var wl_next_id = 2;         # client-side id allocator (1 = wl_display)
+var wl_sync_done = 0;       # set when our sync callback's done event arrives
+var wl_nglobals = 0;        # count of globals seen (proof of a working roundtrip)
+
+fn wl_alloc_id(): i64 { var id = wl_next_id; wl_next_id = wl_next_id + 1; return id; }
+
+# ---- small stdout helpers (bite-1 visibility; pruned once the window lands) ----
+fn wl__emit(s, n): i64 { syscall(1, 1, s, n); return 0; }
+fn wl__emit_str(s): i64 { return wl__emit(s, strlen(s)); }
+fn wl__emit_uint(n): i64 {
+    if (n == 0) { return wl__emit("0", 1); }
+    var d[24];
+    var k = 0;
+    while (n > 0) { store8(&d + k, 0x30 + n % 10); n = n / 10; k = k + 1; }
+    var o[24];
+    var j = 0;
+    while (j < k) { store8(&o + j, load8(&d + k - 1 - j)); j = j + 1; }
+    return wl__emit(&o, k);
+}
+
+# Build $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY into buf (NUL-terminated). If
+# WAYLAND_DISPLAY is absolute it IS the path; if unset, fall back to wayland-0.
+# Returns path length (no NUL), or -1.
+fn wl__copy_cstr(dst, off, src): i64 {
+    var i = 0;
+    while (load8(src + i) != 0) { store8(dst + off + i, load8(src + i)); i = i + 1; }
+    return off + i;
+}
+fn wl__sock_path(buf): i64 {
+    var wd = getenv("WAYLAND_DISPLAY");
+    if (wd != 0) { if (load8(wd) == 0x2F) {            # absolute path
+        var n = wl__copy_cstr(buf, 0, wd);
+        store8(buf + n, 0);
+        return n;
+    } }
+    var rt = getenv("XDG_RUNTIME_DIR");
+    if (rt == 0) { return 0 - 1; }
+    var n = wl__copy_cstr(buf, 0, rt);
+    store8(buf + n, 0x2F); n = n + 1;                  # '/'
+    if (wd != 0) { n = wl__copy_cstr(buf, n, wd); }
+    else { n = wl__copy_cstr(buf, n, "wayland-0"); }
+    store8(buf + n, 0);
+    return n;
+}
+
+# Connect the socket. Returns the fd, or -1.
+fn wl_connect(): i64 {
+    var path[128];
+    var plen = wl__sock_path(&path);
+    if (plen < 0) { return 0 - 1; }
+    var fd = sys_socket(WL_AF_UNIX, WL_SOCK_STREAM, 0);
+    if (fd < 0) { return 0 - 1; }
+    var addr[120];                                     # sockaddr_un (110 bytes)
+    store8(&addr, WL_AF_UNIX); store8(&addr + 1, 0);   # sa_family (u16 LE) = AF_UNIX
+    var i = 0;
+    while (i < plen) { store8(&addr + 2 + i, load8(&path + i)); i = i + 1; }
+    store8(&addr + 2 + plen, 0);
+    if (sys_connect(fd, &addr, 2 + plen + 1) < 0) { sys_close(fd); return 0 - 1; }
+    wl_fd = fd;
+    wl_rlen = 0;
+    wl_next_id = 2;
+    wl_sync_done = 0;
+    wl_nglobals = 0;
+    return fd;
+}
+
+# wl_display.get_registry(new_id) — opcode 1, one new_id arg. Returns the id.
+fn wl_get_registry(): i64 {
+    var id = wl_alloc_id();
+    wire_hdr_put(&wl_sbuf, WL_DISPLAY_ID, WL_DISPLAY_GETREG, 12);
+    store32(&wl_sbuf + 8, id);
+    file_write(wl_fd, &wl_sbuf, 12);
+    return id;
+}
+
+# wl_display.sync(new_id) — opcode 0, one new_id arg -> a wl_callback. Returns id.
+fn wl_sync(): i64 {
+    var id = wl_alloc_id();
+    wire_hdr_put(&wl_sbuf, WL_DISPLAY_ID, WL_DISPLAY_SYNC, 12);
+    store32(&wl_sbuf + 8, id);
+    file_write(wl_fd, &wl_sbuf, 12);
+    return id;
+}
+
+# Handle one fully-buffered message at &wl_rbuf+o (already bounds-checked).
+fn wl__handle(o, regid, syncid): i64 {
+    var id = load32(&wl_rbuf + o);
+    var op = load32(&wl_rbuf + o + 4) & 0xFFFF;
+    if (id == WL_DISPLAY_ID) {
+        if (op == WL_DISPLAY_ERROR) { wl__emit_str("  wl_display.error (fatal)\n"); }
+        return 0;
+    }
+    if (id == syncid) {
+        if (op == WL_CB_DONE) { wl_sync_done = 1; }
+        return 0;
+    }
+    if (id == regid) {
+        if (op == WL_REG_GLOBAL) {
+            var name = load32(&wl_rbuf + o + 8);
+            var L = wire_str_len(&wl_rbuf, o + 12);
+            var voff = wire_str_next(o + 12, L);
+            var ver = load32(&wl_rbuf + voff);
+            wl_nglobals = wl_nglobals + 1;
+            wl__emit_str("  [");
+            wl__emit_uint(name);
+            wl__emit_str("] ");
+            wl__emit(wire_str_ptr(&wl_rbuf, o + 12), L - 1);   # interface name (no NUL)
+            wl__emit_str(" v");
+            wl__emit_uint(ver);
+            wl__emit_str("\n");
+        }
+        return 0;
+    }
+    return 0;
+}
+
+# Read + dispatch events until our sync callback fires. Returns 0, or -1 on a
+# protocol/socket error. Whole messages only; a coalesced read may hold many,
+# a partial tail is preserved and completed by the next read.
+fn wl_dispatch(regid, syncid): i64 {
+    while (wl_sync_done == 0) {
+        var o = 0;
+        var go = 1;
+        while (go == 1) {
+            if (o + 8 > wl_rlen) { go = 0; }
+            else {
+                var size = (load32(&wl_rbuf + o + 4) >> 16) & 0xFFFF;
+                if (size < 8) { return 0 - 1; }            # corrupt framing
+                if (o + size > wl_rlen) { go = 0; }        # incomplete tail
+                else { wl__handle(o, regid, syncid); o = o + size; }
+            }
+        }
+        # compact the unparsed tail [o, wl_rlen) to the front
+        var rem = wl_rlen - o;
+        var k = 0;
+        while (k < rem) { store8(&wl_rbuf + k, load8(&wl_rbuf + o + k)); k = k + 1; }
+        wl_rlen = rem;
+        if (wl_sync_done == 1) { return 0; }
+        var n = file_read(wl_fd, &wl_rbuf + wl_rlen, 8192 - wl_rlen);
+        if (n <= 0) { return 0 - 1; }                      # EOF / error
+        wl_rlen = wl_rlen + n;
+    }
+    return 0;
+}
+
+fn wl_close(): i64 {
+    if (wl_fd >= 0) { sys_close(wl_fd); wl_fd = 0 - 1; }
+    return 0;
+}

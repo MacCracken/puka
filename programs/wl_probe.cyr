@@ -1,0 +1,37 @@
+# wl_probe.cyr — M6 bite 1 verification: prove puka speaks the Wayland wire
+# protocol from scratch (no libwayland) by connecting to the compositor and
+# enumerating the globals it advertises. The riskiest unknown of the whole
+# Wayland bring-up, made observable.
+#
+# Build:  cyrius build programs/wl_probe.cyr build/wl_probe
+# Run  :  WAYLAND_DISPLAY=wayland-1 ./build/wl_probe   (or inside a Wayland session)
+
+include "src/platform/wayland/wire.cyr"
+include "src/platform/wayland/client.cyr"
+
+fn main(): i64 {
+    alloc_init();
+    wl__emit_str("puka wl_probe — sovereign Wayland client (no libwayland)\n");
+    wl__emit_str("------------------------------------------------------\n");
+    if (wl_connect() < 0) {
+        wl__emit_str("connect failed (no $WAYLAND_DISPLAY / socket?)\n");
+        return 1;
+    }
+    wl__emit_str("connected. globals advertised by the compositor:\n");
+    var regid  = wl_get_registry();
+    var syncid = wl_sync();
+    if (wl_dispatch(regid, syncid) < 0) {
+        wl__emit_str("dispatch failed (protocol/socket error)\n");
+        wl_close();
+        return 1;
+    }
+    wl__emit_str("------------------------------------------------------\n");
+    wl__emit_str("roundtrip complete — ");
+    wl__emit_uint(wl_nglobals);
+    wl__emit_str(" globals seen. wire protocol works.\n");
+    wl_close();
+    return 0;
+}
+
+fn _entry(): i64 { var rc = main(); syscall(SYS_EXIT, rc); return 0; }
+_entry();
