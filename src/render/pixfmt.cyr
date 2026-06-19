@@ -1,0 +1,29 @@
+# pixfmt.cyr — RGB → XRGB8888 packing for the Wayland present path (wl_shm/dmabuf).
+#
+# The surviving, device-neutral core of the retired fbdev backend: fb.cyr renders
+# the grid into a W*H*3 packed-RGB buffer; the compositor wants 32-bit XRGB8888
+# (memory bytes B,G,R,0x00 on little-endian — exactly what store32(R<<16|G<<8|B)
+# produces). This module is the one place that conversion lives, reused by the
+# wl_shm software path now and the mabda-GPU swizzle later. Includes nothing.
+
+# Pack one (r,g,b) into an XRGB8888 word (store32 -> B,G,R,0 on little-endian).
+fn pix_rgb_to_xrgb(r, g, b): i64 { return (r << 16) | (g << 8) | b; }
+
+# Blit a W*H*3 packed-RGB source into an XRGB8888 destination whose rows are
+# `dst_stride_px` pixels apart (the present buffer may be wider than the grid —
+# the source lands top-left; any margin is left as the caller cleared it).
+fn pix_blit_rgb_to_xrgb(src_rgb, sw, sh, dst, dst_stride_px): i64 {
+    var y = 0;
+    while (y < sh) {
+        var drow = y * dst_stride_px;
+        var x = 0;
+        while (x < sw) {
+            var sp = (y * sw + x) * 3;
+            store32(dst + (drow + x) * 4,
+                    (load8(src_rgb + sp) << 16) | (load8(src_rgb + sp + 1) << 8) | load8(src_rgb + sp + 2));
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return 0;
+}

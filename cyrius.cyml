@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "puka — sovereign Cyrius-native terminal emulator (Ghostty-class: VT/escape parser, cell grid, scrollback, font raster). Hawaiian: opening/doorway into the machine. Foundation for a future worktree coding-agent command center."
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.2.21"
+cyrius = "6.2.22"
 
 [build]
 entry = "src/main.cyr"
@@ -16,12 +16,13 @@ stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "b
 
 # kashi — AGNOS console-font subsystem. M3 sources bitmap glyphs from its
 # FREESTANDING font-data core only (zero stdlib: store8/load8 + arithmetic).
-# Pinned git dep on the v1.0.1 tag (kashi's 1.x API is frozen), so `cyrius deps`
-# resolves it identically on a devbox and in CI — no sibling checkout required.
-# The full library face (PSF/BDF/PCF loaders) is deliberately NOT pulled in; the
-# built-in CP437 fonts (VGA 8x16 / CGA 8x8 / VGA 9x16) cover the renderer's needs.
+# Pinned git dep on the v1.0.2 tag (kashi's 1.x API is frozen; 1.0.2 tracks the
+# 6.2.22 language), so `cyrius deps` resolves it identically on a devbox and in CI
+# — no sibling checkout required. The full library face (PSF/BDF/PCF loaders) is
+# deliberately NOT pulled in; the built-in CP437 fonts (VGA 8x16 / CGA 8x8 /
+# VGA 9x16) cover the renderer's needs.
 [deps.kashi]
 git     = "https://github.com/MacCracken/kashi.git"
-tag     = "1.0.1"
+tag     = "1.0.2"
 modules = ["src/font_data.cyr"]
 ---

@@ -1,18 +1,37 @@
 # puka_term.cyr — the desktop daily-driver: puka as a Wayland window on Hyprland.
 #
-# Replaces the retired framebuffer puka_session. Bite 2 cut: opens a real titled
-# window via the win_* seam, paints a solid fill, and stays alive (ping→pong,
-# configure→ack handled in the backend) until the window is closed. Bites 3-6
-# add the grid renderer, the PTY shell, keyboard input, and resize; bites 7-8
-# swap the CPU fill for mabda GPU rendering.
+# Replaces the retired framebuffer puka_session. Builds bite-by-bite:
+#   bite 2: a titled window + solid fill.
+#   bite 3: the terminal GRID rendered into the window (kashi glyphs, SGR colour,
+#           cursor) via fb.cyr -> XRGB8888 -> wl_shm.   <-- current
+#   bites 4-6: PTY shell + live output, keyboard input, resize (interactive MVP).
+#   bites 7-8: mabda GPU rendering swapped in behind the win_present seam.
 #
 # Build:  cyrius build programs/puka_term.cyr build/puka_term
 # Run  :  WAYLAND_DISPLAY=wayland-1 ./build/puka_term   (inside a Wayland session)
 
+include "src/parser.cyr"
+include "src/grid.cyr"
+include "src/unicode.cyr"
+include "src/terminal.cyr"
+include "lib/kashi_font_data.cyr"
+include "src/render/fb.cyr"
+include "src/render/pixfmt.cyr"
 include "src/platform/wayland/wire.cyr"
 include "src/platform/wayland/client.cyr"
 include "src/platform/wayland/shm.cyr"
 include "src/platform/window.cyr"
+
+# Repaint: clear margins, render the grid, blit it into the present buffer, commit.
+fn puka__paint(win): i64 {
+    var dst = win_present_begin(win);
+    if (dst == 0) { return 0; }
+    shm_fill(0x000000);                                  # bg + any margin
+    fb_render();
+    pix_blit_rgb_to_xrgb(fb_buf(), fb_width(), fb_height(), dst, win_w);
+    win_present_commit(win, 0, 0, win_w, win_h);
+    return 0;
+}
 
 fn main(): i64 {
     alloc_init();
@@ -23,22 +42,36 @@ fn main(): i64 {
         wl__emit_str("win_open failed (no $WAYLAND_DISPLAY / missing globals?)\n");
         return 1;
     }
-    var sz[16];
-    win_size_px(win, &sz);
-    wl__emit_str("window mapped: ");
-    wl__emit_uint(load64(&sz)); wl__emit_str("x"); wl__emit_uint(load64(&sz + 8));
-    wl__emit_str(" px. painting + entering the event loop.\n");
+    # size the grid to the window (8x16 cells), clamped to the grid ceilings.
+    var cols = win_w / 8;
+    var rows = win_h / 16;
+    if (cols > 132) { cols = 132; }
+    if (rows > 64)  { rows = 64; }
+    if (cols < 1) { cols = 1; }
+    if (rows < 1) { rows = 1; }
+    term_init(rows, cols);
+    fb_init(8, 16);
 
-    win_present_begin(win);
-    shm_fill(0x1A1B26);                          # calm dark fill (Tokyo-night-ish)
-    win_present_commit(win, 0, 0, win_w, win_h);
+    wl__emit_str("window mapped: ");
+    wl__emit_uint(win_w); wl__emit_str("x"); wl__emit_uint(win_h);
+    wl__emit_str(" px -> grid "); wl__emit_uint(cols); wl__emit_str("x"); wl__emit_uint(rows);
+    wl__emit_str(". rendering the grid.\n");
+
+    # demo content (bite 3: prove text/colour/glyph/cursor render in the window)
+    term_feed_str("\x1b[1;32mpuka\x1b[0m on \x1b[1;31mWayland\x1b[0m \xe2\x9c\x93\r\n");
+    term_feed_str("a sovereign Cyrius terminal in a wl_shm window — no libwayland, no toolkit.\r\n\r\n");
+    term_feed_str("\x1b[7m reverse \x1b[0m  \x1b[44;1;97m blue bg \x1b[0m  \x1b[42;30m green bg \x1b[0m  ");
+    term_feed_str("\x1b[38;5;208m256-colour\x1b[0m  \x1b[38;2;255;120;0mtruecolor\x1b[0m\r\n\r\n");
+    term_feed_str("the quick brown fox jumps over the lazy dog  0123456789  !@#$%^&*()\r\n");
+    term_feed_str("\r\nthe cursor block sits here -> ");
+
+    puka__paint(win);
 
     var alive = 1;
     while (alive == 1) {
-        var ev = win_poll_events(win);           # blocks on the wayland fd; handles ping/configure
+        var ev = win_poll_events(win);
         if ((ev & WIN_EV_CLOSE) != 0) { alive = 0; }
     }
-
     win_close(win);
     wl__emit_str("puka_term — window closed. bye.\n");
     return 0;
