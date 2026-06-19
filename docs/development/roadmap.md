@@ -84,16 +84,34 @@ Multi-agent adversarial review closed (2 findings fixed + regression-tested).
 - **Damage tracking** (per-row dirty bits) — ✅.
 - **Acceptance** (renderer core): the grid renders, cursor visible, colours correct, scrolling repaints correctly — ✅ pixel-tested + visually confirmed. On-screen smoothness is exercised once the M5 display backend lands.
 
-### M4 — Input encoding (0.4.0) — interactive
+### M4 — Input encoding (0.4.0) — ✅ shipped 2026-06-18
 
-- **Input** (`input.cyr`) — keyboard → escape sequences: cursor/function keys, modifiers (shift/ctrl/alt), bracketed paste, application-cursor-key mode. Mouse tracking (SGR) may defer to M6.
-- On AGNOS, source keystrokes from the xHCI/HID input path.
-- **Acceptance**: type in puka, the shell echoes and responds; a full interactive session works on Linux.
+**Done:** `src/input.cyr` — a pure keyboard→escape-sequence ENCODER, byte-exact
+against xterm `ctlseqs` and round-tripped through puka's own parser.
+`input_encode(sym, mods, out)` covers printable/UTF-8, Ctrl→C0, Alt→ESC-prefix,
+cursor keys (CSI / SS3 under DECCKM / `CSI 1;<mod>` when modified), Home/End,
+editing & page keys, F1–F12, BackTab, and the xterm modifier formula via the
+single `input__xtmod` chokepoint (disjoint keysym range so a codepoint can't
+collide with a named key). `input_paste(text, len, cap, out)` wraps bracketed
+paste (mode 2004), strips both CSI introducers (ESC + 8-bit `0x9B`) from the
+untrusted body, and bounds-checks every write. terminal.cyr gained the DECCKM +
+2004 getters. `tests/input.tcyr` (67) + skip-clean `tests/input_pty.tcyr` (real
+PTY echo) + `programs/input_demo.cyr`. Adversarial review closed.
+
+> **Scope note:** 0.4.0 ships the platform-agnostic encoder + a proven PTY
+> round-trip (encoded keys → child → echo → grid). The **live raw-key SOURCE**
+> (Linux evdev / AGNOS xHCI-HID) and the interactive read-loop are folded into
+> **M5** alongside the display — the encoder is `(sym, mods) → bytes`; the device
+> that *produces* `(sym, mods)` is the platform edge.
+
+- Mouse tracking (SGR) deferred to M6.
+- **Acceptance** (encoder): every key/modifier sequence is byte-exact and parses back through puka's parser; encoded keys drive a real child end-to-end — ✅. The live "type at a keyboard" session lands with the M5 key source.
 
 ### M5 — AGNOS-native bring-up + on-screen display (0.5.0) — the proof-app
 
 - **AGNOS PTY surface** — the kernel-side pty syscalls puka needs (a Cyrius-native gap, analogous to the `net.cyr` / `vani` agnos-backend gaps; grown per the kernel-growth rules, not POSIX `forkpty` emulation).
 - **Display backend** (from M3) — push the renderer's pixel buffer to a real surface: the AGNOS `blit`#39 framebuffer (native, the proof path) + a Linux fbdev/KMS adjunct for the dev host. A thin blit over `fb_buf()` / `fb_width()` / `fb_height()`; the renderer itself is done (M3). Pull forward if an on-screen Linux session is wanted before AGNOS bring-up.
+- **Key source** (from M4) — feed `input_encode(sym, mods, …)` from a real raw-key device: Linux evdev (`/dev/input`) for the dev host, the AGNOS xHCI/HID path for native. The encoder is done (M4); this is the device-read edge + the interactive loop (`pty_pump` ⇄ render ⇄ key-read).
 - Run puka on the AGNOS framebuffer as a real console, launching agnoshi.
 - **Acceptance**: puka boots a shell on AGNOS iron/QEMU and is interactive — the DOOM/tracker-class proof milestone for the terminal.
 

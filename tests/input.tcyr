@@ -1,0 +1,153 @@
+# input.tcyr — keyboard encoder tests (M4).
+# Asserts the exact bytes input_encode/input_paste emit, and round-trips a
+# representative set back through puka's OWN parser (vt_feed) to prove the
+# emitter and parser agree. Stdlib auto-included via cyrius.cyml.
+
+include "src/parser.cyr"
+include "src/grid.cyr"
+include "src/unicode.cyr"
+include "src/terminal.cyr"
+include "src/input.cyr"
+
+var ibuf[64];   # encode target (module-global: 512 bytes — generous)
+
+# Encode (sym,mods) and assert the result equals `expected` (NUL-terminated;
+# none of the tested sequences contain a 0x00 byte).
+fn enc_eq(sym, mods, expected, name): i64 {
+    var len = input_encode(sym, mods, &ibuf);
+    var m = strlen(expected);
+    if (len != m) { return assert_eq(len, m, name); }
+    var i = 0;
+    while (i < len) {
+        if (load8(&ibuf + i) != load8(expected + i)) { return assert(0, name); }
+        i = i + 1;
+    }
+    return assert(1, name);
+}
+
+# Encode then feed each byte through vt_feed; return the LAST event.
+fn rt(sym, mods): i64 {
+    vt_reset();
+    var len = input_encode(sym, mods, &ibuf);
+    var ev = 0;
+    var i = 0;
+    while (i < len) { ev = vt_feed(load8(&ibuf + i)); i = i + 1; }
+    return ev;
+}
+
+fn count_byte(buf, len, b): i64 {
+    var c = 0;
+    var i = 0;
+    while (i < len) { if (load8(buf + i) == b) { c = c + 1; } i = i + 1; }
+    return c;
+}
+
+fn main() {
+    alloc_init();
+    term_init(24, 80);                  # app-cursor off, paste off
+
+    test_group("printable + UTF-8 + control folding");
+    enc_eq(0x41, MOD_NONE, "A", "plain 'A' -> 0x41");
+    enc_eq(0x00E9, MOD_NONE, "\xc3\xa9", "e-acute -> 2 UTF-8 bytes");
+    enc_eq(0x41, MOD_CTRL, "\x01", "Ctrl+A -> 0x01");
+    enc_eq(0x5B, MOD_CTRL, "\x1b", "Ctrl+[ -> 0x1B (ESC)");
+    enc_eq(0x78, MOD_ALT, "\x1bx", "Alt+x -> ESC x");
+    enc_eq(0x61, MOD_CTRL | MOD_ALT, "\x1b\x01", "Ctrl+Alt+a -> ESC 0x01");
+
+    test_group("named ASCII keys are plain codepoints");
+    enc_eq(0x0D, MOD_NONE, "\x0d", "Enter -> CR");
+    enc_eq(0x09, MOD_NONE, "\x09", "Tab -> HT");
+    enc_eq(0x7F, MOD_NONE, "\x7f", "Backspace -> DEL (xterm default)");
+    enc_eq(0x1B, MOD_NONE, "\x1b", "Escape -> ESC");
+
+    test_group("cursor keys — CSI (DECCKM reset)");
+    enc_eq(KEY_UP, MOD_NONE, "\x1b[A", "Up -> CSI A");
+    enc_eq(KEY_DOWN, MOD_NONE, "\x1b[B", "Down -> CSI B");
+    enc_eq(KEY_RIGHT, MOD_NONE, "\x1b[C", "Right -> CSI C");
+    enc_eq(KEY_LEFT, MOD_NONE, "\x1b[D", "Left -> CSI D");
+    enc_eq(KEY_HOME, MOD_NONE, "\x1b[H", "Home -> CSI H");
+    enc_eq(KEY_END, MOD_NONE, "\x1b[F", "End -> CSI F");
+
+    test_group("cursor keys — SS3 (DECCKM set)");
+    term_feed_str("\x1b[?1h");           # DECSET application cursor keys
+    enc_eq(KEY_UP, MOD_NONE, "\x1bOA", "Up -> SS3 A under DECCKM");
+    enc_eq(KEY_HOME, MOD_NONE, "\x1bOH", "Home -> SS3 H under DECCKM");
+    enc_eq(KEY_UP, MOD_CTRL, "\x1b[1;5A", "Ctrl+Up -> CSI form even under DECCKM");
+    term_feed_str("\x1b[?1l");           # back to normal for later groups
+
+    test_group("modifier encoding (xterm 1+sum)");
+    enc_eq(KEY_RIGHT, MOD_CTRL, "\x1b[1;5C", "Ctrl+Right -> CSI 1;5 C");
+    enc_eq(KEY_UP, MOD_SHIFT, "\x1b[1;2A", "Shift+Up -> CSI 1;2 A");
+    enc_eq(KEY_LEFT, MOD_ALT, "\x1b[1;3D", "Alt+Left -> CSI 1;3 D");
+    enc_eq(KEY_HOME, MOD_SHIFT, "\x1b[1;2H", "Shift+Home -> CSI 1;2 H");
+
+    test_group("editing + page keys (tilde)");
+    enc_eq(KEY_INSERT, MOD_NONE, "\x1b[2~", "Insert -> CSI 2~");
+    enc_eq(KEY_DELETE, MOD_NONE, "\x1b[3~", "Delete -> CSI 3~");
+    enc_eq(KEY_PGUP, MOD_NONE, "\x1b[5~", "PageUp -> CSI 5~");
+    enc_eq(KEY_PGDN, MOD_NONE, "\x1b[6~", "PageDown -> CSI 6~");
+    enc_eq(KEY_PGUP, MOD_SHIFT, "\x1b[5;2~", "Shift+PageUp -> CSI 5;2~");
+    enc_eq(KEY_DELETE, MOD_CTRL, "\x1b[3;5~", "Ctrl+Delete -> CSI 3;5~");
+
+    test_group("function keys F1-F12");
+    enc_eq(KEY_F1, MOD_NONE, "\x1bOP", "F1 -> SS3 P");
+    enc_eq(KEY_F4, MOD_NONE, "\x1bOS", "F4 -> SS3 S");
+    enc_eq(KEY_F3, MOD_SHIFT, "\x1b[1;2R", "Shift+F3 -> CSI 1;2 R");
+    enc_eq(KEY_F5, MOD_NONE, "\x1b[15~", "F5 -> CSI 15~");
+    enc_eq(KEY_F10, MOD_NONE, "\x1b[21~", "F10 -> CSI 21~ (16,22 skipped)");
+    enc_eq(KEY_F12, MOD_NONE, "\x1b[24~", "F12 -> CSI 24~");
+    enc_eq(KEY_F5, MOD_SHIFT, "\x1b[15;2~", "Shift+F5 -> CSI 15;2~");
+    enc_eq(KEY_BACKTAB, MOD_NONE, "\x1b[Z", "BackTab -> CSI Z");
+
+    test_group("round-trip through puka's parser (vt_feed)");
+    assert_eq(rt(0x41, MOD_NONE), VTE_PRINT, "'A' decodes PRINT");
+    assert_eq(vt_event_char(), 0x41, "  char = 0x41");
+    assert_eq(rt(0x41, MOD_CTRL), VTE_EXECUTE, "Ctrl+A decodes EXECUTE");
+    assert_eq(vt_event_char(), 0x01, "  char = 0x01");
+    assert_eq(rt(KEY_UP, MOD_NONE), VTE_CSI, "Up decodes CSI");
+    assert_eq(vt_event_char(), 0x41, "  final = 'A'");
+    assert_eq(vt_param_count(), 0, "  no params");
+    assert_eq(vt_prefix(), 0, "  no private prefix");
+    assert_eq(rt(KEY_RIGHT, MOD_CTRL), VTE_CSI, "Ctrl+Right decodes CSI");
+    assert_eq(vt_event_char(), 0x43, "  final = 'C'");
+    assert_eq(vt_param(0), 1, "  param0 = 1");
+    assert_eq(vt_param(1), 5, "  param1 = 5 (Ctrl)");
+    assert_eq(vt_param_count(), 2, "  two params");
+    assert_eq(rt(KEY_DELETE, MOD_NONE), VTE_CSI, "Delete decodes CSI");
+    assert_eq(vt_event_char(), 0x7E, "  final = '~'");
+    assert_eq(vt_param(0), 3, "  param0 = 3");
+    assert_eq(rt(KEY_F5, MOD_NONE), VTE_CSI, "F5 decodes CSI");
+    assert_eq(vt_param(0), 15, "  param0 = 15");
+    assert_eq(rt(KEY_BACKTAB, MOD_NONE), VTE_CSI, "BackTab decodes CSI");
+    assert_eq(vt_event_char(), 0x5A, "  final = 'Z'");
+
+    test_group("bracketed paste (mode 2004)");
+    term_init(24, 80);                   # paste off
+    assert_eq(input_paste("ab", 2, 64, &ibuf), 2, "paste off -> verbatim len 2");
+    assert_eq(load8(&ibuf), 0x61, "  byte0 = 'a'");
+    term_feed_str("\x1b[?2004h");        # enable bracketed paste
+    var pl = input_paste("ab", 2, 64, &ibuf);
+    assert_eq(pl, 14, "paste on 'ab' -> 6+2+6 = 14 bytes");
+    assert_eq(load8(&ibuf + 6), 0x61, "  body byte after start marker = 'a'");
+    # start/end markers round-trip as CSI 200~ / 201~
+    vt_reset();
+    var k = 0; var lastp = 0;
+    while (k < 6) { vt_feed(load8(&ibuf + k)); k = k + 1; }
+    assert_eq(vt_event_char(), 0x7E, "  start marker final '~'");
+    assert_eq(vt_param(0), 200, "  start marker param 200");
+
+    test_group("paste sanitization + cap guard");
+    term_feed_str("\x1b[?2004h");        # still on
+    var ps = input_paste("a\x1bb", 3, 64, &ibuf);   # embedded ESC in body
+    assert_eq(count_byte(&ibuf, ps, 0x1B), 2, "embedded ESC stripped -> only 2 marker ESCs");
+    assert_eq(ps, 14, "  sanitized 'a ESC b' -> body 'ab', len 14");
+    var pc = input_paste("\x9b201~X", 6, 64, &ibuf);   # 8-bit C1 CSI in body
+    assert_eq(count_byte(&ibuf, pc, 0x9B), 0, "8-bit C1 CSI (0x9B) stripped from paste body");
+    term_init(24, 80);                   # paste off for the cap test
+    assert_eq(input_paste("abcdef", 6, 4, &ibuf), 4, "cap=4 stops writes at 4");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -159,6 +159,19 @@ fn main() {
     assert_eq(grid_glyph(2, 4), 0x20, "RIS cleared screen");
     assert_eq(grid_attr(0, 0), 0, "RIS reset SGR");
 
+    test_group("input modes: DECCKM + bracketed paste (mode 2004) getters");
+    term_init(24, 80);
+    assert_eq(term_app_cursor_get(), 0, "DECCKM off after init");
+    assert_eq(term_bracket_paste_get(), 0, "bracketed paste off after init");
+    term_feed_str("\x1b[?1h");                  # DECSET DECCKM
+    assert_eq(term_app_cursor_get(), 1, "CSI ?1h sets application-cursor mode");
+    term_feed_str("\x1b[?1l");                  # DECRST DECCKM
+    assert_eq(term_app_cursor_get(), 0, "CSI ?1l resets application-cursor mode");
+    term_feed_str("\x1b[?2004h");               # DECSET bracketed paste
+    assert_eq(term_bracket_paste_get(), 1, "CSI ?2004h sets bracketed paste");
+    term_feed_str("\x1b[?2004l");               # DECRST bracketed paste
+    assert_eq(term_bracket_paste_get(), 0, "CSI ?2004l resets bracketed paste");
+
     return assert_summary();
 }
 

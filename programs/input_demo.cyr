@@ -1,0 +1,74 @@
+# input_demo.cyr — M4 demo: drive a real child with puka's input encoder.
+#
+# Spawns `/bin/cat` in a PTY, "types" a line by running each character (and a
+# few named keys) through input_encode() -> pty_write(), pumps the child's
+# echoed output back through the pipe (pty -> parser -> grid), then renders the
+# captured grid as text. Demonstrates the full INPUT path end to end, the
+# counterpart to fb_demo's output path.
+#
+# Build:  cyrius build programs/input_demo.cyr build/input_demo && ./build/input_demo
+
+include "src/parser.cyr"
+include "src/grid.cyr"
+include "src/unicode.cyr"
+include "src/terminal.cyr"
+include "src/pty.cyr"
+include "src/input.cyr"
+
+var kbuf[64];
+var line[256];
+
+fn emit(s, n): i64 { syscall(1, 1, s, n); return 0; }
+fn emit_str(s): i64 { return emit(s, strlen(s)); }
+
+# "Type" a NUL-terminated ASCII string through the encoder into the child.
+fn type_str(s): i64 {
+    var n = strlen(s);
+    var i = 0;
+    while (i < n) {
+        var k = input_encode(load8(s + i), MOD_NONE, &kbuf);
+        pty_write(&kbuf, k);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn type_key(sym): i64 {
+    var k = input_encode(sym, MOD_NONE, &kbuf);
+    return pty_write(&kbuf, k);
+}
+
+fn main(): i64 {
+    alloc_init();
+    term_init(24, 80);
+
+    emit_str("puka input demo — typing into `/bin/cat` via input_encode():\n");
+    emit_str("------------------------------------------------------------\n");
+
+    var m = pty_open();
+    if (m < 0) { emit_str("(no PTY available in this environment)\n"); return 0; }
+    var pid = pty_spawn("/bin/cat", 0, 0, 24, 80);
+    if (pid < 0) { emit_str("(could not spawn child)\n"); pty_close(); return 0; }
+
+    type_str("puka types this line, then Enter ->");
+    type_key(0x0D);                 # Enter
+    type_str("and a second line.");
+    type_key(0x0D);
+
+    pty_pump(200);
+    pty_close();
+    pty_wait();
+
+    var r = 0;
+    while (r < grid_get_rows()) {
+        var n = term_render_row_trim(r, &line, 256);
+        if (n > 0) { emit(&line, n); emit_str("\n"); }
+        r = r + 1;
+    }
+    emit_str("------------------------------------------------------------\n");
+    emit_str("(keystrokes encoded by input.cyr, echoed by the pts, re-rendered)\n");
+    return 0;
+}
+
+fn _entry(): i64 { var rc = main(); syscall(SYS_EXIT, rc); return 0; }
+_entry();

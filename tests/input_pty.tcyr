@@ -1,0 +1,72 @@
+# input_pty.tcyr — input encoder ↔ real PTY integration (M4).
+#
+# Proves the encoder agrees with a real terminal line discipline end-to-end:
+# input_encode -> pty_write -> child's pts (ECHO) -> pty_pump -> parser -> grid.
+# Linux-only and skip-clean (like tests/pty.tcyr): if /dev/ptmx or fork is
+# blocked, print SKIP and pass trivially rather than fake a result.
+
+include "src/parser.cyr"
+include "src/grid.cyr"
+include "src/unicode.cyr"
+include "src/terminal.cyr"
+include "src/pty.cyr"
+include "src/input.cyr"
+
+var kbuf[64];
+
+fn skip(reason) {
+    syscall(1, 1, "SKIP input_pty: ", 16);
+    syscall(1, 1, reason, strlen(reason));
+    syscall(1, 1, "\n", 1);
+    return 0;
+}
+
+# "Type" one codepoint by encoding it and writing it to the child.
+fn type_cp(cp): i64 {
+    var n = input_encode(cp, MOD_NONE, &kbuf);
+    return pty_write(&kbuf, n);
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("input: encoded keystrokes reach a real child via the pts");
+
+#ifdef CYRIUS_TARGET_LINUX
+    term_init(24, 80);
+    var m = pty_open();
+    if (m < 0) {
+        skip("/dev/ptmx unavailable (sandbox)");
+        assert(1, "skipped: no pty");
+    } else {
+        var pid = pty_spawn("/bin/cat", 0, 0, 24, 80);
+        if (pid < 0) {
+            skip("fork/spawn blocked");
+            pty_close();
+            assert(1, "skipped: no spawn");
+        } else {
+            # "type" h, i, Enter through the encoder. The pts line discipline
+            # echoes "hi" to the master (cooked mode, ECHO on by default), which
+            # the pump feeds into the grid at row 0.
+            type_cp(0x68);            # 'h'
+            type_cp(0x69);            # 'i'
+            type_cp(0x0D);            # Enter (CR codepoint — no special branch)
+            pty_pump(200);
+            pty_close();              # EOF/SIGHUP so cat exits
+            pty_wait();
+            assert_eq(grid_glyph(0, 0), 0x68, "echoed 'h' landed at (0,0) via the encoder");
+            assert_eq(grid_glyph(0, 1), 0x69, "echoed 'i' landed at (0,1)");
+        }
+    }
+#endif
+
+#ifndef CYRIUS_TARGET_LINUX
+    skip("pty backend is Linux-only (agnos input/pty is M5)");
+    assert(1, "skipped: non-linux target");
+#endif
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

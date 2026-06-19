@@ -1,0 +1,222 @@
+# input.cyr — puka keyboard → escape-sequence encoder.
+#
+# The pure, platform-agnostic INPUT half of the terminal: given one logical
+# keystroke `(sym, mods)`, produce the exact byte sequence a child PTY expects
+# (xterm `ctlseqs` conformance), filling a caller buffer and returning the
+# length. The caller sends it via pty_write(). This module reads nothing from a
+# device and sends nothing — the key SOURCE (Linux raw stdin / AGNOS xHCI-HID)
+# and the interactive loop are separate platform edges wired later. It mirrors
+# the parser/grid/renderer: headless, deterministic, fully unit-testable.
+#
+# Co-compiled: the consumer includes parser.cyr + grid.cyr + unicode.cyr +
+# terminal.cyr (for term_app_cursor_get / term_bracket_paste_get) + this file.
+# input.cyr includes nothing (mirrors terminal.cyr) to avoid double includes.
+#
+# KEYSYM model — one i64 `sym`, split by range so a printable scalar can never
+# collide with a named key:
+#   0x000000 .. 0x10FFFF  = a Unicode codepoint (UC_MAX). Enter 0x0D, Tab 0x09,
+#                           Backspace 0x7F, Escape 0x1B, Space 0x20 are plain.
+#   >= 0x110000 (KEY_BASE = UC_MAX+1) = a named special key (arrows, F-keys, …).
+# Disjoint, self-describing — the same idiom as terminal.cyr's colour tags.
+#
+# MODIFIER model — one i64 `mods` bitmask whose bits ARE the xterm summands, so
+# the CSI/SS3 modifier parameter is just (mods & 15) + 1 (no lookup table).
+
+# Named special keys. KEY_BASE = 0x110000 (one above UC_MAX 0x10FFFF) — the
+# dispatch threshold; assigned contiguously so a future table is a plain index.
+enum InputKey {
+    KEY_UP      = 0x110000;
+    KEY_DOWN    = 0x110001;
+    KEY_RIGHT   = 0x110002;
+    KEY_LEFT    = 0x110003;
+    KEY_HOME    = 0x110004;
+    KEY_END     = 0x110005;
+    KEY_INSERT  = 0x110006;
+    KEY_DELETE  = 0x110007;
+    KEY_PGUP    = 0x110008;
+    KEY_PGDN    = 0x110009;
+    KEY_F1      = 0x11000A;
+    KEY_F2      = 0x11000B;
+    KEY_F3      = 0x11000C;
+    KEY_F4      = 0x11000D;
+    KEY_F5      = 0x11000E;
+    KEY_F6      = 0x11000F;
+    KEY_F7      = 0x110010;
+    KEY_F8      = 0x110011;
+    KEY_F9      = 0x110012;
+    KEY_F10     = 0x110013;
+    KEY_F11     = 0x110014;
+    KEY_F12     = 0x110015;
+    KEY_BACKTAB = 0x110016;   # Shift+Tab
+}
+
+# Modifier bits — chosen to equal the xterm summands (shift1/alt2/ctrl4/meta8).
+enum InputMod {
+    MOD_NONE  = 0;
+    MOD_SHIFT = 1;
+    MOD_ALT   = 2;
+    MOD_CTRL  = 4;
+    MOD_META  = 8;
+}
+
+# The xterm modifier parameter: 1 + (shift1 + alt2 + ctrl4 + meta8). The single
+# chokepoint a future kitty/CSI-u protocol would re-map. mods==0 callers must
+# omit the param entirely (handled by the builders).
+fn input__xtmod(mods): i64 { return (mods & 15) + 1; }
+
+# Write n (>= 0) as base-10 ASCII into out; returns digit count. Terminal
+# params are small; mirrors pty.cyr's reverse-then-flip digit loop.
+fn input__emit_num(n, out): i64 {
+    if (n == 0) { store8(out, 0x30); return 1; }
+    var tmp[24];
+    var k = 0;
+    while (n > 0) { store8(&tmp + k, 0x30 + n % 10); n = n / 10; k = k + 1; }
+    var j = 0;
+    while (j < k) { store8(out + j, load8(&tmp + k - 1 - j)); j = j + 1; }
+    return k;
+}
+
+# CSI builder: ESC [ final, or ESC [ 1 ; <xtmod> final when modified.
+fn input__csi(final, mods, out): i64 {
+    store8(out, 0x1B);              # ESC
+    store8(out + 1, 0x5B);          # [
+    var n = 2;
+    if (mods != 0) {
+        store8(out + n, 0x31); n = n + 1;       # '1' (the mandatory first param)
+        store8(out + n, 0x3B); n = n + 1;       # ';'
+        n = n + input__emit_num(input__xtmod(mods), out + n);
+    }
+    store8(out + n, final); n = n + 1;
+    return n;
+}
+
+# Tilde builder (editing keys + F5..F12): ESC [ num ~, or ESC [ num ; <xtmod> ~.
+fn input__csi_tilde(num, mods, out): i64 {
+    store8(out, 0x1B);              # ESC
+    store8(out + 1, 0x5B);          # [
+    var n = 2;
+    n = n + input__emit_num(num, out + n);
+    if (mods != 0) {
+        store8(out + n, 0x3B); n = n + 1;       # ';'
+        n = n + input__emit_num(input__xtmod(mods), out + n);
+    }
+    store8(out + n, 0x7E); n = n + 1;           # '~'
+    return n;
+}
+
+# SS3 builder (F1..F4 unmodified): ESC O final. When modified, xterm promotes
+# to the CSI 1;<mod> final form, so delegate.
+fn input__ss3(final, mods, out): i64 {
+    if (mods != 0) { return input__csi(final, mods, out); }
+    store8(out, 0x1B);              # ESC
+    store8(out + 1, 0x4F);          # O
+    store8(out + 2, final);
+    return 3;
+}
+
+# Cursor / Home / End: DECCKM-aware. Modified -> CSI 1;<mod> form (SS3 never
+# carries a modifier). Unmodified -> SS3 when application-cursor mode is set,
+# else CSI.
+fn input__arrow(final, mods, out): i64 {
+    if (mods != 0) { return input__csi(final, mods, out); }
+    if (term_app_cursor_get() == 1) {
+        store8(out, 0x1B); store8(out + 1, 0x4F); store8(out + 2, final);   # ESC O final
+        return 3;
+    }
+    store8(out, 0x1B); store8(out + 1, 0x5B); store8(out + 2, final);       # ESC [ final
+    return 3;
+}
+
+# Printable codepoint: Ctrl-fold (ASCII only) -> optional Alt ESC-prefix -> UTF-8.
+fn input__printable(cp, mods, out): i64 {
+    if ((mods & MOD_CTRL) != 0) {
+        if (cp < 0x80) { cp = cp & 0x1F; }       # Ctrl+A->0x01 … Ctrl+_->0x1F; non-ASCII: no fold
+    }
+    var n = 0;
+    if ((mods & MOD_ALT) != 0) { store8(out, 0x1B); n = 1; }   # Alt = ESC prefix (metaSendsEscape)
+    n = n + utf8_encode(cp, out + n);
+    return n;
+}
+
+# Named special key -> its sequence. Finals: arrows A/B/C/D, Home H, End F,
+# F1-F4 P/Q/R/S; tilde nums per xterm (16 and 22 skipped).
+fn input__special(sym, mods, out): i64 {
+    if (sym == KEY_UP)      { return input__arrow(0x41, mods, out); }
+    if (sym == KEY_DOWN)    { return input__arrow(0x42, mods, out); }
+    if (sym == KEY_RIGHT)   { return input__arrow(0x43, mods, out); }
+    if (sym == KEY_LEFT)    { return input__arrow(0x44, mods, out); }
+    if (sym == KEY_HOME)    { return input__arrow(0x48, mods, out); }
+    if (sym == KEY_END)     { return input__arrow(0x46, mods, out); }
+    if (sym == KEY_INSERT)  { return input__csi_tilde(2, mods, out); }
+    if (sym == KEY_DELETE)  { return input__csi_tilde(3, mods, out); }
+    if (sym == KEY_PGUP)    { return input__csi_tilde(5, mods, out); }
+    if (sym == KEY_PGDN)    { return input__csi_tilde(6, mods, out); }
+    if (sym == KEY_F1)      { return input__ss3(0x50, mods, out); }
+    if (sym == KEY_F2)      { return input__ss3(0x51, mods, out); }
+    if (sym == KEY_F3)      { return input__ss3(0x52, mods, out); }
+    if (sym == KEY_F4)      { return input__ss3(0x53, mods, out); }
+    if (sym == KEY_F5)      { return input__csi_tilde(15, mods, out); }
+    if (sym == KEY_F6)      { return input__csi_tilde(17, mods, out); }
+    if (sym == KEY_F7)      { return input__csi_tilde(18, mods, out); }
+    if (sym == KEY_F8)      { return input__csi_tilde(19, mods, out); }
+    if (sym == KEY_F9)      { return input__csi_tilde(20, mods, out); }
+    if (sym == KEY_F10)     { return input__csi_tilde(21, mods, out); }
+    if (sym == KEY_F11)     { return input__csi_tilde(23, mods, out); }
+    if (sym == KEY_F12)     { return input__csi_tilde(24, mods, out); }
+    if (sym == KEY_BACKTAB) {
+        store8(out, 0x1B); store8(out + 1, 0x5B); store8(out + 2, 0x5A);   # ESC [ Z
+        return 3;
+    }
+    return 0;   # unknown special key: emit nothing
+}
+
+# PUBLIC: encode one keystroke into `out`; returns bytes written. `out` must be
+# a byte buffer with room for the longest sequence (<= ~9 bytes for a modified
+# F-key). A key source calls this, then pty_write(out, n).
+fn input_encode(sym, mods, out): i64 {
+    if (sym >= 0x110000) { return input__special(sym, mods, out); }   # KEY_BASE
+    return input__printable(sym, mods, out);
+}
+
+# PUBLIC: encode a paste of `len` bytes at `text` into `out` (<= `cap` bytes),
+# returns bytes written. When bracketed-paste (mode 2004) is set, wrap the body
+# in ESC[200~ … ESC[201~ AND strip both CSI introducers from the body — the
+# 7-bit ESC (0x1B) and the 8-bit C1 CSI (0x9B) — so an adversarial paste cannot
+# emit its own ESC[201~ (or the 0x9B equivalent) to break out of the bracket and
+# run commands (defense-in-depth; a UTF-8 child already maps 0x9B to U+FFFD).
+# Every write is bounds-checked against `cap` (the payload is untrusted — a
+# missing guard is a buffer overflow).
+fn input_paste(text, len, cap, out): i64 {
+    var n = 0;
+    if (term_bracket_paste_get() == 1) {
+        if (n + 6 > cap) { return n; }
+        store8(out + n, 0x1B); store8(out + n + 1, 0x5B);          # ESC [
+        store8(out + n + 2, 0x32); store8(out + n + 3, 0x30);      # 2 0
+        store8(out + n + 4, 0x30); store8(out + n + 5, 0x7E);      # 0 ~   -> ESC[200~
+        n = n + 6;
+        var i = 0;
+        while (i < len) {
+            var b = load8(text + i);
+            if (b != 0x1B) {                                       # strip ESC (7-bit CSI introducer)
+                if (b != 0x9B) {                                   # strip 8-bit C1 CSI introducer
+                    if (n + 1 > cap) { return n; }
+                    store8(out + n, b); n = n + 1;
+                }
+            }
+            i = i + 1;
+        }
+        if (n + 6 > cap) { return n; }
+        store8(out + n, 0x1B); store8(out + n + 1, 0x5B);          # ESC [
+        store8(out + n + 2, 0x32); store8(out + n + 3, 0x30);      # 2 0
+        store8(out + n + 4, 0x31); store8(out + n + 5, 0x7E);      # 1 ~   -> ESC[201~
+        n = n + 6;
+        return n;
+    }
+    var j = 0;
+    while (j < len) {
+        if (n + 1 > cap) { return n; }
+        store8(out + n, load8(text + j)); n = n + 1;
+        j = j + 1;
+    }
+    return n;
+}

@@ -4,6 +4,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-18
+
+**M4 — input encoding.** The keyboard half of the terminal: a pure, headless
+key→escape-sequence encoder, byte-exact against xterm `ctlseqs` and round-tripped
+through puka's own parser. 0.4.0 ships the platform-agnostic encoder + a real PTY
+round-trip; the live raw-key SOURCE (Linux evdev / AGNOS xHCI-HID) and the
+interactive loop ride with the M5 display backend.
+
+### Added
+- **`src/input.cyr`** — keyboard→escape-sequence encoder. `input_encode(sym, mods, out)` maps one keystroke to its exact bytes: printable Unicode (UTF-8), Ctrl→C0 fold, Alt/Meta→ESC-prefix; cursor keys (CSI normally, SS3 under DECCKM, `CSI 1;<mod>` when modified); Home/End; editing keys (Insert/Delete/PageUp/PageDown tilde forms); F1–F12 (SS3 P/Q/R/S and the `15/17/18/19/20/21/23/24~` tilde family); BackTab; and the xterm modifier formula `(mods&15)+1` via the single chokepoint `input__xtmod`. Keysyms use a disjoint range (codepoints `0..0x10FFFF`, named keys at `0x110000+`) so a printable scalar can never collide with a named key — the same self-describing-tag idiom as the colour encoding. Reads terminal modes through getters, never globals.
+- **`input_paste(text, len, cap, out)`** — bracketed-paste (mode 2004) wrapper: wraps the body in `ESC[200~ … ESC[201~`, strips both CSI introducers (7-bit `ESC` and 8-bit C1 `0x9B`) from the untrusted body so a paste cannot break out of the bracket to inject commands, and bounds-checks every write against `cap`.
+- **terminal.cyr**: `term_app_cursor_get()` (DECCKM) and `term_bracket_paste_get()` getters for the encoder; wired DEC private mode 2004 (bracketed paste) in `term__dec_mode` + reset in `term_init`. +6 `terminal.tcyr` assertions.
+- **`tests/input.tcyr`** (67) — byte-exact assertions for every key/modifier category + `vt_feed` round-trips (proving emitter and parser agree) + paste wrap/sanitize/cap-guard tests. **`tests/input_pty.tcyr`** (skip-clean) — encoded keystrokes drive a real `/bin/cat` through a PTY and its echo lands in the grid. **`programs/input_demo.cyr`** types two lines into `cat` via the encoder and re-renders.
+
+### Reviewed
+- Multi-agent adversarial review (conformance / bounds / untrusted-paste / idiom), each finding independently verified. One low-severity hardening applied: also strip the 8-bit C1 CSI (`0x9B`) from a bracketed paste body (defense-in-depth against a legacy 8-bit-C1 child), with a regression test.
+
 ## [0.3.0] — 2026-06-18
 
 **M3 — framebuffer renderer + glyphs.** puka's first *visible* surface. 0.3.0

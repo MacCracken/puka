@@ -77,7 +77,7 @@ Two invariants hold this together:
 | `terminal.cyr` | VT semantics — applies parser actions to the grid (CUP/ED/EL/SGR/DECSTBM/modes/charsets) | M1 |
 | `pty.cyr` | PTY pair allocation, child spawn (explicit argv), read/write loop. Platform-split | M2 (Linux) / M5 (agnos) |
 | `render/fb.cyr` | grid → RGB pixel buffer: colour resolution, glyph blit (kashi), cursor, per-row damage, PPM dump | **M3 ✅ (renderer core)** |
-| `input.cyr` | keyboard/mouse → escape-sequence encoding | M4 |
+| `input.cyr` | keyboard → escape-sequence encoding (keysym+mods → bytes; xterm `ctlseqs`; bracketed paste); pure, headless | **M4 ✅** |
 | `main.cyr` | wiring: spawn PTY, pump bytes through parser → terminal → grid → render | M2+ |
 
 ## Platform split

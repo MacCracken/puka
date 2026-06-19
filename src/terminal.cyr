@@ -27,7 +27,8 @@ var term_pending_wrap = 0; # deferred wrap: at last col, wrap on next print
 var term_origin = 0;       # DECOM (cursor addressing relative to scroll region)
 var term_insert = 0;       # IRM (insert mode)
 var term_cursor_vis = 1;   # DECTCEM (display only; tracked for the renderer)
-var term_app_cursor = 0;   # DECCKM (cursor-key mode; consumed by the input bite)
+var term_app_cursor = 0;   # DECCKM (cursor-key mode; consumed by the input encoder)
+var term_bracket_paste = 0; # DEC mode 2004 (bracketed paste; read by input.cyr)
 var term_attr = 0;         # current SGR pen
 var term_fg = 0;
 var term_bg = 0;
@@ -44,6 +45,11 @@ fn term__sync_pen(): i64 { return grid_set_pen(term_attr, term_fg, term_bg); }
 # never the global. 1 = visible, 0 = hidden.
 fn term_cursor_visible(): i64 { return term_cursor_vis; }
 
+# Terminal modes the input encoder (input.cyr) reads — through accessors, never
+# the globals. DECCKM (application cursor keys) and bracketed paste (mode 2004).
+fn term_app_cursor_get(): i64 { return term_app_cursor; }
+fn term_bracket_paste_get(): i64 { return term_bracket_paste; }
+
 # ---- lifecycle ---------------------------------------------------------
 fn term_init(rows, cols): i64 {
     grid_init(rows, cols);
@@ -55,6 +61,7 @@ fn term_init(rows, cols): i64 {
     term_insert = 0;
     term_cursor_vis = 1;
     term_app_cursor = 0;
+    term_bracket_paste = 0;
     term_attr = 0;
     term_fg = 0;
     term_bg = 0;
@@ -370,7 +377,8 @@ fn term__dec_mode(set): i64 {
             grid_mark_row_dirty(grid_cursor_row());
         }
     }
-    # alt-screen (1049), bracketed paste (2004), mouse (1000..1006): later bites
+    if (m == 2004) { term_bracket_paste = set; }           # bracketed paste (input.cyr)
+    # alt-screen (1049), mouse (1000..1006): later bites
     return 0;
 }
 
