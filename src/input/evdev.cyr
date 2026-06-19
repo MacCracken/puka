@@ -12,7 +12,7 @@
 #
 # Co-compiled: consumer includes parser/grid/unicode/terminal/input.cyr then this
 # file (it calls input_encode and uses KEY_*/MOD_*). evdev.cyr includes nothing.
-# US-QWERTY only; CapsLock/NumLock deferred. Trust boundary: adversarial device.
+# US-QWERTY only; CapsLock/NumLock deferred to M7 (roadmap). Trust boundary: adversarial device.
 
 enum EvdevAbi {
     EV_SYS_IOCTL  = 16;

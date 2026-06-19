@@ -23,7 +23,7 @@ enum TermColor {
 }
 
 var term_autowrap = 1;     # DECAWM
-var term_pending_wrap = 0; # deferred wrap: at last col, wrap on next print
+var term_pending_wrap = 0; # pending wrap: at last col, wrap on next print
 var term_origin = 0;       # DECOM (cursor addressing relative to scroll region)
 var term_insert = 0;       # IRM (insert mode)
 var term_cursor_vis = 1;   # DECTCEM (display only; tracked for the renderer)
@@ -76,7 +76,7 @@ fn term_init(rows, cols): i64 {
 }
 
 # Resize the terminal (e.g. on SIGWINCH). Delegates to the grid and clears
-# the deferred-wrap latch. The caller (the PTY owner) is responsible for
+# the pending-wrap latch. The caller (the PTY owner) is responsible for
 # pushing the new size to the child via pty_set_winsize — terminal.cyr does
 # not depend on the PTY layer.
 fn term_resize(rows, cols): i64 {
@@ -113,7 +113,7 @@ fn term_carriage_return(): i64 {
     return 0;
 }
 
-# CR + LF, used for the deferred autowrap.
+# CR + LF, used for the pending autowrap.
 fn term_newline(): i64 {
     term_carriage_return();
     term_index();
@@ -126,7 +126,7 @@ fn term_print(cp): i64 {
     var w = char_width(cp);
     if (w == 0) { return 0; }   # combining/zero-width: not separately placed in M1
 
-    # resolve a deferred wrap from the previous glyph at the right margin
+    # resolve a pending wrap from the previous glyph at the right margin
     if (term_pending_wrap == 1) {
         if (term_autowrap == 1) { term_newline(); }
         term_pending_wrap = 0;
@@ -155,7 +155,7 @@ fn term_print(cp): i64 {
     var nextc = col + w;
     if (nextc >= grid_get_cols()) {
         grid_cursor_set(row, grid_get_cols() - 1);   # stay at last col
-        term_pending_wrap = 1;                       # wrap deferred to next print
+        term_pending_wrap = 1;                       # wrap pending until next print
     } else {
         grid_cursor_set(row, nextc);
         term_pending_wrap = 0;
@@ -298,7 +298,7 @@ fn term_csi(final): i64 {
     if (final == 0x6c) { return term__ansi_mode(0); }                                            # RM
     if (final == 0x73) { term_saved_row = row; term_saved_col = col; return 0; }                 # SCP (save)
     if (final == 0x75) { grid_cursor_set(term_saved_row, term_saved_col); return 0; }            # RCP (restore)
-    # DA ('c') / DSR ('n') need a host writer — deferred to M2 (PTY).
+    # DA ('c') / DSR ('n') need a host writer — deferred to M7 conformance (roadmap).
     return 0;
 }
 
@@ -388,7 +388,7 @@ fn term__dec_mode(set): i64 {
         grid_alt_screen(set);
         if (set == 1) { grid_clear_all(); grid_cursor_set(0, 0); }
     }
-    # mouse (1000..1006): later bite
+    # mouse (1000..1006): deferred to M7 conformance (roadmap)
     return 0;
 }
 
@@ -418,7 +418,7 @@ fn term__alt_screen(set): i64 {
 
 # ---- ESC dispatch ------------------------------------------------------
 fn term_esc(final): i64 {
-    if (vt_inter_count() > 0) { return 0; }   # charset designators (ESC ( B etc.): M6 — no-op for now
+    if (vt_inter_count() > 0) { return 0; }   # charset designators (ESC ( B): deferred to M7 conformance (roadmap)
     if (final == 0x44) { term_index(); return 0; }            # IND (ESC D)
     if (final == 0x4d) { term_reverse_index(); return 0; }    # RI  (ESC M)
     if (final == 0x45) { term_newline(); return 0; }          # NEL (ESC E)

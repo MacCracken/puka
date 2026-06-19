@@ -5,7 +5,7 @@
 # no I/O, no rendering, and no hot-path allocation. Bytes go in via
 # vt_feed(); a single consumer-visible EVENT comes out (the return value),
 # with operands exposed through accessor functions. The terminal driver
-# (terminal.cyr, a later bite) switches on the event and mutates the grid;
+# (terminal.cyr) switches on the event and mutates the grid;
 # the parser never touches the grid itself. This keeps the untrusted-input
 # boundary in one auditable place.
 #

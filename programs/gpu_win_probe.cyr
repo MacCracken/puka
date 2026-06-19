@@ -60,7 +60,10 @@ fn main(): i64 {
     shm_fill(0x000000);                              # clear the ≤255px pad / ≤1px odd margin once
 
     # first GPU frame + present
-    if (gw__frame(win) != 0) { gw__emit("FAIL: first frame (GPU dispatch / present)\n"); pgpu_release(); win_close(win); return 4; }
+    if (gw__frame(win) != 0) {
+        gw__emit("FAIL: first frame (GPU dispatch / present)\n");
+        pgpu_release(); win_close(win); return 4;
+    }
 
     # verify the shm buffer actually got red XRGB pixels from the GPU
     var px0 = load32(win_present_begin(win));

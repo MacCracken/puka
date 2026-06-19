@@ -143,8 +143,16 @@ fn pgpu_release(): i64 {
     var fd = native_ctx_fd(pgpu_ctx);
     if (pgpu_pipe != 0) { gpu_render_pipeline_release(pgpu_ctx, pgpu_pipe); pgpu_pipe = 0; }
     if (pgpu_rt != 0) { gpu_render_target_release(pgpu_ctx, pgpu_rt); pgpu_rt = 0; }
-    if (pgpu_fs_h != 0) { native_gem_va_unmap(fd, pgpu_fs_h, pgpu_fs_va, PGPU_SHADER_BYTES); native_bo_release_gtt(fd, pgpu_fs_h, pgpu_fs_addr, PGPU_SHADER_BYTES); pgpu_fs_h = 0; }
-    if (pgpu_vs_h != 0) { native_gem_va_unmap(fd, pgpu_vs_h, pgpu_vs_va, PGPU_SHADER_BYTES); native_bo_release_gtt(fd, pgpu_vs_h, pgpu_vs_addr, PGPU_SHADER_BYTES); pgpu_vs_h = 0; }
+    if (pgpu_fs_h != 0) {
+        native_gem_va_unmap(fd, pgpu_fs_h, pgpu_fs_va, PGPU_SHADER_BYTES);
+        native_bo_release_gtt(fd, pgpu_fs_h, pgpu_fs_addr, PGPU_SHADER_BYTES);
+        pgpu_fs_h = 0;
+    }
+    if (pgpu_vs_h != 0) {
+        native_gem_va_unmap(fd, pgpu_vs_h, pgpu_vs_va, PGPU_SHADER_BYTES);
+        native_bo_release_gtt(fd, pgpu_vs_h, pgpu_vs_addr, PGPU_SHADER_BYTES);
+        pgpu_vs_h = 0;
+    }
     gpu_context_release(pgpu_ctx);
     pgpu_ctx = 0;
     return 0;

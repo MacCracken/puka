@@ -104,7 +104,10 @@ fn main(): i64 {
     # ---- 7. pass begin ----
     var clear = color_new(F64_1, F64_0, F64_0, F64_1);
     var pass = gpu_render_pass_begin(ctx, rt, clear);
-    if (pass == 0) { gp__emit("FAIL: pass_begin\n"); gpu_render_pipeline_release(ctx, pipe); gpu_render_target_release(ctx, rt); return 6; }
+    if (pass == 0) {
+        gp__emit("FAIL: pass_begin\n");
+        gpu_render_pipeline_release(ctx, pipe); gpu_render_target_release(ctx, rt); return 6;
+    }
     gp__emit("PASS: render pass begin\n");
 
     # ---- 8. draw (synchronous; blocks on the GFX-ring syncobj) ----
