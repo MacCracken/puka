@@ -1,6 +1,6 @@
 # puka — Architecture Overview
 
-> **Last Updated**: 2026-06-18
+> **Last Updated**: 2026-06-19 (0.6.2)
 >
 > System-level module map and data flow. For *why* a decision was made, see
 > [`../adr/`](../adr/). For non-obvious code invariants, see the numbered notes
@@ -44,13 +44,19 @@ share its vocabulary, but flow in opposite directions.
                                    └──────────────┘
                                           │  pure function of state
                                           ▼
-                                   ┌──────────────┐   glyphs ◄── kashi (bitmap)
-                                   │  render/*.cyr│              rekha+sadish (vector, later)
-                                   │ (FB / window)│   accel  ◄── mabda / ai-hwaccel (later)
+                                   ┌──────────────┐   glyphs ◄── kashi (bitmap atlas)
+                                   │ render/fb.cyr │              rekha+sadish (vector, later)
+                                   │ (grid → RGB)  │   GPU    ◄── mabda native-AMD (pgpu_*, paused)
+                                   └──────────────┘
+                                          │  XRGB8888 (pixfmt.cyr)
+                                          ▼
+                                   ┌──────────────┐
+                                   │  win_* seam  │  window.cyr  (→ aethersafha)
                                    └──────────────┘
                                           │
                                           ▼
-                          framebuffer (blit#39 on agnos) / KMS-DRM (Linux dev)
+              Wayland client → compositor  (Linux desktop / Hyprland — v1)
+              · blit#39 framebuffer        (AGNOS native — post-v1.0)
 ```
 
 Two invariants hold this together:
@@ -81,7 +87,9 @@ Two invariants hold this together:
 | `platform/window.cyr` | the cross-platform `win_*` window-backend seam (open/present/poll/next-key/close) → extracts to `aethersafha` | **M6 ✅** |
 | `platform/wayland/*` | sovereign Wayland client: wire codec, connect/registry/xdg-shell, `wl_seat`/`wl_keyboard`, `wl_shm` present | **M6 ✅** |
 | `render/pixfmt.cyr` · `input/keymap.cyr` | RGB→XRGB8888 + damage-aware blit · shared evdev-keycode→bytes bridge | **M6 ✅** |
-| `programs/puka_term.cyr` | desktop daily-driver: `poll(wayland, pty)` loop hosting a shell; mabda GPU later | **M6 ✅** |
+| `platform/gpu/gpu.cyr` | the `pgpu_*` GPU seam over mabda's native AMD backend (context/target/render/readback→`wl_shm`) | **M6 ✅ (plumbing); cell renderer paused** |
+| `render/atlas.cyr` | kashi glyphs → 128×256 RGBA8 coverage texture for GPU sampling | **M6 ✅ (bite 8a)** |
+| `programs/puka_term.cyr` | desktop daily-driver: `poll(wayland, pty)` loop hosting `$SHELL`; CPU `fb.cyr` render (GPU paused) | **M6 ✅** |
 | `render/fbdev.cyr` · `input/evdev.cyr` device · `puka_session.cyr` | Linux framebuffer/evdev *console* edges | M5 — **superseded** by Wayland (retire bite 10) |
 
 ## Platform split
@@ -93,7 +101,7 @@ Only the **edges** are platform-specific:
 - **PTY**: Linux pty pair vs. the AGNOS kernel pty syscall surface (post-v1.0).
 - **Window / surface** (the `win_*` seam, → `aethersafha`): a sovereign **Wayland** client (Linux desktop, the v1 target — a window *in* the compositor) vs. the AGNOS `blit`#39 framebuffer (native, no compositor, post-v1.0). X11 / macOS backends fill the same seam later. A headless text / PPM dump (`fb.cyr`) stays for engine tests.
 - **Input**: Wayland `wl_keyboard` (Linux desktop) vs. the AGNOS xHCI/HID path (native) — both feed the *same* `evdev__keymap` → `input_encode` bridge.
-- **GPU render**: `mabda`'s native AMD backend (sovereign — no FFI), present to the window via `wl_shm` then zero-copy `zwp_linux_dmabuf_v1`.
+- **GPU render**: `mabda`'s native AMD backend (sovereign — no FFI). The plumbing (GPU render → CPU readback → `wl_shm`) is shipped + verified; the GPU *cell* renderer is **paused pending mabda** (see [`../development/state.md`](../development/state.md) § Dep gaps), so cells render on CPU `fb.cyr` today. Zero-copy `zwp_linux_dmabuf_v1` is deferred (blocked on a mabda export accessor).
 
 A **macOS / X11 / Windows backend** is a future `win_*` implementation (macOS needs a
 Cyrius Darwin/Mach-O backend, cyrius-side; see [CLAUDE.md § Platform reality](../../CLAUDE.md)).
@@ -106,7 +114,7 @@ Per first-party standards, puka depends on AGNOS crates rather than rolling its 
 |---|---|---|
 | Bitmap console glyphs (CP437 / PSF) | `kashi` | **M3 ✅ (wired: freestanding `font_data.cyr` core)** |
 | Scalable / vector glyphs | `rekha` + `sadish` | post-v1.0 |
-| GPU rendering | `mabda` (native AMD backend; `wgpu` FFI forbidden) | **M6 bites 7–8** |
+| GPU rendering | `mabda` (native AMD backend; `wgpu` FFI forbidden) | **M6 — plumbing ✅ (bite 7); cell renderer paused pending mabda** |
 | Errors / structured logging | `sakshi` | as needed |
 | Trust / auth (command center) | `sigil` | v3 |
 

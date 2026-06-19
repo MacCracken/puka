@@ -142,31 +142,37 @@ Linux-guarded, skip-clean device layer (the M2/M3/M4 discipline).
 > evdev device layer, and `puka_session.cyr` are queued for retirement; `fb.cyr`
 > (the RGB renderer) and the evdev **keymap** are kept and reused unchanged.
 
-### M6 — Wayland desktop terminal (0.6.0 → ) — the corrected v1 path
+### M6 — Wayland desktop terminal (0.6.0 → 0.6.x) — the v1 path
 
-puka as a real **window in a Wayland compositor** (Hyprland) hosting a shell — the
-first windowed Cyrius program, speaking the Wayland wire protocol from scratch (no
-libwayland / toolkit / FFI), GPU-rendered via **`mabda`**. The engine is untouched;
-this is a new swappable window backend (`win_*`, extractable to `aethersafha`) + a
-`poll()` event loop around the M1–M4 core. Built bite-by-bite, each verifiable live
-on Hyprland:
+puka as a real **window in a Wayland compositor** (Hyprland) hosting the user's
+`$SHELL` — the first windowed Cyrius program, speaking the Wayland wire protocol from
+scratch (no libwayland / toolkit / FFI). The engine (M1–M4) is untouched; this is a
+swappable `win_*` window backend (extractable to `aethersafha`) + a `poll()` loop
+around the core. Built bite-by-bite, each verified live on Hyprland.
 
-- **Bite 1** ✅ — speak the Wayland wire protocol: connect + `wl_registry` roundtrip (68 globals enumerated on Hyprland), SCM_RIGHTS fd-passing.
-- **Bite 2** ✅ — a titled, mapped window: bind `wl_compositor`/`wl_shm`/`xdg_wm_base`, the xdg-shell configure/ack lifecycle, a memfd-backed `wl_shm` buffer.
-- **Bite 3** ✅ — the grid rendered into the window (`fb.cyr` → XRGB8888 → `wl_shm`; kashi glyphs, SGR colour, cursor).
-- **Bites 4–5** ✅ (**0.6.0**) — the interactive MVP: the `poll()` loop over the Wayland fd + the PTY master hosting the user's `$SHELL` (login shell, full env inheritance); `wl_keyboard` → `input_encode` → child (raw evdev keycodes, no +8); damage-aware repaint (only changed rows).
-- **Bite 6** ✅ — window **resize**: `xdg_toplevel.configure` → `WIN_EV_RESIZE` → `win_resize_apply` (refit `wl_shm`) → `term_resize` + `fb_resize` + `pty_set_winsize` + full repaint. Grid ceilings raised `GRID_MAX_COLS` 132→**480** / `GRID_MAX_ROWS` 64→**144** (4K; damage bitset now a 3-word array); buffers grow-only (allocator has no `free`).
-- **Bite 7 (foundation, in progress)** — **GPU plumbing** behind the `win_*` seam: wire `mabda` (native AMD GFX9 backend) into puka's build, create a GPU context through `win_open`, allocate an offscreen GTT render target, and prove **GPU render → CPU readback → `wl_shm` present**. Shader-architecture-agnostic; cells stay on the CPU `fb.cyr` path until the renderer lands. `wl_shm` stays the permanent non-AMD / software fallback.
-- **Bite 8 (renderer)** — **GPU cell rendering via a single full-screen pass**, NOT instanced quads. *Recon finding (2026-06-19): mabda has no instanced-vertex path and none is on its roadmap (3.2.x closes at 3.2.13; 3.3 is asset-loading) — but texture sampling shipped 3.2.2–3.2.3 and the SPIR-V→GFX9 compiler is feature-complete (3.2.11), all HW-verified on this Cezanne box.* So the viable architecture is a **compute shader (or fullscreen-triangle + custom FS)** that reads the grid as a **storage buffer** + the kashi **glyph atlas** as a texture and writes each pixel → render target → readback → `wl_shm`. The standard "grid-is-a-buffer, one pass samples it" GPU-terminal technique; every piece it needs exists in mabda 3.2.11 today.
-- **Bite 9 (deferred) — zero-copy `zwp_linux_dmabuf_v1`**: blocked on mabda's PRIME/dmabuf-export accessor (Phase D, surface API — unscheduled as of 2026-06-19). Until then the GPU path memcpy's into `wl_shm` (no mabda change needed).
-- **Bite 10** — retire the 0.5.0 framebuffer edges; lift the keymap table into `src/input/keymap.cyr`.
+**Shipped:**
+
+- ✅ **Wire + window + first render** (0.6.0) — the Wayland wire protocol from scratch (connect, `wl_registry`, SCM_RIGHTS fd-passing), a titled xdg-shell window (configure/ack lifecycle, memfd `wl_shm` buffer), and the grid rendered into it (`fb.cyr` → XRGB8888 → `wl_shm`).
+- ✅ **Interactive MVP** (0.6.0) — the `poll()` loop over the Wayland fd + the PTY master hosting `$SHELL`; `wl_keyboard` → `input_encode` → child (raw evdev keycodes, no +8); damage-aware repaint (only changed rows).
+- ✅ **Resize + shell config** (0.6.1) — reflow on `xdg_toplevel.configure` (`win_resize_apply` + `term_resize` + `fb_resize` + `pty_set_winsize`); grid ceilings raised to `GRID_MAX_COLS`=**480** / `GRID_MAX_ROWS`=**144** (4K; 3-word damage bitset; buffers grow-only); `$SHELL` hosted as a **login shell** with full env inheritance (`.zprofile`/`.zshrc`/starship source).
+- ✅ **GPU plumbing foundation** (0.6.2) — the `pgpu_*` seam over `mabda`'s native AMD GFX9 backend: **GPU render → CPU readback → `wl_shm` → Hyprland**, verified live. `mabda` wired as a git dep (3.2.11). Shader-agnostic foundation; **cells still render on CPU `fb.cyr`**.
+- ✅ **Glyph atlas** (0.6.2) — `atlas.cyr` packs kashi's 256 CP437 glyphs (8×16) into a 128×256 RGBA8 coverage texture for GPU sampling (the data the cell renderer will sample).
+- ✅ **Alternate screen** (0.6.2, DEC 1049/1047/47) — M7 conformance pulled forward (`vim`/`less`/`htop`/`tmux` work): a lazily heap-backed buffer swap.
+
+**Remaining (toward a daily-drivable v1):**
+
+- **Scrollback ring** *(next)* — primary-screen history + a scroll-back viewport; heap ring (like the alt buffer), disabled on the alt screen.
+- **GPU cell renderer** — **PAUSED pending mabda.** Plumbing + atlas are done; blocked on (1) the native RT `va_map` **64 KiB-align fix** *(filed in `mabda/docs/development/issues/2026-06-19-native-rt-vamap-64kib-align-einval.md`)* so puka's padding workaround drops, and (2) ideally a higher-level shading API — mabda has **no instanced-vertex path** (none roadmapped; 3.2.x closes at 3.2.13) and shaders are **hand-assembled SPIR-V**, so the full-screen grid+atlas pass is a large hand-authored effort otherwise. Architecture: a **single full-screen pass** (compute or fullscreen-FS) reading the grid as a **storage buffer** + the atlas as a **texture** → render target → readback → `wl_shm`. CPU `fb.cyr` stays the permanent fallback. Wire into `puka_term` behind a runtime opt-in.
+- **Zero-copy `zwp_linux_dmabuf_v1`** *(deferred)* — blocked on mabda's PRIME/dmabuf-export accessor (Phase D, unscheduled). Until then the GPU path memcpy's into `wl_shm` (no mabda change needed).
+- **Retire the framebuffer/console edges** — delete the superseded `fbdev.cyr`, the `evdev` *device* layer, and `puka_session.cyr`. (`fb.cyr` and the evdev **keymap** — already lifted to `src/input/keymap.cyr` in 0.6.0 — stay and are reused.)
 - **Cross-plat:** the `win_*` seam takes X11 / macOS / AGNOS backends later; the Wayland code extracts to **`aethersafha`** when that crate becomes a real second consumer.
-- **Acceptance**: a daily-drivable kitty replacement — open puka on Hyprland, run a shell + `vim`, resize cleanly, correct colour/glyph/cursor, GPU-rendered.
+
+**Acceptance**: a daily-drivable kitty replacement — open puka on Hyprland, run a shell + `vim`, resize cleanly, correct colour/glyph/cursor. (GPU-rendered cells are gated on mabda; CPU rendering is daily-drivable today.)
 
 ### M7 — Conformance + polish (0.7.0 → 0.9.0)
 
-- Full vttest / `ctlseqs` conformance pass; scrollback ring; **alternate screen**; origin mode; charset switching (DEC special graphics); mouse tracking (SGR); bracketed-paste edge cases; grapheme clustering; selection/clipboard (`wl_data_device`).
-- Fuzz both the VT parser AND the new **Wayland wire parser** (a second untrusted-input boundary — compositor messages) against malformed input.
+- Full vttest / `ctlseqs` conformance: scrollback ring, origin mode, charset switching (DEC special graphics / `ESC ( B`), mouse tracking (SGR), DA/DSR query responses, bracketed-paste edge cases, grapheme clustering, selection/clipboard (`wl_data_device`). *(The alternate screen — DEC 1049 — already shipped in 0.6.2.)*
+- Fuzz both the VT parser AND the **Wayland wire parser** (a second untrusted-input boundary — compositor messages) against malformed input.
 
 ### M8 — Hardening + v1.0
 

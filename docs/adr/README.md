@@ -21,3 +21,4 @@ Decisions about puka — what we chose, the context, and the consequences we acc
 
 - [0001 — Sovereign reimplementation; no libghostty, no external engine](0001-sovereign-reimplementation-no-external-engine.md) — reimplement the terminal in Cyrius from the VT specs; references are prior art, never embedded code.
 - [0002 — Build the terminal app first; extract the VT engine to a library later](0002-build-app-first-extract-engine-later.md) — app-first, engine extracted to a Sanskrit-named lib when the phase-2 command center becomes the second consumer.
+- [0003 — A Wayland desktop window, not a framebuffer console, is the v1 surface](0003-wayland-desktop-over-framebuffer-console.md) — 0.6.0 pivot: v1 is a sovereign Wayland client (a window in Hyprland hosting `$SHELL`); the 0.5.0 `/dev/fb0` console (`fbdev`/`evdev`/`puka_session`) is superseded; AGNOS-native framebuffer is a post-v1.0 `win_*` backend.
