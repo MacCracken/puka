@@ -29,7 +29,7 @@ M(n) → 0.n.0.
 - `src/grid.cyr` — cell grid (the screen, single source of truth): cells, cursor, scroll region, tabs, scroll/erase/insert/delete primitives.
 - `src/unicode.cyr` — UTF-8 decode/encode + `char_width` (wcwidth, UAX#11).
 - `src/terminal.cyr` — the driver: parser events → grid mutations (cursor/erase/SGR/scroll/modes/resize) + headless text renderer. Exposes `term_cursor_visible()` (DECTCEM, dirties the cursor row on toggle), `term_app_cursor_get()` (DECCKM) and `term_bracket_paste_get()` (mode 2004) for the renderer/encoder.
-- `src/pty.cyr` — PTY + process plumbing (Linux): open/spawn/pump/write/winsize/wait/close. Linux-guarded; agnos backend is M5.
+- `src/pty.cyr` — PTY + process plumbing (Linux): open/spawn/pump/write/winsize/wait/close. Linux-guarded; the agnos backend is post-v1.0.
 - `src/render/fb.cyr` — framebuffer renderer (M3): grid → RGB pixel buffer. Pure read of the grid; colour resolution (default/16/256/truecolor + bold/dim/reverse/hidden), background paint, kashi glyph blit (VGA 8×16), cursor block, per-row damage consumption, PPM (P6) dump. Integer-only, every pixel write bounds-clamped.
 - `src/input.cyr` — keyboard→escape-sequence encoder (M4): `input_encode(sym, mods, out)` (disjoint keysym range; xterm modifier formula via `input__xtmod`) + `input_paste(text, len, cap, out)` (bracketed-paste 2004 wrap + ESC/0x9B strip + cap bound). Pure; reads terminal modes via getters.
 - `src/main.cyr` — demo entry: drives a canned stream through the full pipe, prints the rendered grid.
@@ -63,29 +63,31 @@ Planned (own-the-stack, not yet wired): `rekha`+`sadish` (vector glyphs, post-v1
 
 ## Dep gaps / blockers
 
-- **AGNOS PTY syscall surface** — kernel-side gap; needed for M5 native bring-up (analogous to the `net.cyr` / `vani` agnos-backend gaps).
+- **AGNOS framebuffer-console environment** — AGNOS can't yet host puka (no console/display environment), so **AGNOS-native bring-up is post-v1.0**; v1.0 is Linux-complete. The kernel-side **AGNOS PTY syscall surface** (analogous to the `net.cyr` / `vani` agnos-backend gaps) is part of that post-v1.0 work, not a v1.0 blocker.
 - **macOS** — needs a Cyrius Darwin backend; out of scope for this repo.
 
 ## Consumers
 
 _None yet._ Phase-2 command center (post-v1.0) will be the first.
 
-## Next
+**M5 (→ 0.5.0) — Linux live terminal: the first *usable* puka.** The
+platform-agnostic core is complete through M4 (parse → grid → render → encode), all
+headless-testable. M5 wires the two **live Linux edges** over it so puka runs as a
+real interactive terminal on a Linux framebuffer/VT:
+1. **Display** (`render/fbdev.cyr`) — blit `fb_buf()` (24-bit RGB) into the Linux
+   framebuffer (`/dev/fb0` mmap; var/fix screeninfo; 32/24/16-bpp + stride
+   conversion; damage-aware). Pure blit logic headless-testable vs an in-memory
+   fake fb; the device open/mmap is Linux-guarded + skip-clean.
+2. **Key source** (`input/evdev.cyr`) — decode Linux evdev `input_event` records +
+   a scancode→keysym keymap (tracking modifiers) → `input_encode` → `pty_write`.
+   Decode logic headless-testable; the device read is Linux-guarded + skip-clean.
+3. **Interactive loop** — poll evdev + PTY master, encode → child, pump → grid,
+   render dirty rows → framebuffer; spawn `$SHELL`.
 
-**M5 (→ 0.5.0) — the live edges (display + key source) + AGNOS-native bring-up.**
-The platform-agnostic core is complete through M4 (parse → grid → render → encode),
-all headless-testable. M5 wires the two live edges over it:
-1. **Display** — push the renderer's pixel buffer to a real surface: Linux fbdev
-   (`/dev/fb0` mmap, the closest analogue to AGNOS `blit`) and/or KMS/DRM for the dev
-   host; the AGNOS `blit`#39 framebuffer for native. A thin blit over `fb_buf()` /
-   `fb_width()` / `fb_height()` — not a rewrite.
-2. **Key source** — feed `input_encode(sym, mods, …)` from a real raw-key device:
-   Linux evdev (`/dev/input`) on the dev host, the AGNOS xHCI/HID path for native.
-3. The **interactive loop** (`pty_pump` ⇄ render ⇄ key-read) + the **AGNOS PTY
-   syscall surface**, booting a shell on the AGNOS framebuffer — the proof-app.
-
-Either Linux edge can be pulled forward for an on-screen Linux session before the
-AGNOS work. See [`roadmap.md`](roadmap.md).
+**AGNOS-native bring-up moved to post-v1.0** (AGNOS lacks a console environment to
+host puka). v1.0 is a Linux-complete terminal; the AGNOS edges (`blit`#39 + xHCI/HID
++ kernel PTY) drop in behind the same seams when AGNOS is ready. See
+[`roadmap.md`](roadmap.md).
 
 The grid backing store stays fixed-max (resize is a dim-change), so heap-
 allocating it remains a deferred optimization, not a blocker.

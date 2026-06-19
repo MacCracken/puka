@@ -13,14 +13,22 @@ Sanskrit-named substrate library — the `yo`→`taar` / `iam`→`mihi` pattern.
 pre-extract.
 
 The pipeline is built from the **inside out**: the platform-agnostic core
-(parser → grid) first, fully headless-testable on Linux, then the I/O edges
-(PTY, render, input), then the AGNOS-native bring-up.
+(parser → grid → terminal) first, fully headless-testable on Linux (M1), then the
+I/O edges — PTY (M2), render (M3), input (M4) — then the **live Linux edges**
+(framebuffer display + evdev keyboard) that make puka a real interactive terminal
+on the dev host (M5).
+
+**AGNOS-native bring-up is post-v1.0.** AGNOS does not yet have the
+framebuffer-console environment to host puka, so v1.0 targets a **Linux-complete**
+terminal; the AGNOS console (`blit`#39 display + xHCI/HID input + the kernel PTY
+surface) follows once the platform is ready. The sovereign-Cyrius, zero-external-code
+identity is unchanged — only the platform sequencing.
 
 ## v1.0 criteria
 
 - [ ] **Conformance** — passes a curated vttest / `ctlseqs` corpus (cursor, ED/EL, SGR, scroll regions, modes, charsets, alt-screen)
 - [ ] **Public engine API frozen** — parser + grid + terminal-state surface documented and tested (this is what the command center will consume; freezing it triggers the engine-lib extraction per ADR-0002)
-- [ ] Runs as a real interactive console on the **AGNOS framebuffer** (boots a shell, accepts keyboard, renders correctly)
+- [ ] Runs as a real interactive console on the **Linux dev host** — framebuffer (fbdev/KMS) display + evdev keyboard: boots a shell, accepts keystrokes, renders correctly. (The AGNOS-native console is the headline **post-v1.0** goal, gated on AGNOS's framebuffer-console environment.)
 - [ ] Test coverage adequate for the surface (parser fuzzed against malformed input; ≥ the 100-assertion floor)
 - [ ] Benchmarks captured in `docs/benchmarks.md` (parser throughput, render frame cost)
 - [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`) — parser is the untrusted-input boundary
@@ -56,7 +64,7 @@ non-blocking `pty_pump` into `term_feed`, `pty_write`/`pty_set_winsize`/
 `pty_wait`/`pty_close`. Resize: `grid_resize` + `term_resize` (no reflow).
 `tests/pty.tcyr` spawns a real `/bin/echo` and asserts grid output (skip-clean);
 `programs/pty_demo.cyr` runs `/bin/ls /` inside a sized PTY and re-renders it
-(winsize propagation visible). Linux-guarded; agnos PTY is M5.
+(winsize propagation visible). Linux-guarded; the agnos PTY surface is post-v1.0.
 
 > **Version map:** M*n* → 0.*n*.0. The grid heap-alloc refactor that M1's notes
 > anticipated turned out unnecessary for resize (fixed-max backing) — it's a
@@ -75,10 +83,9 @@ serializes to a PPM (P6) image — the headless, pixel-assertable verification s
 Multi-agent adversarial review closed (2 findings fixed + regression-tested).
 
 > **Scope note:** 0.3.0 ships the platform-agnostic renderer. The **live on-screen
-> display backend** — pushing the pixel buffer to a real surface (Linux KMS/DRM or
-> fbdev for dev, AGNOS `blit`#39 for native) — is folded into **M5**, since AGNOS is
-> the real display target and the buffer→screen edge is a thin blit over the
-> renderer's `fb_buf()` / `fb_width()` / `fb_height()`, not a rewrite.
+> display backend** — a thin blit of the pixel buffer (`fb_buf()` / `fb_width()` /
+> `fb_height()`) to a real surface — lands on **Linux (fbdev/KMS) in M5**; the AGNOS
+> `blit`#39 native path is **post-v1.0**. Not a rewrite either way.
 
 - **Glyphs** via **`kashi`** — ✅ wired (built-in CP437 fonts; 16/256/truecolor cell colours resolved). Wide CJK cells paint background only until a wider font lands.
 - **Damage tracking** (per-row dirty bits) — ✅.
@@ -99,21 +106,26 @@ untrusted body, and bounds-checks every write. terminal.cyr gained the DECCKM +
 PTY echo) + `programs/input_demo.cyr`. Adversarial review closed.
 
 > **Scope note:** 0.4.0 ships the platform-agnostic encoder + a proven PTY
-> round-trip (encoded keys → child → echo → grid). The **live raw-key SOURCE**
-> (Linux evdev / AGNOS xHCI-HID) and the interactive read-loop are folded into
-> **M5** alongside the display — the encoder is `(sym, mods) → bytes`; the device
-> that *produces* `(sym, mods)` is the platform edge.
+> round-trip (encoded keys → child → echo → grid). The **live raw-key SOURCE** +
+> interactive read-loop land on **Linux (evdev) in M5**; the AGNOS xHCI/HID source
+> is **post-v1.0**. The encoder is `(sym, mods) → bytes`; the device that
+> *produces* `(sym, mods)` is the platform edge.
 
 - Mouse tracking (SGR) deferred to M6.
 - **Acceptance** (encoder): every key/modifier sequence is byte-exact and parses back through puka's parser; encoded keys drive a real child end-to-end — ✅. The live "type at a keyboard" session lands with the M5 key source.
 
-### M5 — AGNOS-native bring-up + on-screen display (0.5.0) — the proof-app
+### M5 — Linux live terminal (0.5.0) — the first *usable* puka
 
-- **AGNOS PTY surface** — the kernel-side pty syscalls puka needs (a Cyrius-native gap, analogous to the `net.cyr` / `vani` agnos-backend gaps; grown per the kernel-growth rules, not POSIX `forkpty` emulation).
-- **Display backend** (from M3) — push the renderer's pixel buffer to a real surface: the AGNOS `blit`#39 framebuffer (native, the proof path) + a Linux fbdev/KMS adjunct for the dev host. A thin blit over `fb_buf()` / `fb_width()` / `fb_height()`; the renderer itself is done (M3). Pull forward if an on-screen Linux session is wanted before AGNOS bring-up.
-- **Key source** (from M4) — feed `input_encode(sym, mods, …)` from a real raw-key device: Linux evdev (`/dev/input`) for the dev host, the AGNOS xHCI/HID path for native. The encoder is done (M4); this is the device-read edge + the interactive loop (`pty_pump` ⇄ render ⇄ key-read).
-- Run puka on the AGNOS framebuffer as a real console, launching agnoshi.
-- **Acceptance**: puka boots a shell on AGNOS iron/QEMU and is interactive — the DOOM/tracker-class proof milestone for the terminal.
+The live edges over the M1–M4 core: puka runs as a **real interactive terminal on
+a Linux framebuffer/VT**, with no host terminal underneath. The pre-AGNOS proof
+that the whole stack works end to end — and the first build of puka you can
+actually *use*. Each edge keeps a headless-testable core and a Linux-guarded,
+skip-clean device layer (the M2/M3/M4 discipline).
+
+- **Display backend** (`render/fbdev.cyr`) — blit the renderer's RGB pixel buffer to the Linux framebuffer: open `/dev/fb0`, read var/fix screeninfo (resolution, bpp, line length), `mmap` it, and convert+blit `fb_buf()` (24-bit RGB) into the device format (32/24/16 bpp, stride-aware). The pure blit/format-conversion logic is headless-testable against an in-memory fake framebuffer; the device open/mmap is Linux-guarded + skip-clean. Damage-aware (blit only dirty rows). KMS/DRM is an optional alternative path.
+- **Key source** (`input/evdev.cyr`) — read raw key events from Linux evdev (`/dev/input/eventN`): decode `input_event` records + a scancode→keysym keymap while tracking modifier-key state, then `input_encode(sym, mods, …)` → `pty_write`. The decode logic is headless-testable (feed synthetic `input_event` bytes → assert keysym/mods); the device read is Linux-guarded + skip-clean.
+- **Interactive loop** — the single-threaded event loop: poll the evdev fd + the PTY master, encode keys → child, `pty_pump` child output → grid, render dirty rows → framebuffer. Spawn `$SHELL`; handle resize.
+- **Acceptance**: launch puka on a Linux VT/framebuffer, get a shell prompt, type and run commands, see correct colour/glyph/cursor output — a real interactive session, the DOOM/tracker-class proof on Linux.
 
 ### M6 — Conformance + polish (0.6.0 → 0.9.0)
 
@@ -126,6 +138,19 @@ PTY echo) + `programs/input_demo.cyr`. Adversarial review closed.
 - P(-1) security sweep (parser is the untrusted-input boundary); freeze the engine API; capture benchmarks; complete docs.
 - **Engine extraction** (ADR-0002): when the command center arrives as the second consumer, carve parser+grid+terminal into a Sanskrit-named lib; puka becomes a thin consumer of it.
 
+## Post-v1.0 — AGNOS-native bring-up (the proof-app, when AGNOS is ready)
+
+Deferred past v1.0 because **AGNOS does not yet have the framebuffer-console
+environment to host puka**. When it does, the live edges (M5) gain an AGNOS backend
+alongside their Linux one — the platform-agnostic core (M1–M4) and the v1.0 Linux
+terminal are unchanged; this is purely new platform-edge code behind the same seams
+(`fb_buf()` for display, `input_encode` for input, `pty_*` for the child).
+
+- **AGNOS PTY surface** — the kernel-side pty syscalls puka needs (a Cyrius-native gap, analogous to the `net.cyr` / `vani` agnos-backend gaps; grown per the kernel-growth rules, not POSIX `forkpty` emulation).
+- **AGNOS display** — blit the pixel buffer via `blit`#39 (the framebuffer proof path, no compositor needed) — the AGNOS-native sibling of the M5 Linux fbdev backend.
+- **AGNOS key source** — keystrokes from the xHCI/HID input path into `input_encode` — the AGNOS-native sibling of the M5 evdev source.
+- **Acceptance**: puka boots a shell on AGNOS iron/QEMU and is interactive — the DOOM/tracker-class proof milestone, launching agnoshi.
+
 ## Phase 2 — command center (post-v1.0, separate repo)
 
 The supacode-equivalent: a multi-pane **worktree coding-agent command center**,
@@ -135,6 +160,7 @@ the extracted engine. Name/scaffold TBD when puka v1.0 lands.
 
 ## Out of scope (for v1.0)
 
+- **AGNOS-native console** — post-v1.0 (see the section above): AGNOS lacks the framebuffer-console environment to host puka today, so v1.0 is Linux-complete and the AGNOS console follows when the platform is ready.
 - **macOS / Windows backends** — Cyrius emits Linux + agnos only; macOS needs a Cyrius Darwin backend (cyrius-side, not this repo).
 - **The command center itself** — phase 2, separate repo, post-v1.0.
 - **Sixel / Kitty / iTerm2 image protocols** — post-v1.0 (the `kii` image-to-ANSI path is adjacent but separate).

@@ -75,7 +75,7 @@ Two invariants hold this together:
 | `unicode.cyr` | UTF-8 decode, east-asian width (wcwidth), grapheme clustering | M1 / M6 |
 | `grid.cyr` | `Cell` / `Row` / `Screen`, cursor, scroll region, tab stops, scrollback ring | M1 |
 | `terminal.cyr` | VT semantics — applies parser actions to the grid (CUP/ED/EL/SGR/DECSTBM/modes/charsets) | M1 |
-| `pty.cyr` | PTY pair allocation, child spawn (explicit argv), read/write loop. Platform-split | M2 (Linux) / M5 (agnos) |
+| `pty.cyr` | PTY pair allocation, child spawn (explicit argv), read/write loop. Platform-split | M2 (Linux) / post-v1.0 (agnos) |
 | `render/fb.cyr` | grid → RGB pixel buffer: colour resolution, glyph blit (kashi), cursor, per-row damage, PPM dump | **M3 ✅ (renderer core)** |
 | `input.cyr` | keyboard → escape-sequence encoding (keysym+mods → bytes; xterm `ctlseqs`; bracketed paste); pure, headless | **M4 ✅** |
 | `main.cyr` | wiring: spawn PTY, pump bytes through parser → terminal → grid → render | M2+ |
@@ -86,7 +86,7 @@ Cyrius targets **Linux + agnos** (+ rv64 / bare-metal), not macOS. The core
 (`parser` / `unicode` / `grid` / `terminal`) is platform-agnostic and headless.
 Only the **edges** are platform-specific:
 
-- **PTY**: Linux pty pair (dev) vs. the AGNOS kernel pty syscall surface (a gap to grow, M5).
+- **PTY**: Linux pty pair (dev) vs. the AGNOS kernel pty syscall surface (a gap to grow, post-v1.0).
 - **Render**: Linux KMS/DRM or a headless text dump (dev) vs. AGNOS `blit`#39 framebuffer (native, the proof-app path — no compositor needed).
 - **Input**: Linux evdev/stdin (dev) vs. the AGNOS xHCI/HID path (native).
 
