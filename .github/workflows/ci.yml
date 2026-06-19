@@ -33,12 +33,14 @@ jobs:
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
       - name: Resolve dependencies
+        # Resolves stdlib + the kashi git dep (pinned tag in cyrius.cyml) —
+        # cyrius clones it, so no sibling checkout is needed in CI.
         run: cyrius deps
 
       - name: Lint (hard gate — any warning fails)
         run: |
           fail=0
-          for f in src/*.cyr; do
+          for f in $(find src -name '*.cyr' | sort); do
             out=$(cyrius lint "$f" 2>&1 || true)
             echo "$out"
             if echo "$out" | grep -qE '^[[:space:]]*warn '; then

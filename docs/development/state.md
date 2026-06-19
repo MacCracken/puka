@@ -53,7 +53,7 @@ marked at every write chokepoint and consumed by the renderer
 Direct (declared in `cyrius.cyml`):
 
 - stdlib — string, fmt, alloc, io, vec, str, syscalls, assert, bench
-- **kashi** — path dep (`../kashi`), **freestanding** `src/font_data.cyr` core only (zero stdlib), exactly as the agnos kernel consumes it. Bitmap console glyphs: built-in CP437 VGA 8×16 / CGA 8×8 / VGA 9×16. v1.0.1, API frozen.
+- **kashi** — pinned **git dep** (`git`/`tag = "1.0.1"`), **freestanding** `src/font_data.cyr` core only (zero stdlib) — the same core the agnos kernel consumes. Resolves identically on a devbox and in CI (no sibling checkout). Bitmap console glyphs: built-in CP437 VGA 8×16 / CGA 8×8 / VGA 9×16. v1.0.1, API frozen.
 
 Planned (own-the-stack, not yet wired): `rekha`+`sadish` (vector glyphs, post-v1.0), `mabda`/`ai-hwaccel` (GPU, M6), `sakshi` (logging). kashi's PSF/BDF/PCF loader library face is available but not pulled in (built-in fonts suffice).
 
