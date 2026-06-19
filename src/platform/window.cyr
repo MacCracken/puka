@@ -1,0 +1,104 @@
+# window.cyr — the cross-platform window-backend seam (puka-generic `win_*`).
+#
+# The engine (parser/grid/terminal/fb/input) NEVER references this file or any
+# src/platform/* — the renderer hands over a pixel buffer; the backend hands back
+# input/resize/close events. The names are platform-neutral (`win_*`, never
+# `wl_*`) so this contract extracts to the future `aethersafha` crate as a MOVE,
+# not a rewrite (ADR-0002). X11 / macOS / AGNOS backends later fill the identical
+# contract; a single backend today forwards straight to the Wayland implementation
+# (a fn-pointer slot table replaces the forwarding when a 2nd backend exists).
+# mabda's GPU ctx is passed THROUGH win_open, never baked into the seam.
+#
+# Co-compiled after the Wayland backend files (wire/client/shm); includes nothing.
+
+enum WinAbi {
+    WIN_EV_NONE   = 0;
+    WIN_EV_RESIZE = 1;
+    WIN_EV_KEY    = 2;
+    WIN_EV_CLOSE  = 4;
+    WIN_EV_FRAME  = 8;
+    WIN_CAP_SHM   = 0;     # win_present_begin returns a CPU pixel buffer
+    WIN_CAP_GPU   = 1;     # win_present_begin returns 0; caller records GPU draws
+}
+
+var win_w = 0;
+var win_h = 0;
+
+fn win_backend_select(): i64 { return 0; }   # one backend today (Wayland)
+
+# Connect, bind globals, create the xdg-shell window, wait the first configure,
+# allocate the present buffer. Returns an opaque handle (1) or 0 on failure.
+fn win_open(title, tlen, cols, rows, cell_w, cell_h, gpu_ctx): i64 {
+    if (wl_connect() < 0) { return 0; }
+    wl_get_registry();
+    wl_sync();
+    if (wl_dispatch() < 0) { return 0; }              # enumerate + record globals
+    if (wl_gn_comp == 0) { return 0; }
+    if (wl_gn_shm == 0)  { return 0; }
+    if (wl_gn_xdg == 0)  { return 0; }
+    wl_comp_oid = wl_bind(wl_gn_comp, "wl_compositor", 4);
+    wl_shm_oid  = wl_bind(wl_gn_shm, "wl_shm", 1);
+    wl_xdg_oid  = wl_bind(wl_gn_xdg, "xdg_wm_base", 1);
+
+    wl_surf_oid = wl_alloc_id();
+    wl__req1(wl_comp_oid, OP_COMPOSITOR_CREATE_SURFACE, wl_surf_oid);
+    wl_xsurf_oid = wl_alloc_id();
+    store32(&wl_sbuf + 8, wl_xsurf_oid);
+    store32(&wl_sbuf + 12, wl_surf_oid);
+    wire_hdr_put(&wl_sbuf, wl_xdg_oid, OP_XDG_GET_SURFACE, 16);
+    wl__send(16);
+    wl_top_oid = wl_alloc_id();
+    wl__req1(wl_xsurf_oid, OP_XDGSURF_GET_TOPLEVEL, wl_top_oid);
+    wl__set_string(wl_top_oid, OP_TOPLEVEL_SET_TITLE, title);
+    wl__set_string(wl_top_oid, OP_TOPLEVEL_SET_APPID, "puka");
+    wl__req0(wl_surf_oid, OP_SURFACE_COMMIT);          # map (no buffer) -> ask configure
+
+    while (wl_configured == 0) {
+        if (wl_pump() < 0) { return 0; }
+        if (wl_closed == 1) { return 0; }
+    }
+    win_w = wl_cfg_w; win_h = wl_cfg_h;
+    if (win_w <= 0) { win_w = cols * cell_w; }
+    if (win_h <= 0) { win_h = rows * cell_h; }
+    if (shm_create(win_w, win_h) == 0) { return 0; }
+    return 1;
+}
+
+fn win_caps(win): i64 { return WIN_CAP_SHM; }
+fn win_fd(win): i64 { return wl_fd; }
+fn win_size_px(win, out16): i64 { store64(out16, win_w); store64(out16 + 8, win_h); return 0; }
+
+# CPU path: the writable XRGB8888 buffer the renderer blits into.
+fn win_present_begin(win): i64 { return shm_ptr; }
+
+# attach + damage + frame (throttle) + commit. x,y,w,h = damage rect (buffer px).
+fn win_present_commit(win, x, y, w, h): i64 {
+    store32(&wl_sbuf + 8, wl_buf_oid);
+    store32(&wl_sbuf + 12, 0);
+    store32(&wl_sbuf + 16, 0);
+    wire_hdr_put(&wl_sbuf, wl_surf_oid, OP_SURFACE_ATTACH, 20);
+    wl__send(20);
+    store32(&wl_sbuf + 8, x);
+    store32(&wl_sbuf + 12, y);
+    store32(&wl_sbuf + 16, w);
+    store32(&wl_sbuf + 20, h);
+    wire_hdr_put(&wl_sbuf, wl_surf_oid, OP_SURFACE_DAMAGE_BUFFER, 24);
+    wl__send(24);
+    wl_frame_oid = wl_alloc_id();
+    wl_frame_done = 0;
+    wl__req1(wl_surf_oid, OP_SURFACE_FRAME, wl_frame_oid);
+    wl__req0(wl_surf_oid, OP_SURFACE_COMMIT);
+    wl_buf_busy = 1;
+    return 0;
+}
+
+# Read + dispatch pending wayland events; return an OR-mask of WIN_EV_*.
+fn win_poll_events(win): i64 {
+    if (wl_pump() < 0) { return WIN_EV_CLOSE; }
+    var m = WIN_EV_NONE;
+    if (wl_closed == 1) { m = m | WIN_EV_CLOSE; }
+    if (wl_frame_done == 1) { m = m | WIN_EV_FRAME; }
+    return m;
+}
+
+fn win_close(win): i64 { wl_close(); return 0; }

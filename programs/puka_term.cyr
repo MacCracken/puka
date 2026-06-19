@@ -1,0 +1,48 @@
+# puka_term.cyr — the desktop daily-driver: puka as a Wayland window on Hyprland.
+#
+# Replaces the retired framebuffer puka_session. Bite 2 cut: opens a real titled
+# window via the win_* seam, paints a solid fill, and stays alive (ping→pong,
+# configure→ack handled in the backend) until the window is closed. Bites 3-6
+# add the grid renderer, the PTY shell, keyboard input, and resize; bites 7-8
+# swap the CPU fill for mabda GPU rendering.
+#
+# Build:  cyrius build programs/puka_term.cyr build/puka_term
+# Run  :  WAYLAND_DISPLAY=wayland-1 ./build/puka_term   (inside a Wayland session)
+
+include "src/platform/wayland/wire.cyr"
+include "src/platform/wayland/client.cyr"
+include "src/platform/wayland/shm.cyr"
+include "src/platform/window.cyr"
+
+fn main(): i64 {
+    alloc_init();
+    wl__emit_str("puka_term — opening a window on the compositor...\n");
+    win_backend_select();
+    var win = win_open("puka", 4, 80, 24, 8, 16, 0);
+    if (win == 0) {
+        wl__emit_str("win_open failed (no $WAYLAND_DISPLAY / missing globals?)\n");
+        return 1;
+    }
+    var sz[16];
+    win_size_px(win, &sz);
+    wl__emit_str("window mapped: ");
+    wl__emit_uint(load64(&sz)); wl__emit_str("x"); wl__emit_uint(load64(&sz + 8));
+    wl__emit_str(" px. painting + entering the event loop.\n");
+
+    win_present_begin(win);
+    shm_fill(0x1A1B26);                          # calm dark fill (Tokyo-night-ish)
+    win_present_commit(win, 0, 0, win_w, win_h);
+
+    var alive = 1;
+    while (alive == 1) {
+        var ev = win_poll_events(win);           # blocks on the wayland fd; handles ping/configure
+        if ((ev & WIN_EV_CLOSE) != 0) { alive = 0; }
+    }
+
+    win_close(win);
+    wl__emit_str("puka_term — window closed. bye.\n");
+    return 0;
+}
+
+fn _entry(): i64 { var rc = main(); syscall(SYS_EXIT, rc); return 0; }
+_entry();

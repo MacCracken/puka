@@ -18,9 +18,10 @@ fn main(): i64 {
         return 1;
     }
     wl__emit_str("connected. globals advertised by the compositor:\n");
-    var regid  = wl_get_registry();
-    var syncid = wl_sync();
-    if (wl_dispatch(regid, syncid) < 0) {
+    wl_verbose = 1;
+    wl_get_registry();
+    wl_sync();
+    if (wl_dispatch() < 0) {
         wl__emit_str("dispatch failed (protocol/socket error)\n");
         wl_close();
         return 1;
