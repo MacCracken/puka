@@ -1,11 +1,9 @@
 # puka_term.cyr — the desktop daily-driver: puka as a Wayland window on Hyprland.
 #
-# Replaces the retired framebuffer puka_session. Builds bite-by-bite:
-#   bite 2: a titled window + solid fill.
-#   bite 3: the terminal GRID rendered into the window (kashi glyphs, SGR colour,
-#           cursor) via fb.cyr -> XRGB8888 -> wl_shm.   <-- current
-#   bites 4-6: PTY shell + live output, keyboard input, resize (interactive MVP).
-#   bites 7-8: mabda GPU rendering swapped in behind the win_present seam.
+# Bites 4+5: a single-threaded poll() loop over the Wayland fd + the PTY master,
+# hosting /bin/sh. Child output -> parser -> grid -> repaint; wl_keyboard ->
+# input_encode -> the child. No threads. The interactive CPU kitty-replacement
+# MVP. Bites 7-8 swap the CPU blit for mabda GPU behind win_present.
 #
 # Build:  cyrius build programs/puka_term.cyr build/puka_term
 # Run  :  WAYLAND_DISPLAY=wayland-1 ./build/puka_term   (inside a Wayland session)
@@ -17,20 +15,55 @@ include "src/terminal.cyr"
 include "lib/kashi_font_data.cyr"
 include "src/render/fb.cyr"
 include "src/render/pixfmt.cyr"
+include "src/input.cyr"
+include "src/input/evdev.cyr"
+include "src/input/keymap.cyr"
+include "src/pty.cyr"
 include "src/platform/wayland/wire.cyr"
 include "src/platform/wayland/client.cyr"
 include "src/platform/wayland/shm.cyr"
 include "src/platform/window.cyr"
 
-# Repaint: clear margins, render the grid, blit it into the present buffer, commit.
+enum PukaLoop { SYS_POLL = 7; POLLIN = 1; POLLHUP = 0x10; }
+
+# Render + present only the rows that changed (damage-aware) — a one-line echo
+# copies ~16 px rows, not the whole 1260x683 buffer (the fix for input lag).
 fn puka__paint(win): i64 {
+    var rows = grid_get_rows();
+    var y0 = 0 - 1;
+    var y1 = 0 - 1;
+    var r = 0;
+    while (r < rows) {
+        if (grid_row_dirty(r) != 0) { if (y0 < 0) { y0 = r; } y1 = r; }
+        r = r + 1;
+    }
+    if (y0 < 0) { return 0; }                  # nothing dirty -> nothing to do
+    fb_render();                                # paints the dirty rows, clears their bits
+    var py0 = y0 * 16;
+    var py1 = (y1 + 1) * 16;
+    if (py1 > fb_height()) { py1 = fb_height(); }
     var dst = win_present_begin(win);
     if (dst == 0) { return 0; }
-    shm_fill(0x000000);                                  # bg + any margin
-    fb_render();
-    pix_blit_rgb_to_xrgb(fb_buf(), fb_width(), fb_height(), dst, win_w);
-    win_present_commit(win, 0, 0, win_w, win_h);
+    pix_blit_region(fb_buf(), fb_width(), py0, py1, dst, win_w);
+    win_present_commit(win, 0, py0, win_w, py1 - py0);
     return 0;
+}
+
+# Drain all available child output (non-blocking) into the grid. Returns bytes.
+fn puka__drain_pty(): i64 {
+    var buf[2048];
+    var total = 0;
+    var go = 1;
+    while (go == 1) {
+        var n = file_read(pty_master, &buf, 2048);
+        if (n <= 0) { go = 0; }
+        else {
+            var i = 0;
+            while (i < n) { term_feed(load8(&buf + i)); i = i + 1; }
+            total = total + n;
+        }
+    }
+    return total;
 }
 
 fn main(): i64 {
@@ -38,11 +71,8 @@ fn main(): i64 {
     wl__emit_str("puka_term — opening a window on the compositor...\n");
     win_backend_select();
     var win = win_open("puka", 4, 80, 24, 8, 16, 0);
-    if (win == 0) {
-        wl__emit_str("win_open failed (no $WAYLAND_DISPLAY / missing globals?)\n");
-        return 1;
-    }
-    # size the grid to the window (8x16 cells), clamped to the grid ceilings.
+    if (win == 0) { wl__emit_str("win_open failed (no $WAYLAND_DISPLAY?)\n"); return 1; }
+
     var cols = win_w / 8;
     var rows = win_h / 16;
     if (cols > 132) { cols = 132; }
@@ -51,29 +81,52 @@ fn main(): i64 {
     if (rows < 1) { rows = 1; }
     term_init(rows, cols);
     fb_init(8, 16);
+    wl__emit_str("window "); wl__emit_uint(win_w); wl__emit_str("x"); wl__emit_uint(win_h);
+    wl__emit_str(" -> grid "); wl__emit_uint(cols); wl__emit_str("x"); wl__emit_uint(rows);
+    wl__emit_str("; hosting /bin/sh.\n");
 
-    wl__emit_str("window mapped: ");
-    wl__emit_uint(win_w); wl__emit_str("x"); wl__emit_uint(win_h);
-    wl__emit_str(" px -> grid "); wl__emit_uint(cols); wl__emit_str("x"); wl__emit_uint(rows);
-    wl__emit_str(". rendering the grid.\n");
+    if (pty_open() < 0) { wl__emit_str("pty_open failed\n"); win_close(win); return 1; }
+    if (pty_spawn("/bin/sh", 0, 0, rows, cols) < 0) {
+        wl__emit_str("shell spawn failed\n"); pty_close(); win_close(win); return 1;
+    }
+    var banner = "echo puka: a sovereign Cyrius terminal, live on Wayland; echo; ls /\n";
+    pty_write(banner, strlen(banner));               # startup output (type for yourself too)
+    shm_fill(0x000000);                              # clear the whole buffer + margins ONCE
+    puka__paint(win);                                # first frame (all rows dirty -> full blit)
 
-    # demo content (bite 3: prove text/colour/glyph/cursor render in the window)
-    term_feed_str("\x1b[1;32mpuka\x1b[0m on \x1b[1;31mWayland\x1b[0m \xe2\x9c\x93\r\n");
-    term_feed_str("a sovereign Cyrius terminal in a wl_shm window — no libwayland, no toolkit.\r\n\r\n");
-    term_feed_str("\x1b[7m reverse \x1b[0m  \x1b[44;1;97m blue bg \x1b[0m  \x1b[42;30m green bg \x1b[0m  ");
-    term_feed_str("\x1b[38;5;208m256-colour\x1b[0m  \x1b[38;2;255;120;0mtruecolor\x1b[0m\r\n\r\n");
-    term_feed_str("the quick brown fox jumps over the lazy dog  0123456789  !@#$%^&*()\r\n");
-    term_feed_str("\r\nthe cursor block sits here -> ");
-
-    puka__paint(win);
-
+    var kbuf[64];
+    var krec[24];
+    var pfds[16];                                    # 2 pollfds (8 bytes each)
     var alive = 1;
     while (alive == 1) {
-        var ev = win_poll_events(win);
-        if ((ev & WIN_EV_CLOSE) != 0) { alive = 0; }
+        store32(&pfds, win_fd(win));     store32(&pfds + 4, POLLIN);
+        store32(&pfds + 8, pty_master);  store32(&pfds + 12, POLLIN);
+        syscall(SYS_POLL, &pfds, 2, 0 - 1);          # block until either fd is ready
+
+        var rev_win = (load32(&pfds + 4) >> 16) & 0xFFFF;
+        if (rev_win != 0) {
+            var ev = win_poll_events(win);            # parse wayland; queue keys; ping/close
+            if ((ev & WIN_EV_CLOSE) != 0) { alive = 0; }
+        }
+        while (win_next_key(win, &krec) == 1) {       # keyboard -> child
+            if (load64(&krec + 8) == 1) {             # press (value 1)
+                var n = input_from_keycode(load64(&krec), load64(&krec + 16), &kbuf);
+                if (n > 0) { pty_write(&kbuf, n); }
+            }
+        }
+        var rev_pty = (load32(&pfds + 12) >> 16) & 0xFFFF;
+        var dirty = 0;
+        if ((rev_pty & POLLIN) != 0) { if (puka__drain_pty() > 0) { dirty = 1; } }
+        if ((rev_pty & POLLHUP) != 0) { alive = 0; }
+        if (dirty == 1) { puka__paint(win); }
+
+        var st[8];
+        if (sys_waitpid(pty_child_pid, &st, 1) > 0) { alive = 0; }   # WNOHANG: child exited
     }
+
     win_close(win);
-    wl__emit_str("puka_term — window closed. bye.\n");
+    pty_close();
+    wl__emit_str("puka_term — session ended. bye.\n");
     return 0;
 }
 

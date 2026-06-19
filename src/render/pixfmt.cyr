@@ -9,16 +9,18 @@
 # Pack one (r,g,b) into an XRGB8888 word (store32 -> B,G,R,0 on little-endian).
 fn pix_rgb_to_xrgb(r, g, b): i64 { return (r << 16) | (g << 8) | b; }
 
-# Blit a W*H*3 packed-RGB source into an XRGB8888 destination whose rows are
-# `dst_stride_px` pixels apart (the present buffer may be wider than the grid —
-# the source lands top-left; any margin is left as the caller cleared it).
-fn pix_blit_rgb_to_xrgb(src_rgb, sw, sh, dst, dst_stride_px): i64 {
-    var y = 0;
-    while (y < sh) {
+# Blit pixel rows [py0, py1) of a W*H*3 packed-RGB source into an XRGB8888
+# destination whose rows are `dst_stride_px` pixels apart. Damage-aware: the
+# event loop blits only the rows the renderer touched (a full blit is py0=0,
+# py1=sh), so a one-line keystroke echo copies ~16 rows, not the whole screen.
+fn pix_blit_region(src_rgb, sw, py0, py1, dst, dst_stride_px): i64 {
+    var y = py0;
+    while (y < py1) {
+        var srow = y * sw;
         var drow = y * dst_stride_px;
         var x = 0;
         while (x < sw) {
-            var sp = (y * sw + x) * 3;
+            var sp = (srow + x) * 3;
             store32(dst + (drow + x) * 4,
                     (load8(src_rgb + sp) << 16) | (load8(src_rgb + sp + 1) << 8) | load8(src_rgb + sp + 2));
             x = x + 1;

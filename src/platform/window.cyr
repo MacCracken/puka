@@ -39,6 +39,7 @@ fn win_open(title, tlen, cols, rows, cell_w, cell_h, gpu_ctx): i64 {
     wl_comp_oid = wl_bind(wl_gn_comp, "wl_compositor", 4);
     wl_shm_oid  = wl_bind(wl_gn_shm, "wl_shm", 1);
     wl_xdg_oid  = wl_bind(wl_gn_xdg, "xdg_wm_base", 1);
+    if (wl_gn_seat != 0) { wl_seat_oid = wl_bind(wl_gn_seat, "wl_seat", 5); }   # -> capabilities -> keyboard
 
     wl_surf_oid = wl_alloc_id();
     wl__req1(wl_comp_oid, OP_COMPOSITOR_CREATE_SURFACE, wl_surf_oid);
@@ -93,12 +94,18 @@ fn win_present_commit(win, x, y, w, h): i64 {
 }
 
 # Read + dispatch pending wayland events; return an OR-mask of WIN_EV_*.
+# Call only when win_fd is poll-readable (it does one read).
 fn win_poll_events(win): i64 {
     if (wl_pump() < 0) { return WIN_EV_CLOSE; }
     var m = WIN_EV_NONE;
     if (wl_closed == 1) { m = m | WIN_EV_CLOSE; }
     if (wl_frame_done == 1) { m = m | WIN_EV_FRAME; }
+    if (wl_key_pending() == 1) { m = m | WIN_EV_KEY; }
     return m;
 }
+
+# Drain one key record: out24[+0]=evdev keycode, [+8]=value(1=press), [+16]=mods.
+# Returns 1 if a record was produced, 0 if the queue is empty.
+fn win_next_key(win, out24): i64 { return wl_pop_key(out24); }
 
 fn win_close(win): i64 { wl_close(); return 0; }

@@ -77,10 +77,12 @@ Two invariants hold this together:
 | `terminal.cyr` | VT semantics — applies parser actions to the grid (CUP/ED/EL/SGR/DECSTBM/modes/charsets) | M1 |
 | `pty.cyr` | PTY pair allocation, child spawn (explicit argv), read/write loop. Platform-split | M2 (Linux) / post-v1.0 (agnos) |
 | `render/fb.cyr` | grid → RGB pixel buffer: colour resolution, glyph blit (kashi), cursor, per-row damage, PPM dump | **M3 ✅ (renderer core)** |
-| `render/fbdev.cyr` | blit the RGB buffer → Linux `/dev/fb0` (any truecolor bpp); pure pack/blit core + guarded device | **M5 ✅** / post-v1.0 (agnos `blit`#39) |
 | `input.cyr` | keyboard → escape-sequence encoding (keysym+mods → bytes; xterm `ctlseqs`; bracketed paste); pure, headless | **M4 ✅** |
-| `input/evdev.cyr` | Linux `/dev/input` scancodes → `(sym,mods)` → `input_encode`; pure decode + guarded device | **M5 ✅** / post-v1.0 (agnos HID) |
-| `main.cyr` / `programs/puka_session.cyr` | wiring + the live interactive loop (evdev → child → grid → fbdev) | M2+ / **M5 ✅** |
+| `platform/window.cyr` | the cross-platform `win_*` window-backend seam (open/present/poll/next-key/close) → extracts to `aethersafha` | **M6 ✅** |
+| `platform/wayland/*` | sovereign Wayland client: wire codec, connect/registry/xdg-shell, `wl_seat`/`wl_keyboard`, `wl_shm` present | **M6 ✅** |
+| `render/pixfmt.cyr` · `input/keymap.cyr` | RGB→XRGB8888 + damage-aware blit · shared evdev-keycode→bytes bridge | **M6 ✅** |
+| `programs/puka_term.cyr` | desktop daily-driver: `poll(wayland, pty)` loop hosting a shell; mabda GPU later | **M6 ✅** |
+| `render/fbdev.cyr` · `input/evdev.cyr` device · `puka_session.cyr` | Linux framebuffer/evdev *console* edges | M5 — **superseded** by Wayland (retire bite 10) |
 
 ## Platform split
 
@@ -88,12 +90,13 @@ Cyrius targets **Linux + agnos** (+ rv64 / bare-metal), not macOS. The core
 (`parser` / `unicode` / `grid` / `terminal`) is platform-agnostic and headless.
 Only the **edges** are platform-specific:
 
-- **PTY**: Linux pty pair (dev) vs. the AGNOS kernel pty syscall surface (a gap to grow, post-v1.0).
-- **Render**: Linux KMS/DRM or a headless text dump (dev) vs. AGNOS `blit`#39 framebuffer (native, the proof-app path — no compositor needed).
-- **Input**: Linux evdev/stdin (dev) vs. the AGNOS xHCI/HID path (native).
+- **PTY**: Linux pty pair vs. the AGNOS kernel pty syscall surface (post-v1.0).
+- **Window / surface** (the `win_*` seam, → `aethersafha`): a sovereign **Wayland** client (Linux desktop, the v1 target — a window *in* the compositor) vs. the AGNOS `blit`#39 framebuffer (native, no compositor, post-v1.0). X11 / macOS backends fill the same seam later. A headless text / PPM dump (`fb.cyr`) stays for engine tests.
+- **Input**: Wayland `wl_keyboard` (Linux desktop) vs. the AGNOS xHCI/HID path (native) — both feed the *same* `evdev__keymap` → `input_encode` bridge.
+- **GPU render**: `mabda`'s native AMD backend (sovereign — no FFI), present to the window via `wl_shm` then zero-copy `zwp_linux_dmabuf_v1`.
 
-A **macOS backend** would require a Cyrius Darwin/Mach-O backend — cyrius-side
-work, explicitly out of scope for this repo (see [CLAUDE.md § Platform reality](../../CLAUDE.md)).
+A **macOS / X11 / Windows backend** is a future `win_*` implementation (macOS needs a
+Cyrius Darwin/Mach-O backend, cyrius-side; see [CLAUDE.md § Platform reality](../../CLAUDE.md)).
 
 ## Own-the-stack dependencies
 
@@ -103,9 +106,9 @@ Per first-party standards, puka depends on AGNOS crates rather than rolling its 
 |---|---|---|
 | Bitmap console glyphs (CP437 / PSF) | `kashi` | **M3 ✅ (wired: freestanding `font_data.cyr` core)** |
 | Scalable / vector glyphs | `rekha` + `sadish` | post-v1.0 |
-| GPU acceleration | `mabda` / `ai-hwaccel` | M6 (optional) |
+| GPU rendering | `mabda` (native AMD backend; `wgpu` FFI forbidden) | **M6 bites 7–8** |
 | Errors / structured logging | `sakshi` | as needed |
-| Trust / auth (command center, later) | `sigil` | phase 2 |
+| Trust / auth (command center) | `sigil` | v3 |
 
 ## Engine extraction (forward-looking)
 

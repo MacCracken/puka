@@ -1,0 +1,22 @@
+# keymap.cyr — the shared "evdev keycode + mods -> child bytes" bridge.
+#
+# Both input sources — Linux evdev and Wayland wl_keyboard (which delivers evdev
+# keycodes) — funnel through here, so the keymap + the post-keymap encode
+# discipline live in ONE place. For now the US-QWERTY table itself still lives in
+# evdev.cyr (evdev__keymap); the retire bite lifts the table here and drops the
+# evdev device layer. Co-compiled after input.cyr + evdev.cyr; includes nothing.
+#
+# Discipline (mirrors evdev__decode's tail): SHIFT is consumed by glyph selection
+# for printables (dropped from the mods passed) but passed through for named keys
+# (so xterm CSI 1;<mod> is built); Shift+Tab -> BackTab. Unknown/no-emit -> 0.
+fn input_from_keycode(code, mods, out): i64 {
+    var shift = mods & MOD_SHIFT;
+    var sym = evdev__keymap(code, shift);
+    if (sym < 0) { return 0; }
+    if (code == 15) {                                  # Tab
+        if (shift != 0) { sym = KEY_BACKTAB; }
+        return input_encode(sym, mods & (0 - 1 - MOD_SHIFT), out);
+    }
+    if (sym >= 0x110000) { return input_encode(sym, mods, out); }   # named: full mods
+    return input_encode(sym, mods & (0 - 1 - MOD_SHIFT), out);      # printable: drop SHIFT
+}

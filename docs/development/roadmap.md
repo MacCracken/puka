@@ -14,21 +14,31 @@ pre-extract.
 
 The pipeline is built from the **inside out**: the platform-agnostic core
 (parser → grid → terminal) first, fully headless-testable on Linux (M1), then the
-I/O edges — PTY (M2), render (M3), input (M4) — then the **live Linux edges**
-(framebuffer display + evdev keyboard) that make puka a real interactive terminal
-on the dev host (M5).
+I/O edges — PTY (M2), render-to-RGB (M3), input-encode (M4) — then the **desktop
+window backend** that makes puka a real terminal *window* in a Wayland compositor
+(M6). The engine never knows what surface it draws to; a swappable `win_*` backend
+(Wayland now; X11 / macOS / AGNOS later) owns the window, destined to extract to the
+**`aethersafha`** windowing crate (ADR-0002).
 
-**AGNOS-native bring-up is post-v1.0.** AGNOS does not yet have the
-framebuffer-console environment to host puka, so v1.0 targets a **Linux-complete**
-terminal; the AGNOS console (`blit`#39 display + xHCI/HID input + the kernel PTY
-surface) follows once the platform is ready. The sovereign-Cyrius, zero-external-code
-identity is unchanged — only the platform sequencing.
+> **Direction note (0.6.0):** 0.5.0 took a `/dev/fb0` + evdev **console** approach
+> (M5). A *desktop* terminal is a **compositor client**, not a console — on a Linux
+> desktop everything is a window. So 0.6.0 pivots to a sovereign **Wayland** backend
+> (a window in Hyprland, M6). The framebuffer/console edges (`fbdev` / `evdev` device
+> layers, `puka_session`) are superseded and queued for retirement; the
+> platform-agnostic core (M1–M4) and the `fb.cyr` RGB renderer are unchanged + reused.
+
+**AGNOS-native bring-up is post-v1.0.** AGNOS does not yet have a console/desktop
+environment to host puka, so v1.0 targets a **Linux Wayland desktop terminal** (a
+kitty-class daily driver); the AGNOS console (`blit`#39 framebuffer + xHCI/HID + the
+kernel PTY surface) follows behind the same seams once the platform is ready. The
+multi-pane coding-agent **command center** (panes hosting `thoth`) is **v3**. The
+sovereign-Cyrius, zero-external-code identity is unchanged — only the sequencing.
 
 ## v1.0 criteria
 
 - [ ] **Conformance** — passes a curated vttest / `ctlseqs` corpus (cursor, ED/EL, SGR, scroll regions, modes, charsets, alt-screen)
 - [ ] **Public engine API frozen** — parser + grid + terminal-state surface documented and tested (this is what the command center will consume; freezing it triggers the engine-lib extraction per ADR-0002)
-- [ ] Runs as a real interactive console on the **Linux dev host** — framebuffer (fbdev/KMS) display + evdev keyboard: boots a shell, accepts keystrokes, renders correctly. (The AGNOS-native console is the headline **post-v1.0** goal, gated on AGNOS's framebuffer-console environment.)
+- [ ] Runs as a **Wayland desktop terminal** on Linux — a real, titled, resizable window in the compositor (Hyprland/wlroots) hosting a shell, GPU-rendered via `mabda`, daily-drivable as a **kitty replacement**. (The AGNOS-native framebuffer console is the headline **post-v1.0** goal.)
 - [ ] Test coverage adequate for the surface (parser fuzzed against malformed input; ≥ the 100-assertion floor)
 - [ ] Benchmarks captured in `docs/benchmarks.md` (parser throughput, render frame cost)
 - [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`) — parser is the untrusted-input boundary
@@ -124,44 +134,69 @@ Linux-guarded, skip-clean device layer (the M2/M3/M4 discipline).
 - **Display** (`src/render/fbdev.cyr`) — ✅ blits `fb_buf()` (24-bit RGB) to `/dev/fb0`: pure pixel-pack + stride/offset/clamp blit generic over 16/24/32-bpp truecolor layouts (via the `FBIOGET_VSCREENINFO` bitfields), tested against an in-memory fake fb; Linux-guarded open/ioctl/mmap/present with the device geometry validated before the blit trusts it. The ABI struct offsets were validated read-only against real hardware (2560×1440 XRGB8888).
 - **Key source** (`src/input/evdev.cyr`) — ✅ decodes raw `/dev/input/eventN` `input_event` records via a US-QWERTY keymap with independent L/R modifier tracking → `input_encode` → `pty_write`; `EVIOCGRAB`s the device. Pure decode tested on synthetic events; untrusted-device-bounded.
 - **Interactive loop** (`programs/puka_session.cyr`) — ✅ single-threaded busy-poll: evdev → child, `pty_pump` → grid, `fb_render` → `fbdev_present`; spawns `/bin/sh`, exits on child death.
-- **Tests**: `tests/fbdev.tcyr` (25) + `tests/evdev.tcyr` (49). Adversarial review closed (4 fixes). **Acceptance** (live session: shell prompt, type & run, correct output) is exercised on a bare Linux VT — it cannot run under a compositor or in CI, so it is verified on real hardware rather than in the headless suite.
+- **Tests**: `tests/fbdev.tcyr` (25) + `tests/evdev.tcyr` (49). Adversarial review closed (4 fixes).
 
-### M6 — Conformance + polish (0.6.0 → 0.9.0)
+> **Superseded (0.6.0):** the framebuffer/evdev **console** approach was the wrong
+> layer for a *desktop* terminal — a Linux desktop hosts everything as compositor
+> windows. 0.6.0 pivots to the **Wayland desktop backend** (M6). `fbdev.cyr`, the
+> evdev device layer, and `puka_session.cyr` are queued for retirement; `fb.cyr`
+> (the RGB renderer) and the evdev **keymap** are kept and reused unchanged.
 
-- Full vttest / `ctlseqs` conformance pass; scrollback ring; **alternate screen**; origin mode; charset switching (DEC special graphics); mouse tracking; bracketed paste edge cases; grapheme clustering.
-- Performance: parser throughput, dirty-cell rendering, optional GPU path via **`mabda`**.
-- Fuzz the parser hard against malformed/truncated/adversarial input.
+### M6 — Wayland desktop terminal (0.6.0 → ) — the corrected v1 path
 
-### M7 — Hardening + v1.0
+puka as a real **window in a Wayland compositor** (Hyprland) hosting a shell — the
+first windowed Cyrius program, speaking the Wayland wire protocol from scratch (no
+libwayland / toolkit / FFI), GPU-rendered via **`mabda`**. The engine is untouched;
+this is a new swappable window backend (`win_*`, extractable to `aethersafha`) + a
+`poll()` event loop around the M1–M4 core. Built bite-by-bite, each verifiable live
+on Hyprland:
 
-- P(-1) security sweep (parser is the untrusted-input boundary); freeze the engine API; capture benchmarks; complete docs.
-- **Engine extraction** (ADR-0002): when the command center arrives as the second consumer, carve parser+grid+terminal into a Sanskrit-named lib; puka becomes a thin consumer of it.
+- **Bite 1** ✅ — speak the Wayland wire protocol: connect + `wl_registry` roundtrip (68 globals enumerated on Hyprland), SCM_RIGHTS fd-passing.
+- **Bite 2** ✅ — a titled, mapped window: bind `wl_compositor`/`wl_shm`/`xdg_wm_base`, the xdg-shell configure/ack lifecycle, a memfd-backed `wl_shm` buffer.
+- **Bite 3** ✅ — the grid rendered into the window (`fb.cyr` → XRGB8888 → `wl_shm`; kashi glyphs, SGR colour, cursor).
+- **Bites 4–5** ✅ (**0.6.0**) — the interactive MVP: the `poll()` loop over the Wayland fd + the PTY master hosting `/bin/sh`; `wl_keyboard` → `input_encode` → child (raw evdev keycodes, no +8); damage-aware repaint (only changed rows).
+- **Bite 6** — window **resize** (reflow on `xdg_toplevel.configure` → `term_resize` + `pty_set_winsize`); raise the grid ceilings (`GRID_MAX_*`) so a maximized window isn't letterboxed.
+- **Bites 7–8** — **mabda GPU** rendering: a kashi glyph atlas + an instanced cell-quad pipeline → a GTT render target, presented via `wl_shm`, then **zero-copy `zwp_linux_dmabuf_v1`** (needs a ~30-line `mabda` dmabuf-export accessor). `wl_shm` software rendering stays the permanent non-AMD fallback.
+- **Bite 10** — retire the 0.5.0 framebuffer edges; lift the keymap table into `src/input/keymap.cyr`.
+- **Cross-plat:** the `win_*` seam takes X11 / macOS / AGNOS backends later; the Wayland code extracts to **`aethersafha`** when that crate becomes a real second consumer.
+- **Acceptance**: a daily-drivable kitty replacement — open puka on Hyprland, run a shell + `vim`, resize cleanly, correct colour/glyph/cursor, GPU-rendered.
+
+### M7 — Conformance + polish (0.7.0 → 0.9.0)
+
+- Full vttest / `ctlseqs` conformance pass; scrollback ring; **alternate screen**; origin mode; charset switching (DEC special graphics); mouse tracking (SGR); bracketed-paste edge cases; grapheme clustering; selection/clipboard (`wl_data_device`).
+- Fuzz both the VT parser AND the new **Wayland wire parser** (a second untrusted-input boundary — compositor messages) against malformed input.
+
+### M8 — Hardening + v1.0
+
+- P(-1) security sweep (the VT parser + the Wayland wire parser are the untrusted-input boundaries); capture benchmarks (parser throughput, frame cost); complete docs.
+- **Engine extraction** (ADR-0002): when the command center (v3) arrives as the second consumer, carve parser+grid+terminal into a Sanskrit-named lib, and extract the windowing seam to `aethersafha`. puka becomes a thin consumer of both.
 
 ## Post-v1.0 — AGNOS-native bring-up (the proof-app, when AGNOS is ready)
 
-Deferred past v1.0 because **AGNOS does not yet have the framebuffer-console
-environment to host puka**. When it does, the live edges (M5) gain an AGNOS backend
-alongside their Linux one — the platform-agnostic core (M1–M4) and the v1.0 Linux
-terminal are unchanged; this is purely new platform-edge code behind the same seams
-(`fb_buf()` for display, `input_encode` for input, `pty_*` for the child).
+Deferred past v1.0 because **AGNOS does not yet have a console/desktop environment
+to host puka**. When it does, it becomes a new **`win_*` backend** alongside the
+Wayland one — the platform-agnostic core (M1–M4), the `fb.cyr` renderer, and the v1.0
+Wayland terminal are unchanged; this is purely new platform-edge code behind the same
+seams (`win_present` for display, `win_next_key`/`input_encode` for input, `pty_*` for
+the child). On AGNOS there is no compositor — puka owns the framebuffer directly:
 
 - **AGNOS PTY surface** — the kernel-side pty syscalls puka needs (a Cyrius-native gap, analogous to the `net.cyr` / `vani` agnos-backend gaps; grown per the kernel-growth rules, not POSIX `forkpty` emulation).
-- **AGNOS display** — blit the pixel buffer via `blit`#39 (the framebuffer proof path, no compositor needed) — the AGNOS-native sibling of the M5 Linux fbdev backend.
-- **AGNOS key source** — keystrokes from the xHCI/HID input path into `input_encode` — the AGNOS-native sibling of the M5 evdev source.
+- **AGNOS display** — present the pixel buffer via `blit`#39 (the framebuffer proof path, no compositor) — the AGNOS-native `win_present` backend.
+- **AGNOS key source** — keystrokes from the xHCI/HID input path → `input_encode` — the AGNOS-native `win_next_key` backend.
 - **Acceptance**: puka boots a shell on AGNOS iron/QEMU and is interactive — the DOOM/tracker-class proof milestone, launching agnoshi.
 
-## Phase 2 — command center (post-v1.0, separate repo)
+## v3 — command center (post-v1.0, separate repo)
 
-The supacode-equivalent: a multi-pane **worktree coding-agent command center**,
-one puka surface per pane, each running a `thoth` session in its own git
-worktree. **Not** in puka's repo or v1.0 scope — it's a downstream consumer of
-the extracted engine. Name/scaffold TBD when puka v1.0 lands.
+The supacode-equivalent: a multi-pane **worktree coding-agent command center**, one
+puka surface per pane, each running a **`thoth`** session in its own git worktree.
+**Not** in puka's repo or v1.0 scope — it's a downstream consumer of the extracted
+engine + the `aethersafha` windowing crate. Name/scaffold TBD when puka v1.0 lands.
 
 ## Out of scope (for v1.0)
 
-- **AGNOS-native console** — post-v1.0 (see the section above): AGNOS lacks the framebuffer-console environment to host puka today, so v1.0 is Linux-complete and the AGNOS console follows when the platform is ready.
-- **macOS / Windows backends** — Cyrius emits Linux + agnos only; macOS needs a Cyrius Darwin backend (cyrius-side, not this repo).
-- **The command center itself** — phase 2, separate repo, post-v1.0.
+- **AGNOS-native console** — post-v1.0 (see above): AGNOS lacks a console/desktop environment to host puka today, so v1.0 is a Linux Wayland desktop terminal and the AGNOS backend follows behind the `win_*` seam when the platform is ready.
+- **X11 / macOS / Windows window backends** — designed-for behind the `win_*` seam, but v1.0 ships Wayland only. (Cyrius emits Linux + agnos; macOS needs a Cyrius Darwin backend, cyrius-side.)
+- **The command center itself** — v3, separate repo, post-v1.0.
 - **Sixel / Kitty / iTerm2 image protocols** — post-v1.0 (the `kii` image-to-ANSI path is adjacent but separate).
 - **Ligatures / complex text shaping** — needs `rekha` vector fonts; post-v1.0.
 - **Tabs / splits / config UI inside puka** — terminal-multiplexer concerns belong to the command center, not the emulator.

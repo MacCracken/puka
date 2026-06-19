@@ -4,6 +4,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-06-18
+
+**The Wayland desktop terminal — direction corrected.** puka is now a real window
+in a Wayland compositor (Hyprland), hosting a live shell — the **first windowed
+program in the Cyrius ecosystem**, speaking the Wayland wire protocol from scratch
+(no libwayland / toolkit / FFI). This supersedes the 0.5.0 framebuffer/console
+approach: a desktop terminal is a *compositor client*, not a `/dev/fb0` console. v1
+is a daily-drivable **kitty replacement** on Linux/Wayland; AGNOS-native framebuffer
+is post-v1; the multi-pane coding-agent command center (panes hosting `thoth`) is v3.
+
+### Added
+- **`src/platform/window.cyr`** — the cross-platform window-backend seam (`win_open`/`win_present_begin`/`win_present_commit`/`win_poll_events`/`win_next_key`/`win_close`). Platform-generic names (never `wl_*`) so the contract extracts to the future **`aethersafha`** windowing crate as a *move*, not a rewrite; the engine never references `src/platform/`. mabda's GPU ctx is passed *through* `win_open`.
+- **`src/platform/wayland/`** — a sovereign Wayland client over the unix socket: `wire.cyr` (the wire codec — 32-bit message framing, string/u32 arg encoders), `client.cyr` (connect, `wl_registry` bind, the full xdg-shell window lifecycle with configure/ack, `wl_seat`/`wl_keyboard`, **SCM_RIGHTS fd-passing**), `shm.cyr` (memfd-backed `wl_shm` present buffer).
+- **`programs/puka_term.cyr`** — the desktop daily-driver: a single-threaded `poll()` over the Wayland fd + the PTY master, hosting `/bin/sh`; child output → grid → **damage-aware** repaint (only changed rows), `wl_keyboard` → `input_encode` → child. The interactive CPU-rendered MVP.
+- **`src/render/pixfmt.cyr`** — RGB→XRGB8888 packing + a damage-aware row blit (the device-neutral core that survives the fbdev backend's retirement).
+- **`src/input/keymap.cyr`** — the shared evdev-keycode→bytes bridge (`wl_keyboard` delivers *raw* evdev keycodes — not evdev+8 — straight into `evdev__keymap` + the encode discipline).
+- **kashi → 1.0.2** and **cyrius pin → 6.2.22** (the latest language).
+
+### Notes
+- This is the interactive MVP: a window + a live shell + correct keyboard input + snappy damage-aware rendering, verified on Hyprland. Still ahead toward v1: window **resize** (reflow on `xdg_toplevel.configure`), **mabda GPU** rendering (glyph atlas + instanced cell quads, then zero-copy dmabuf), raising the grid ceilings for large windows, and **retiring the 0.5.0 framebuffer edges** (`fbdev`/`evdev` device layers, `puka_session`).
+- The Wayland wire parser is a **new untrusted-input boundary** (compositor messages) — a hardening audit is queued alongside the VT parser.
+
 ## [0.5.0] — 2026-06-18
 
 **M5 — Linux live terminal.** The live edges over the M1–M4 core: puka now runs as

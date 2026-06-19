@@ -31,6 +31,10 @@ enum WlAbi {
     EV_XDGSURF_CONFIGURE = 0;
     EV_TOPLEVEL_CONFIGURE = 0; EV_TOPLEVEL_CLOSE = 1;
     EV_BUFFER_RELEASE = 0;
+    OP_SEAT_GET_KEYBOARD = 1;
+    EV_SEAT_CAPS = 0;            # wl_seat.capabilities; KEYBOARD bit = 2
+    EV_KBD_KEY = 3;             # wl_keyboard.key (serial,time,key,state)
+    EV_KBD_MODS = 4;           # wl_keyboard.modifiers (serial,depressed,...)
 }
 
 var wl_fd      = 0 - 1;
@@ -52,6 +56,42 @@ var wl_buf_oid = 0; var wl_kbd_oid = 0; var wl_frame_oid = 0;
 var wl_cur_sync = 0; var wl_sync_done = 0;
 var wl_configured = 0; var wl_cfg_w = 0; var wl_cfg_h = 0;
 var wl_closed = 0; var wl_buf_busy = 0; var wl_frame_done = 1; var wl_nglobals = 0;
+
+# keyboard: a ring of (evdev_keycode, value, mods) records + the live mod mask.
+var wl_mods = 0;
+var wl_kq[96];              # 32 records * 3 i64 (module-global: 768 bytes)
+var wl_kq_head = 0; var wl_kq_tail = 0;
+
+# xkb 'depressed' bitmask -> puka MOD_* mask (values fixed at 1/4/2/8 here to keep
+# client.cyr independent of input.cyr — the probe includes neither).
+fn wl__derive_mods(dep): i64 {
+    var m = 0;
+    if ((dep & 1) != 0)  { m = m | 1; }    # XKB Shift   -> MOD_SHIFT(1)
+    if ((dep & 4) != 0)  { m = m | 4; }    # XKB Control -> MOD_CTRL(4)
+    if ((dep & 8) != 0)  { m = m | 2; }    # XKB Mod1/Alt-> MOD_ALT(2)
+    if ((dep & 64) != 0) { m = m | 8; }    # XKB Mod4/Super -> MOD_META(8)
+    return m;
+}
+fn wl__push_key(code, val, mods): i64 {
+    var nt = (wl_kq_tail + 1) % 32;
+    if (nt == wl_kq_head) { return 0; }    # full: drop
+    var b = wl_kq_tail * 3;
+    store64(&wl_kq + b * 8, code);
+    store64(&wl_kq + (b + 1) * 8, val);
+    store64(&wl_kq + (b + 2) * 8, mods);
+    wl_kq_tail = nt;
+    return 0;
+}
+fn wl_pop_key(out24): i64 {                # writes code,val,mods; 1 if popped else 0
+    if (wl_kq_head == wl_kq_tail) { return 0; }
+    var b = wl_kq_head * 3;
+    store64(out24, load64(&wl_kq + b * 8));
+    store64(out24 + 8, load64(&wl_kq + (b + 1) * 8));
+    store64(out24 + 16, load64(&wl_kq + (b + 2) * 8));
+    wl_kq_head = (wl_kq_head + 1) % 32;
+    return 1;
+}
+fn wl_key_pending(): i64 { if (wl_kq_head != wl_kq_tail) { return 1; } return 0; }
 
 fn wl_alloc_id(): i64 { var id = wl_next_id; wl_next_id = wl_next_id + 1; return id; }
 
@@ -175,6 +215,22 @@ fn wl__set_string(target, op, s): i64 {
 }
 fn wl__pong(serial): i64 { return wl__req1(wl_xdg_oid, OP_XDG_PONG, serial); }
 
+# wl_keyboard events. modifiers updates the live mask; key queues an
+# (evdev_keycode, value, mods) record the app drains via win_next_key.
+# wl_keyboard.key delivers the RAW evdev keycode (NOT evdev+8 — that offset is
+# only for feeding libxkbcommon, which a sovereign client doesn't use), so it
+# goes straight to evdev__keymap. keymap/enter/leave/repeat_info are ignored
+# (US-layout; the keymap fd is discarded by the plain read() in wl_pump).
+fn wl__kbd(o, op): i64 {
+    if (op == EV_KBD_MODS) { wl_mods = wl__derive_mods(load32(&wl_rbuf + o + 12)); return 0; }
+    if (op == EV_KBD_KEY) {
+        var key = load32(&wl_rbuf + o + 16);
+        var state = load32(&wl_rbuf + o + 20);
+        wl__push_key(key, state, wl_mods);
+    }
+    return 0;
+}
+
 # ---- event dispatch ----
 fn wl__handle(o): i64 {
     var id = load32(&wl_rbuf + o);
@@ -223,7 +279,18 @@ fn wl__handle(o): i64 {
         return 0;
     }
     if (id == wl_buf_oid) { if (op == EV_BUFFER_RELEASE) { wl_buf_busy = 0; } return 0; }
-    # wl_kbd_oid events handled in bite 5 (input.cyr)
+    if (id == wl_seat_oid) {
+        if (op == EV_SEAT_CAPS) {
+            if ((load32(&wl_rbuf + o + 8) & 2) != 0) {     # KEYBOARD capability
+                if (wl_kbd_oid == 0) {
+                    wl_kbd_oid = wl_alloc_id();
+                    wl__req1(wl_seat_oid, OP_SEAT_GET_KEYBOARD, wl_kbd_oid);
+                }
+            }
+        }
+        return 0;
+    }
+    if (id == wl_kbd_oid) { return wl__kbd(o, op); }
     return 0;
 }
 
