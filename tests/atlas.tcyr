@@ -78,5 +78,5 @@ fn main(): i64 {
     return assert_summary();
 }
 
-var exit_code = main();
-syscall(60, exit_code);
+fn _entry(): i64 { var rc = main(); syscall(SYS_EXIT, rc); return 0; }
+_entry();

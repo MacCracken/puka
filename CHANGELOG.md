@@ -4,6 +4,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **Docs + roadmap handoff sweep** — README and `getting-started.md` rewritten for the 0.6.2 Wayland-desktop reality (build/run `puka_term` on Hyprland, real architecture + deps, `/dev/fb0` warning); roadmap M6 reorganized into shipped-by-version vs remaining (GPU cell renderer marked **paused pending mabda**, bite-10 narrowed, alt-screen recorded); `overview.md` data-flow + module table refreshed; new **ADR-0003** records the framebuffer-console → Wayland-desktop pivot.
+- **Test-harness entry hygiene** — every `tests/*.{tcyr,bcyr,fcyr}` + `src/test.cyr` now use the compliant `_entry();` + `SYS_EXIT` pattern (was `var X = main(); syscall(60, …)`), matching the programs and CLAUDE.md. No behaviour change; 461 assertions still green.
+
 ## [0.6.2] — 2026-06-19
 
 **GPU foundation + the alternate screen.** Two tracks land: puka now drives `mabda`'s
