@@ -38,4 +38,15 @@ modules = ["src/font_data.cyr"]
 git     = "https://github.com/MacCracken/mabda.git"
 tag     = "3.2.11"
 modules = ["dist/mabda.cyr"]
+
+# setu — the AGNOS native display-protocol + its reference CLIENT transport. The
+# sovereign replacement for the Wayland windowing backend: puka's win_* seam
+# (src/platform/setu/window_setu.cyr) fills the identical contract over setu's
+# persistent client (setu_client_*), so the terminal engine runs unchanged and
+# puka becomes the compositor's first resident app. Pinned to the 0.2.0 tag (the
+# release that promoted the client into the lib). Consume the concatenated dist.
+[deps.setu]
+git     = "https://github.com/MacCracken/setu.git"
+tag     = "0.2.0"
+modules = ["dist/setu.cyr"]
 ---

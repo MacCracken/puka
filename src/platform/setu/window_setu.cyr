@@ -1,0 +1,76 @@
+# window_setu.cyr — puka's win_* window backend over the setu native display
+# protocol (setu_client_*, [deps.setu]).
+#
+# Fills the SAME win_* contract as the Wayland backend (src/platform/window.cyr,
+# ADR-0002) so the terminal engine + puka__paint run UNCHANGED — this is the
+# "AGNOS backend fills the identical contract, a MOVE not a rewrite" the seam was
+# designed for. Include this INSTEAD OF the wayland backend files
+# (wire/client/shm/window); the two define the same win_* names, so exactly one
+# backend compiles into any program.
+#
+# The client renders its cell grid into a CPU XRGB8888 buffer (via puka's
+# pix_blit_region — bytes [B,G,R,X] == setu fmt 1) and presents the whole surface
+# each frame over setu (ATTACH + inline pixels + COMMIT). Input over setu is a
+# later bite (gated on the compositor's real key-forwarding); win_poll_events /
+# win_next_key are present-parity stubs for now. Linux-first (setu AF_UNIX);
+# agnos when the agnos transport (item 3b, native-display-protocol.md) lands.
+#
+# Co-compiled after [deps.setu]'s dist (setu_client_*); includes nothing.
+
+enum WinAbi {
+    WIN_EV_NONE   = 0;
+    WIN_EV_RESIZE = 1;
+    WIN_EV_KEY    = 2;
+    WIN_EV_CLOSE  = 4;
+    WIN_EV_FRAME  = 8;
+    WIN_CAP_SHM   = 0;     # win_present_begin returns a CPU pixel buffer
+    WIN_CAP_GPU   = 1;
+}
+
+var win_w = 0;
+var win_h = 0;
+var setuwin_client = 0;   # *SetuClient (setu_client_connect)
+var setuwin_buf    = 0;   # persistent XRGB8888 present buffer (win_w*win_h*4)
+
+fn win_backend_select(): i64 { return 1; }   # 1 = setu (0 = wayland)
+
+# Connect to the compositor's setu socket ($SETU_SOCKET or the default), size the
+# surface to the grid (cols*cell_w x rows*cell_h), and allocate the persistent
+# present buffer. Returns an opaque handle (1) or 0 on connect failure. gpu_ctx
+# is ignored (CPU present path).
+fn win_open(title, tlen, cols, rows, cell_w, cell_h, gpu_ctx): i64 {
+    var path = getenv("SETU_SOCKET");
+    if (path == 0) { path = "/tmp/aethersafha-setu.sock"; }
+    var c = setu_client_connect(path);
+    if (c == 0) { return 0; }
+    setuwin_client = c;
+    win_w = cols * cell_w;
+    win_h = rows * cell_h;
+    var nbytes = win_w * win_h * 4;
+    setuwin_buf = alloc(nbytes);
+    memset(setuwin_buf, 0, nbytes);
+    return 1;
+}
+
+fn win_caps(win): i64 { return WIN_CAP_SHM; }
+fn win_fd(win): i64 { return setu_client_fd(setuwin_client); }
+fn win_size_px(win, out16): i64 { store64(out16, win_w); store64(out16 + 8, win_h); return 0; }
+
+# CPU path: the XRGB8888 buffer puka blits into. It persists across frames so the
+# damage-aware row blits accumulate — setu presents the WHOLE surface each COMMIT.
+fn win_present_begin(win): i64 { return setuwin_buf; }
+
+# Present the whole surface over setu (first present lazily CREATEs it, then
+# ATTACH + inline pixels + COMMIT). The (x,y,w,h) damage rect is accepted for
+# win_* parity but setu has no partial-damage present yet, so the full buffer
+# ships each frame. Returns 0 or setu_client_present's negative code.
+fn win_present_commit(win, x, y, w, h): i64 {
+    return setu_client_present(setuwin_client, setuwin_buf, win_w, win_h);
+}
+
+# No compositor->client event stream is wired yet (input is a later bite gated on
+# the compositor's real key-forwarding). Return WIN_EV_NONE.
+fn win_poll_events(win): i64 { return WIN_EV_NONE; }
+fn win_resize_apply(win): i64 { return 0; }              # setu: no compositor-driven resize yet
+fn win_next_key(win, out24): i64 { return 0; }
+fn win_close(win): i64 { setu_client_close(setuwin_client); return 0; }

@@ -1,0 +1,71 @@
+# puka_setu_probe.cyr — prove puka renders as a setu client (the FIRST RESIDENT).
+#
+# Drives puka's terminal engine through the SETU window backend: connect to
+# aethersafha's setu socket, render a demo terminal frame (a prompt + banner),
+# and present it (one CREATE→ATTACH→COMMIT). No PTY / poll loop — this is the
+# render proof; full interactive puka-over-setu is a later bite. A 40x12 grid
+# (320x192) fits aethersafha's setu_demo_probe fb, which serves one present and
+# dumps the composited window to a PPM.
+#
+# Build: cyrius build programs/puka_setu_probe.cyr build/puka_setu_probe
+# Run  : (aethersafha's setu_demo_probe listening) ./build/puka_setu_probe
+
+include "src/parser.cyr"
+include "src/grid.cyr"
+include "src/unicode.cyr"
+include "src/terminal.cyr"
+include "lib/kashi_font_data.cyr"
+include "src/render/fb.cyr"
+include "src/render/pixfmt.cyr"
+include "src/platform/setu/window_setu.cyr"
+
+# Feed a NUL-terminated cstring into the terminal engine byte by byte.
+fn probe_feed(s): i64 {
+    var i = 0;
+    var go = 1;
+    while (go == 1) {
+        var c = load8(s + i);
+        if (c == 0) { go = 0; } else { term_feed(c); i = i + 1; }
+    }
+    return i;
+}
+
+fn main(): i64 {
+    alloc_init();
+    var win = win_open("puka", 4, 40, 12, 8, 16, 0);
+    if (win == 0) {
+        var e = "puka_setu_probe: setu connect failed (is aethersafha listening on the setu socket?)\n";
+        syscall(SYS_WRITE, 2, e, strlen(e));
+        return 1;
+    }
+    term_init(12, 40);
+    fb_init(8, 16);
+
+    probe_feed("puka@agnos:~$ echo first resident\r\n");
+    probe_feed("first resident\r\n");
+    probe_feed("puka@agnos:~$ the sovereign terminal\r\n");
+
+    # Render the whole grid into puka's RGB fb, convert to the XRGB present buffer,
+    # and present once over setu (CREATE+ATTACH+COMMIT).
+    fb_render();
+    var dst = win_present_begin(win);
+    pix_blit_region(fb_buf(), fb_width(), 0, fb_height(), dst, win_w);
+    var rc = win_present_commit(win, 0, 0, win_w, win_h);
+    win_close(win);
+
+    if (rc < 0) {
+        var e2 = "puka_setu_probe: present failed rc=";
+        syscall(SYS_WRITE, 2, e2, strlen(e2));
+        var nb = alloc(24);
+        var nl = fmt_int_buf(rc, nb);
+        syscall(SYS_WRITE, 2, nb, nl);
+        syscall(SYS_WRITE, 2, "\n", 1);
+        return 1;
+    }
+    var ok = "puka_setu_probe: presented a 320x192 terminal frame over setu.\n";
+    syscall(SYS_WRITE, 1, ok, strlen(ok));
+    return 0;
+}
+
+fn _entry(): i64 { var r = main(); syscall(SYS_EXIT, r); return 0; }
+_entry();

@@ -1,3 +1,7 @@
+commit	ccd2b46bad710c38d70c07e420480e5e476a54f5	kashi	https://github.com/MacCracken/kashi.git	1.0.2
+commit	3424415556c6bb43056dcb40ed55d2c8422369c3	mabda	https://github.com/MacCracken/mabda.git	3.2.11
+commit	705f9bc0ac06d6ec4fd71efda89bd2e9a5ead9e8	setu	https://github.com/MacCracken/setu.git	0.2.0
+commit	35beb1b3d785ab3760bfda61c17d81c3827ba23e	samvada	https://github.com/MacCracken/samvada.git	0.4.1
 d9f3b17ddbbe1bba48917c3a679807b01c39c4a1ce776efdbdfbb7a1680e86e4  lib/tagged.cyr
 b0d475d8facaa8ab281bba5d411add5af2bdb595d69f5da28db27cc847ae353a  lib/net.cyr
 e84c090fd0f8532700d967ca3190837780a52a42630f4c6a0a4567ad9a49ab6b  lib/cffi.cyr
@@ -84,6 +88,7 @@ ee9c3c3feaf3e205477d62aa63aedc14eb2361bcc5ddebdb29fdfc23a6129fff  lib/io.cyr
 3d1a597713fb940934806f0080990123666844e97948ba0f2b79a2475c2622b1  lib/sync.cyr
 724cb440922e89ff60c76eba23670eeee53b9d1f3ffdde31ebe2e2f9badda9ed  lib/slice.cyr
 7c42f230a2c4c8bc253b8070f5950a2ac562923b036c57249a3e5682f2e4864d  lib/tls_native_hs12.cyr
+9912f4d86300a03cd560997c33b7574587204317ecc322ab98e07648574db5ea  lib/setu.cyr
 9fd6444e8cfcf7950837e955473adc5bab6d7bf4fa2c15f8ce2578360c4100eb  lib/hashmap.cyr
 af30844628c715c51cad83addf05c9de4fb12d4b84f97801322448b2df1091b1  lib/fnptr.cyr
 5b5dd5a59b766d642d711e8c884780bfe3ba9efd2dcefb3c76230208556e8d54  lib/kashi_font_data.cyr
