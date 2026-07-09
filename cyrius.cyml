@@ -15,7 +15,7 @@ output = "puka"
 # Base set + the extras mabda's amalgam needs (args/hashmap/tagged/fnptr/mmap/
 # dynlib/sakshi) so `dist/mabda.cyr` resolves its stdlib globals (MAP_SHARED,
 # O_RDWR, the Result/fnptr types, the GTT mmap helpers, sakshi logging).
-stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "args", "hashmap", "tagged", "fnptr", "mmap", "dynlib", "sakshi"]
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "args", "hashmap", "tagged", "fnptr", "mmap", "dynlib", "sakshi", "result", "net", "chrono"]
 
 # kashi — AGNOS console-font subsystem. M3 sources bitmap glyphs from its
 # FREESTANDING font-data core only (zero stdlib: store8/load8 + arithmetic).
@@ -47,6 +47,7 @@ modules = ["dist/mabda.cyr"]
 # release that promoted the client into the lib). Consume the concatenated dist.
 [deps.setu]
 git     = "https://github.com/MacCracken/setu.git"
+path    = "../setu"
 tag     = "0.2.0"
 modules = ["dist/setu.cyr"]
 ---
