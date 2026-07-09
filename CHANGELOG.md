@@ -4,6 +4,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.4] — 2026-07-08 — puka is the compositor's first resident (setu client, over the TCP transport)
+
+puka gains a **setu client window backend** and becomes `aethersafha`'s first
+resident app: the terminal engine renders a cell grid → pixels and presents them
+over setu, so puka's window arrives on the sovereign desktop at runtime (no
+compositor-seeded placeholder). Now pinned to **setu 0.3.0** — the CROSS-PLATFORM
+TCP transport (item 3b), proven end-to-end: puka connects over TCP loopback:7700
+and presents a rendered 320×192 terminal frame that the compositor accepts +
+composites.
+
+### Added
+
+- **`src/platform/setu/window_setu.cyr`** — the setu `win_*` backend: fills the
+  same window contract the terminal engine expects (`win_open` → `win_present` →
+  `win_next_event` → `win_close`) over setu's persistent client
+  (`setu_client_connect` / `setu_client_present` / `setu_client_recv` /
+  `setu_client_close`). The engine runs unchanged; only the platform seam differs.
+- **`programs/puka_setu_probe.cyr`** — renders a terminal grid and presents it
+  over setu (the fork-free client half of the `aethersafha` e2e proof).
+- **`programs/puka_setu_term.cyr`** — a real `$SHELL` session presented over setu.
+
+### Changed
+
+- **`[deps.setu]` → 0.3.0** — the reference client transport is now TCP over
+  loopback (`net.cyr`), cross-platform on Linux and agnos, replacing the
+  Linux-only AF_UNIX path. No puka code change beyond the pin — the client API is
+  unchanged.
+
 ## [0.6.3] — 2026-06-19
 
 **Scrollback.** Lines that scroll off the top of the primary screen are retained and
