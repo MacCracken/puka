@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "puka — sovereign Cyrius-native terminal emulator (Ghostty-class: VT/escape parser, cell grid, scrollback, font raster). Hawaiian: opening/doorway into the machine. Foundation for a future worktree coding-agent command center."
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.2.22"
+cyrius = "6.4.71"
 
 [build]
 entry = "src/main.cyr"
@@ -48,6 +48,6 @@ modules = ["dist/mabda.cyr"]
 # loopback:7700 on Linux, and the same wire now runs on agnos). Consume the dist.
 [deps.setu]
 git     = "https://github.com/MacCracken/setu.git"
-tag     = "0.3.0"
+tag     = "0.7.0"
 modules = ["dist/setu.cyr"]
 ---
