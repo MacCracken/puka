@@ -26,7 +26,7 @@ stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "b
 # VGA 9x16) cover the renderer's needs.
 [deps.kashi]
 git     = "https://github.com/MacCracken/kashi.git"
-tag     = "1.0.3"
+tag     = "1.0.4"
 modules = ["src/font_data.cyr"]
 
 # mabda — sovereign GPU foundation crate (native AMD GFX9 backend; the wgpu FFI
@@ -45,9 +45,18 @@ modules = ["dist/mabda.cyr"]
 # persistent client (setu_client_*), so the terminal engine runs unchanged and
 # puka becomes the compositor's first resident app. Pinned to the 0.3.0 tag (the
 # CROSS-PLATFORM TCP transport — item 3b; puka ↔ aethersafha proven e2e over TCP
-# loopback:7700 on Linux, and the same wire now runs on agnos). Consume the dist.
+# loopback:7700 on Linux). Consume the dist.
+# ⛔ RETIRED 2026-08-03 — TCP-on-loopback is the WRONG PRIMITIVE for local display IPC, and that,
+# not a failure, is why it is gone. Scope: "and the same wire now runs on agnos" was NOT YET TRUE
+# when written — before `net_src_for` (agnos 1.56.34) the handshake could not complete on an
+# ordinary boot, and the one passing test of that era ran under the `AETHERSAFHA_SETU_SELFTEST`
+# kernel hook (`net_ip = 0x7F000001`); hook and smoke are deleted. After `net_src_for` it DID
+# connect and present un-rigged (2026-08-02, `aethersafha-clients-test.py`, "connected: 2,
+# presented: 2", one client being `/bin/puka` — QEMU `-smp 1`, never on iron). Replacement is the
+# agnos socket (`anu`), agnos `docs/development/planning/ipc.md` §9/§10. The Linux e2e stands
+# independently; Linux is a different target.
 [deps.setu]
 git     = "https://github.com/MacCracken/setu.git"
-tag     = "0.7.0"
+tag     = "0.7.4"
 modules = ["dist/setu.cyr"]
 ---

@@ -5,25 +5,39 @@
 
 ## Version
 
-**0.6.3** — **cut 2026-06-19, awaiting user tag.** **Scrollback**: a lazily
-heap-allocated ring (`SCROLLBACK_LINES`=1000, primary screen only) captures lines that
-scroll off the top; the renderer reads through viewport-aware accessors (`grid_v*`) —
-live grid at the bottom, history when scrolled back, cursor hidden while back.
-`puka_term` binds **Shift+PageUp/PageDown** (typing snaps to the live bottom). Also
-carried in this cut: the **docs/roadmap handoff sweep** (README + getting-started
-rewritten for the Wayland reality, roadmap M6 reorganized, ADR-0003 records the
-framebuffer→Wayland pivot) and **test-harness entry hygiene** (compliant
-`_entry();`/`SYS_EXIT` across all `tests/*` + `src/test.cyr`). Gate: **477 headless
-tests pass** (was 461; +16 scrollback), VERSION↔cyrius.cyml↔CHANGELOG all `0.6.3`,
-`cyrlint` clean across `src/` + `programs/`. The GPU *cell renderer* (bite 8) remains
-**paused pending mabda**; the daily driver renders cells on CPU `fb.cyr`. **AGNOS-native**
-is post-v1.0; the **command center** is v3. (0.6.2 = GPU foundation + alt-screen; 0.6.1 =
-resize + shell-config; 0.6.0 = Wayland MVP; 0.5.0 = M5 framebuffer [superseded]; 0.4.0 =
-M4 input; 0.3.0 = M3 renderer; 0.2.0 = M2 PTY; 0.1.0 = M1.)
+**0.6.7** (2026-08-02) — see [`../../CHANGELOG.md`](../../CHANGELOG.md). Release narrative belongs there,
+not here; this block was four releases stale (it described 0.6.3, cut 2026-06-19) until 2026-08-02.
+
+Since 0.6.3: **0.6.4** made puka the compositor's first resident (the setu `win_*` backend over the TCP
+transport) · **0.6.5** GPU-visible client buffers (`shm_create_gpu` #86) · **0.6.6** setu 0.7.0 dep
+refresh · **0.6.7** the whole-stack toolchain catch-up.
+
+⛔ **The setu TCP transport is RETIRED (2026-08-03) and puka has NO standing agnos desktop claim on the
+replacement.** It is retired as the WRONG PRIMITIVE for a local display protocol — nothing to route,
+nothing to checksum, no window to negotiate, no business owning a port — not because it never worked.
+Scope the history: **before `net_src_for` (agnos 1.56.34)** it could not complete a compositor↔client
+handshake on an ordinary boot, and the only passing test in that era did so because the
+`AETHERSAFHA_SETU_SELFTEST` kernel hook assigned `net_ip = 0x7F000001` (hook and script deleted; claims
+tracing to them are FALSE GREENS). The replacement transport is the agnos socket (`anu`) — agnos
+`docs/development/planning/ipc.md` §9/§10; puka's "first resident" standing must be re-proven there.
+⚠ The Linux/Wayland edge is unaffected — a different target, not a fallback.
+
+✅ **What DID happen un-rigged, and is not retracted** (2026-08-02, QEMU `-smp 1`, agnos 1.56.34+):
+the honest harness `agnos/scripts/harness/aethersafha-clients-test.py` — which byte-scans `build/agnos`
+and hard-exits if the kernel carries any selftest hook — reached **`connected: 2, presented: 2`**, and
+**one of the two clients was `/bin/puka`** (setu's slim `present_probe`); the other was the real dhancha
+`crab`. ⚠ Scope: QEMU at `-smp 1` only — never shown on iron, and `-smp 4` fault-kills.
+
+⚠ `/bin/puka` as staged for agnos is setu's slim `present_probe`, **not** the full terminal — so the
+result above is a *present-path* proof, not a terminal-on-agnos claim, and it rode the now-retired
+transport. What is retracted is the pre-`net_src_for` rigged-smoke lineage, not this run.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.2.22` (in `cyrius.cyml [package].cyrius`) — tracks the latest language (kashi 1.0.2's pin).
+- **Cyrius pin**: `6.5.5` (in `cyrius.cyml [package].cyrius`)
+- ⚠ **`[deps.mabda]` deliberately held at 3.2.11** while 4.0.8 is on disk — a MAJOR jump, and puka's
+  mabda path is hardware-verified at the old pin. A decision, not drift.
+- ⚠ The pin is documentation, not enforcement: `cyrius build` uses the **installed** `cycc` and only warns.
 
 ## Source
 

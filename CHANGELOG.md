@@ -2,6 +2,21 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.7] - 2026-08-02
+
+### Changed — cyrius pin 6.4.71 -> 6.5.5; kashi 1.0.4, setu 0.7.1
+
+Part of the whole-desktop-stack toolchain catch-up cut on this date.
+
+⚠ **`[deps.mabda]` deliberately held at 3.2.11** while 4.0.8 is on disk. That is a MAJOR version
+jump, and puka's mabda path is hardware-verified at the old one — it is a decision, not an
+oversight, and it wants its own bite rather than a sweep.
+
+⚠ Unrelated but adjacent, recorded so it is not lost: `src/render/pixfmt.cyr` writes byte 3 = 0.
+Harmless on the CPU present path; under agnos's `gpu_shader_op` **#92** op 0x01 (premultiplied
+src-over) a zero alpha byte yields `out = src + dst` — an **additive over-bright ghost**, not a
+vanished window as three other documents in this stack claim. Not fixed here.
+
 ## [0.6.6] - 2026-07-23
 
 ### Changed — setu 0.7.0 (`SETU_SURF_PREMULTIPLIED`) + dep refresh
@@ -27,9 +42,31 @@ No API change and no call-site change here — the buffer id behaves identically
 
 ### Changed — cyrius pin → 6.4.71
 
-## [Unreleased]
-
 ## [0.6.4] — 2026-07-08 — puka is the compositor's first resident (setu client, over the TCP transport)
+
+> ⛔ **RETRACTED 2026-08-03 — the TCP transport this release adopts is RETIRED, and the agnos claims
+> made *in this release's era* are FALSE GREENS.** TCP-on-loopback was the WRONG PRIMITIVE for a local
+> display protocol — nothing to route, nothing to checksum, no window to negotiate, no business owning
+> a port. That, not a failure, is why it is retired.
+>
+> **Scope the history exactly.** *Before* `net_src_for` (agnos 1.56.34) the handshake could not complete
+> on an ordinary boot: the client's SYN carried `net_ip` as its source, so the SYN-ACK came back on a
+> 4-tuple its own conn could not match. The only agnos test that passed in that era,
+> `aethersafha-setu-smoke.sh`, passed because the `AETHERSAFHA_SETU_SELFTEST` kernel hook assigned
+> `net_ip = 0x7F000001` and made src and dst agree by accident; hook and script are both deleted, and
+> the agnos claims in this 0.6.4 entry trace to them. **"cross-platform on Linux and agnos" below was
+> not yet true on agnos when it was written.**
+>
+> ⚠ *After* `net_src_for` it DID work un-rigged. On 2026-08-02 the honest harness
+> `agnos/scripts/harness/aethersafha-clients-test.py` — which byte-scans `build/agnos` and hard-exits if
+> the kernel carries any selftest hook — reached **`connected: 2, presented: 2`**, and **one of those two
+> clients was setu's `present_probe` staged as `/bin/puka`**; the other was the real dhancha `crab`.
+> Scope it honestly: QEMU at `-smp 1`, never shown on iron, `-smp 4` fault-kills. Do not restate this
+> release as "puka never connected on agnos" — it did, later, on an honest kernel.
+>
+> The replacement is the agnos socket (`anu`) — agnos `docs/development/planning/ipc.md` §9/§10.
+> ⚠ The Linux-side end-to-end observation is NOT withdrawn either: Linux is a different target with a
+> different kernel, not an agnos fallback. The `win_*` backend code stands; what it dials changes.
 
 puka gains a **setu client window backend** and becomes `aethersafha`'s first
 resident app: the terminal engine renders a cell grid → pixels and presents them

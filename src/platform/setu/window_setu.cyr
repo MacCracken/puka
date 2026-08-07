@@ -15,6 +15,21 @@
 # win_next_key are present-parity stubs for now. Linux-first (setu AF_UNIX);
 # agnos when the agnos transport (item 3b, native-display-protocol.md) lands.
 #
+# ⛔ ITEM 3b LANDED AS TCP-ON-LOOPBACK AND HAS BEEN RETIRED (2026-08-03) — as the WRONG
+# PRIMITIVE for a local display protocol (nothing to route, nothing to checksum, no window to
+# negotiate, no business owning a port), NOT because it never worked. Scope the history:
+# BEFORE `net_src_for` (agnos 1.56.34) it could not complete a compositor↔client handshake on
+# an ordinary boot, and the only test that passed in that era did so because the
+# `AETHERSAFHA_SETU_SELFTEST` kernel hook assigned `net_ip = 0x7F000001`, making a loopback
+# SYN's source and destination agree by accident — hook and smoke are deleted, and claims
+# resting on them are FALSE GREENS. AFTER `net_src_for` it did work un-rigged: on 2026-08-02
+# the hook-scanning harness `aethersafha-clients-test.py` reached "connected: 2, presented: 2"
+# with setu's `present_probe` (staged as `/bin/puka`) as one of the two clients (QEMU,
+# `-smp 1`; never on iron, `-smp 4` fault-kills). The replacement transport is the agnos socket
+# (`anu`) — agnos `docs/development/planning/ipc.md` §9/§10. This win_* backend is unaffected
+# in shape; only what `setu_client_connect` dials changes.
+# ⚠ The `$SETU_SOCKET` / default path below is ADVISORY and always was — setu ignores it.
+#
 # Co-compiled after [deps.setu]'s dist (setu_client_*); includes nothing.
 
 enum WinAbi {
