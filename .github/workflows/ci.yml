@@ -58,6 +58,20 @@ jobs:
       - name: Verify ELF
         run: xxd -l 4 build/${{ github.event.repository.name }} | grep -q "7f45 4c46"
 
+      - name: Build (agnos target)
+        # ⛔ CI BUILT ONLY LINUX UNTIL 0.6.8, AND puka HAD NEVER BEEN BUILT FOR agnos AT ALL. When the
+        # agnos PTY backend went in, three separate things were found blocking the target — a declared
+        # `mabda` dep whose DRM path uses `SYS_IOCTL` (which agnos does not have) and which NOTHING in
+        # the include graph used; a cyrius pin two minors below the channel-band wrappers; and an enum
+        # that does not resolve from a consumer. None were visible to a Linux-only pipeline.
+        # ⚠ These cannot be RUN here — there is no agnos host — so the gate is the BUILD. That is
+        # enough: every one of those three was a compile-time fact on the agnos arm.
+        run: |
+          mkdir -p build
+          cyrius build --agnos src/main.cyr build/puka_agnos
+          cyrius build --agnos src/test.cyr build/test_agnos
+          echo "agnos target: entry + tests build"
+
       - name: Test
         # bare `cyrius test` runs [build].test AND auto-discovers tests/*.tcyr.
         run: cyrius test

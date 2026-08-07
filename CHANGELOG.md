@@ -2,6 +2,69 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.8] - 2026-08-07 — the AGNOS-native PTY backend (agnos ipc bite 9)
+
+### Added — `src/pty.cyr` has a real agnos arm; the M5 "kernel syscall gap" is closed
+
+The stubs said *"AGNOS-native PTY is M5 (kernel syscall gap)"*. agnos **1.56.40** closed it. A PTY
+decomposes into (i) a bidirectional local channel, (ii) an end handed to a child at spawn, (iii) a line
+discipline — only (iii) is terminal-specific — and agnos now supplies (i) and (ii) directly:
+
+| puka | agnos |
+|---|---|
+| `pty_open` | `sys_chan_mint` — no devpts, no `TIOCGPTN`, no slave path to build |
+| `pty_spawn` | `CH_ENDOW` in PTY mode + `sys_spawn_path` — no fork, no `setsid`, no `TIOCSCTTY` |
+| `pty_pump` / `pty_write` / `pty_close` | `sys_chan_recv` / `sys_chan_send` / `sys_chan_close` |
+
+⛔ **This is not a port of the Linux arm, because there is no `fork()`.** Linux forks, opens the slave,
+makes it the controlling terminal, dup2's it onto 0/1/2 and execs. On agnos the **kernel** installs the
+endowed endpoint at the child's 0/1/2 at spawn time, so the child is *born* holding its terminal and
+never learns it has one — `/bin/agnsh` reads fd 0 with a plain `sys_read`, which is the entire point.
+
+⛔ **The idle wait is a preemptible spin, not `sys_sleep_ms` and not `sched_yield`.** agnos
+`planning/ipc.md` §9.4: sleep_ms is `preempt_disable; sti; hlt` and would starve the very child being
+waited on; sched_yield is a documented silent no-op under a foreground run. The kernel never blocks on
+a channel (one SYSCALL stack per CPU), so waiting is userland's job and must stay preemptible.
+
+⚠ **Honest gaps, stated rather than faked:** no window size (there is no `TIOCSWINSZ` equivalent —
+`rows`/`cols` are accepted and ignored), and `pty_spawn`'s `arg1`/`arg2` **return an error** rather than
+being silently dropped, because `spawn_path #43` takes a path, not an argv vector. `pty_write` is one
+record of ≤ 64 bytes; a longer write is an error, not something to split, since splitting would
+reintroduce message boundaries in userland — the problem the band exists to delete.
+
+### Added — CI builds the `--agnos` target
+
+⛔ **puka had never been built for agnos at all**, and the pipeline could not have told anyone. All
+three blockers found while writing this backend — the `mabda` dep, the stale cyrius pin, the
+unresolvable enum — were compile-time facts on the agnos arm and invisible to a Linux-only CI. The
+entry and the test program now build under `--agnos`. They cannot be *run* (no agnos host), and the
+build is a sufficient gate precisely because each of those failures was a build failure.
+
+### Changed — cyrius pin 6.5.5 → 6.5.9 (a floor, not a preference)
+
+The channel-band wrappers (`sys_chan_*`, the `CH_E_*` result codes) landed in **6.5.8**. On 6.5.5 the
+agnos arm failed with `undefined variable 'CH_E_PEERGONE'` — which reads like a puka bug and is a
+toolchain floor.
+
+### Removed — the `mabda` dependency, which was blocking the entire agnos target
+
+⛔ `dist/mabda.cyr` calls `syscall(SYS_IOCTL, …)` for its DRM path, and **`SYS_IOCTL` does not exist in
+agnos's syscall peer** (agnos has no ioctl). cyrius prepends every declared dep module whether or not
+the entry's include graph reaches it, so the `--agnos` build died with `undefined variable 'SYS_IOCTL'`
+before one line of puka was compiled.
+
+⚠ **And nothing in the build graph used it.** `src/main.cyr` includes parser/grid/unicode/terminal only;
+the sole consumer is `src/platform/gpu/gpu.cyr`, which no entry point includes yet. It was a declared
+dependency on code that is not built, costing a whole target. The 3.2.11 pin was also two majors stale
+(mabda is 4.0.8). ⭐ Restore it — guarded, on a current tag — when the GPU platform is actually wired in.
+
+⚠ **Scope:** `src/main.cyr` is still the M1 headless demo and does not include `pty.cyr` or any
+platform, so nothing exercises this backend yet. Wiring the entry to PTY + the setu renderer is puka's
+M2/M3/M4 and is what remains of agnos ipc bite 9. The backend itself builds on **both** targets and the
+test suite passes.
+
+⚠ `src/grid.cyr` carries pre-existing `cyrius fmt` drift, untouched by this work.
+
 ## [0.6.7] - 2026-08-02
 
 ### Changed — cyrius pin 6.4.71 -> 6.5.5; kashi 1.0.4, setu 0.7.1

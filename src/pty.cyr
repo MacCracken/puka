@@ -133,8 +133,8 @@ fn pty__build_child_env(): i64 {
         # Each entry starts at `pos` and is NUL-terminated by /proc. Drop TERM=.
         var is_term = 0;
         if (load8(&pty_env_buf + pos) == 0x54 && load8(&pty_env_buf + pos + 1) == 0x45 &&
-            load8(&pty_env_buf + pos + 2) == 0x52 && load8(&pty_env_buf + pos + 3) == 0x4D &&
-            load8(&pty_env_buf + pos + 4) == 0x3D) { is_term = 1; }
+        load8(&pty_env_buf + pos + 2) == 0x52 && load8(&pty_env_buf + pos + 3) == 0x4D &&
+        load8(&pty_env_buf + pos + 4) == 0x3D) { is_term = 1; }
         if (is_term == 0) {
             if (np < 125) {                            # leave room for TERM + NULL
                 store64(&pty_env_ptrs + np * 8, &pty_env_buf + pos);
@@ -240,8 +240,144 @@ fn pty_close(): i64 {
 
 #endif
 
+#ifdef CYRIUS_TARGET_AGNOS
+# ============================================================================
+# AGNOS-NATIVE PTY — the `#97` channel band (agnos >= 1.56.40, ipc bite 9)
+# ============================================================================
+# ⭐ THE KERNEL GAP THE STUBS BELOW REFERRED TO IS CLOSED. A PTY decomposes into (i) a bidirectional
+# local channel, (ii) an end handed to a child at spawn, and (iii) a line discipline — only (iii) is
+# terminal-specific (agnos `planning/ipc.md` §1). agnos supplies (i) and (ii) directly:
+#
+#   pty_open   -> `sys_chan_mint`            — no devpts, no TIOCGPTN, no slave path to build
+#   pty_spawn  -> `CH_ENDOW` in PTY mode + `sys_spawn_path` — no fork, no setsid, no TIOCSCTTY
+#   pty_pump   -> `sys_chan_recv`
+#   pty_write  -> `sys_chan_send`
+#   pty_close  -> `sys_chan_close`
+#
+# ⛔ THERE IS NO fork() ON agnos, AND THAT IS WHY THIS IS NOT A PORT OF THE LINUX ARM. The Linux path
+# forks, opens the slave, makes it the controlling terminal, dup2's it onto 0/1/2 and execs. Here the
+# KERNEL installs the endowed endpoint at the child's 0/1/2 at spawn time, so the child is *born*
+# holding its terminal. The child never learns it has one: `/bin/agnsh` reads fd 0 with a plain
+# `sys_read`, and that is the whole point — a channel every program must be rewritten for would be an
+# API, not a PTY.
+#
+# ⚠ NO WINDOW SIZE. There is no TIOCSWINSZ equivalent; `rows`/`cols` are accepted and ignored so the
+# call sites stay identical across targets. A resize-aware protocol is a separate piece of work, and
+# faking it here would let a caller believe the child was told.
+
+var pty_master = 0;          # our end of the channel (0 = unset; fds are > 0 after stdio)
+var pty_child_pid = 0;
+var pty_child_fd = 0 - 1;    # the fd index the child will hold, as returned by CH_ENDOW
+var pty_login_argv0 = 0;     # accepted for source compatibility; agnos spawn takes no argv[0] override
+
+# ⛔ a4 SENTINEL, NOT A BOOLEAN. `ksyscall_a4` doubles as a record LENGTH for SEND/RECV and is not
+# cleared between ops, so PTY mode is keyed to a value no legal length can take. Must match
+# `CH_ENDOW_STDIO` in agnos `kernel/core/syscall.cyr`.
+var PTY_CH_ENDOW_STDIO = 1000;
+
+# ⚠ THE RAW SYSCALL NUMBER AND OP, MIRRORED LOCALLY. The stdlib's `sys_chan_endow(fd)` takes no mode
+# argument, so PTY mode needs the raw form — and the stdlib's `SYS_CHAN_OP` / `CH_ENDOW` enum members
+# do not resolve from a consumer here. Values mirror cyrius `lib/syscalls_x86_64_agnos.cyr:147,174`;
+# keep them in lockstep with that file, which is canonical.
+# ⭐ The right fix is upstream: a `sys_chan_endow_stdio(fd)` wrapper, so no consumer hand-rolls this.
+var PTY_SYS_CHAN_OP = 97;
+var PTY_CH_ENDOW    = 5;
+
+fn pty_set_winsize(fd, rows, cols): i64 { return 0; }   # see the NO WINDOW SIZE note above
+
+fn pty_open(): i64 {
+    var fds = alloc(32);
+    if (sys_chan_mint(fds) != 0) { return 0 - 1; }
+    pty_master = load64(fds);            # we keep this end
+    pty_child_fd = load64(fds + 8);      # the end the child will be given
+    return pty_master;
+}
+
+# Spawn `path` with its stdin/stdout/stderr installed on our channel's far end.
+# ⚠ `arg1`/`arg2` are accepted for source compatibility and NOT passed: agnos `spawn_path #43` takes a
+# path, not an argv vector. Silently dropping them would be worse than refusing, so a caller that
+# supplies one gets an error rather than a child that quietly ran without its arguments.
+fn pty_spawn(path, arg1, arg2, rows, cols): i64 {
+    if (pty_master <= 0) { return 0 - 1; }
+    if (pty_child_fd < 0) { return 0 - 1; }
+    if (arg1 != 0) { return 0 - 2; }     # unsupported here — see above
+    if (arg2 != 0) { return 0 - 2; }
+    # PTY mode: install this endpoint at the child's fd 0, 1 AND 2. The stdlib's `sys_chan_endow`
+    # takes no mode argument, so the raw form is used — a4 is the fifth argument to `syscall`,
+    # matching `sys_chan_send`'s (fd, buf, len) shape.
+    var cfd = syscall(PTY_SYS_CHAN_OP, PTY_CH_ENDOW, pty_child_fd, 0, PTY_CH_ENDOW_STDIO);
+    if (cfd < 0) { return 0 - 1; }
+    var pid = sys_spawn_path(path, strlen(path));
+    if (pid < 0) { return 0 - 1; }
+    pty_child_pid = pid;
+    return pid;
+}
+
+# Pump the child's output into the terminal. Bounded by IDLE rounds so a slow child is tolerated but a
+# dead one cannot hang the caller — same contract as the Linux arm. Returns bytes consumed.
+#
+# ⛔ THE IDLE WAIT IS A PREEMPTIBLE SPIN, NOT `sys_sleep_ms` AND NOT `sched_yield`. agnos
+# `planning/ipc.md` §9.4: sleep_ms is `preempt_disable; sti; hlt` — it would starve the very child
+# this call is waiting for — and sched_yield is a documented silent no-op under a foreground run. The
+# kernel never blocks on a channel (one SYSCALL stack per CPU), so waiting is userland's job and has
+# to stay preemptible or the peer never runs.
+fn pty_pump(max_idle): i64 {
+    if (pty_master <= 0) { return 0; }
+    var buf = alloc(128);
+    var total = 0;
+    var idle = 0;
+    var go = 1;
+    while (go == 1) {
+        var n = sys_chan_recv(pty_master, buf, 128);
+        if (n > 0) {
+            var i = 0;
+            while (i < n) { term_feed(load8(buf + i)); i = i + 1; }
+            total = total + n;
+            idle = 0;
+        }
+        else {
+            # ⛔ PEER_GONE IS EOF; WOULD_BLOCK IS "NOT YET". Collapsing them would either hang on a
+            # dead child or abandon a live one — they are RESULTS to act on, not errors (§9.4).
+            if (n == 0 - CH_E_PEERGONE) { go = 0; }
+            else {
+                idle = idle + 1;
+                if (idle >= max_idle) { go = 0; }
+                var spin = 0;
+                while (spin < 20000) { spin = spin + 1; }
+            }
+        }
+    }
+    return total;
+}
+
+# ⚠ ONE RECORD PER CALL, <= 64 BYTES. The band is a RECORD transport: a longer write is an error, not
+# something to split, because splitting would reintroduce message boundaries in userland — the exact
+# problem the band was chosen to delete. Keystrokes are single bytes, so this bites nothing real today.
+fn pty_write(buf, len): i64 {
+    if (pty_master <= 0) { return 0 - 1; }
+    if (len > 64) { return 0 - 1; }
+    var w = sys_chan_send(pty_master, buf, len);
+    if (w < 0) { return 0 - 1; }
+    return w;
+}
+
+fn pty_wait(): i64 {
+    if (pty_child_pid <= 0) { return 0; }
+    var st = sys_waitpid(pty_child_pid);
+    pty_child_pid = 0;
+    return st;
+}
+
+fn pty_close(): i64 {
+    if (pty_master > 0) { sys_chan_close(pty_master); pty_master = 0; }
+    pty_child_fd = 0 - 1;
+    return 0;
+}
+#endif
+
 #ifndef CYRIUS_TARGET_LINUX
-# Non-Linux stubs. AGNOS-native PTY is M5 (kernel syscall gap).
+#ifndef CYRIUS_TARGET_AGNOS
+# Stubs for every other target (macOS, Windows, EFI): no PTY surface.
 fn pty_open(): i64 { return 0 - 1; }
 fn pty_spawn(path, arg1, arg2, rows, cols): i64 { return 0 - 1; }
 fn pty_pump(max_idle): i64 { return 0; }
@@ -249,4 +385,5 @@ fn pty_write(buf, len): i64 { return 0 - 1; }
 fn pty_wait(): i64 { return 0; }
 fn pty_close(): i64 { return 0; }
 fn pty_set_winsize(fd, rows, cols): i64 { return 0 - 1; }
+#endif
 #endif
