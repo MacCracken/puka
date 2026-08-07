@@ -1,5 +1,5 @@
 commit	b81c14da002e601b72c1f8e053a8da1d452ef302	kashi	https://github.com/MacCracken/kashi.git	1.0.4
-commit	83fddf5427dc960d7654f6602d1ad0b14b1cfea2	setu	https://github.com/MacCracken/setu.git	0.7.4
+commit	91e91a1eebc8bb76fb890aa01521d75385c6dd51	setu	https://github.com/MacCracken/setu.git	0.8.4
 d9f3b17ddbbe1bba48917c3a679807b01c39c4a1ce776efdbdfbb7a1680e86e4  lib/tagged.cyr
 b96a50f8df3b533649d09cd239578811a22097434e09d89b113ce8b7f56801db  lib/net.cyr
 8ac4c97920a8e743acd08fbfe90a5e67d572eae1d31d7cf83bf4fa014c0857e0  lib/syscalls_macos.cyr
@@ -26,7 +26,7 @@ f7b9d52f29de6d3d633962ccc765a76637091a7256eebc1da5547530eed2c44b  lib/args_win.c
 8af62caaa9cdd96bca338a5587526a275a0e36dbfc33066febf81498321f9bb1  lib/bench.cyr
 e46a35925484d3afbfaaac02676f51adaab953608879158d52f1b997fb5920a8  lib/vec.cyr
 92fe6f0e5ffbd6e275e49cdf02e611b522562a2ba5f5ac7e6cf47704542e3dff  lib/io.cyr
-8ace143979c9c49b6c4b971315629ab42941cb8d8d5cfbec4cb4cfc0758bd614  lib/setu.cyr
+dfb0d5b70199614ff8800b80aca42c3b7c4f1ce96fe28d3488ceaf7c2026364d  lib/setu.cyr
 9fd6444e8cfcf7950837e955473adc5bab6d7bf4fa2c15f8ce2578360c4100eb  lib/hashmap.cyr
 f39294af5dc32bec02ec7d2204ca82033abe4f4bafc78e9be792eb178132e244  lib/fnptr.cyr
 5b5dd5a59b766d642d711e8c884780bfe3ba9efd2dcefb3c76230208556e8d54  lib/kashi_font_data.cyr

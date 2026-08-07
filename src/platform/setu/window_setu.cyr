@@ -56,13 +56,17 @@ fn win_backend_select(): i64 { return 1; }   # 1 = setu (0 = wayland)
 fn win_open(title, tlen, cols, rows, cell_w, cell_h, gpu_ctx): i64 {
     var path = getenv("SETU_SOCKET");
     if (path == 0) { path = "/tmp/aethersafha-setu.sock"; }
+    syscall(1, 1, "setuwin: connecting\n", 20);
     var c = setu_client_connect(path);
-    if (c == 0) { return 0; }
+    if (c == 0) { syscall(1, 1, "setuwin: connect FAILED\n", 24); return 0; }
+    syscall(1, 1, "setuwin: connected\n", 19);
     setuwin_client = c;
     win_w = cols * cell_w;
     win_h = rows * cell_h;
     var nbytes = win_w * win_h * 4;
     setuwin_buf = alloc(nbytes);
+    if (setuwin_buf == 0) { syscall(1, 1, "setuwin: present-buffer alloc FAILED\n", 37); return 0; }
+    syscall(1, 1, "setuwin: buffer ok\n", 19);
     memset(setuwin_buf, 0, nbytes);
     return 1;
 }

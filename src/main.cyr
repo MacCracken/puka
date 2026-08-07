@@ -9,8 +9,24 @@ include "src/parser.cyr"
 include "src/grid.cyr"
 include "src/unicode.cyr"
 include "src/terminal.cyr"
+include "src/render/pixfmt.cyr"
+include "src/render/atlas.cyr"
+include "src/render/fb.cyr"
+include "src/platform/setu/window_setu.cyr"
+include "src/pty.cyr"
 
 var demo_buf[256];
+
+fn puka__say(s, n): i64 { return syscall(1, 1, s, n); }
+
+# kashi's built-in VGA cell is 8x16; the grid is the classic 80x24. PUKA_FRAMES = 0 means run until
+# the child exits — a positive value bounds the loop for harnesses that must not hang.
+var PUKA_CELL_W = 8;
+var PUKA_CELL_H = 16;
+var PUKA_ROWS   = 24;
+var PUKA_COLS   = 80;
+var PUKA_FRAMES = 0;
+var PUKA_SHELL  = "/bin/agnsh";
 
 fn puka_demo(): i64 {
     term_init(24, 80);
@@ -32,8 +48,99 @@ fn puka_demo(): i64 {
     return 0;
 }
 
+# ⭐⭐ THE TERMINAL. Window + PTY + engine + renderer, wired end to end — a real shell hosted in a
+# composited window. This is what M1's demo was a placeholder for, and on agnos it is the remaining
+# half of ipc bite 9 ("a live agnsh prompt in a composited window").
+#
+# The loop is deliberately small, because every hard part already lives behind a seam:
+#   pty_pump   -> reads the child and feeds term_feed  (src/pty.cyr; on agnos, the #97 channel band)
+#   fb_render  -> paints the cell grid into an RGB buffer
+#   pix_blit   -> RGB -> the backend's XRGB8888 present buffer
+#   win_*      -> setu (src/platform/setu/window_setu.cyr)
+#
+# Returns 0 on a clean exit, or -1 when no window/PTY is available so the caller can fall back.
+fn puka_terminal(rows, cols, frames): i64 {
+    puka__say("puka: term_init\n", 16);
+    term_init(rows, cols);
+    puka__say("puka: fb_init\n", 14);
+    fb_init(PUKA_CELL_W, PUKA_CELL_H);
+    puka__say("puka: win_open\n", 15);
+    # ⚠ SAY WHICH STEP FAILED. All three failures below look identical from outside — a blank window,
+    # or no window at all — and on agnos three processes share one console, so a numeric code printed
+    # here lands mid-line inside another proc's output. Distinct ASCII lines survive interleaving.
+    if (win_open("puka", 4, cols, rows, PUKA_CELL_W, PUKA_CELL_H, 0) == 0) {
+        puka__say("puka: no display -- win_open failed (falling back to the demo)\n", 63);
+        return 0 - 1;
+    }
+    if (pty_open() < 0) {
+        puka__say("puka: no pty -- pty_open failed\n", 32);
+        win_close(0); return 0 - 1;
+    }
+    # ⚠ Spawned with NO argv. `pty_spawn` refuses arg1/arg2 on agnos rather than dropping them
+    # silently, because `spawn_path #43` takes a path and not an argv vector — a shell that quietly
+    # ignored its flags would be worse than one that refuses to start.
+    if (pty_spawn(PUKA_SHELL, 0, 0, rows, cols) < 0) {
+        puka__say("puka: shell would not spawn\n", 28);
+        pty_close(); win_close(0); return 0 - 1;
+    }
+    puka__say("puka: terminal up -- 80x24, shell on a pty\n", 43);
+
+    var f = 0;
+    var live = 1;
+    while (live == 1) {
+        # ⚠ A SMALL IDLE BUDGET, NOT A BLOCKING READ. `pty_pump` returns once the child has been
+        # quiet for `max_idle` rounds, so a silent shell costs one cheap poll per frame instead of
+        # stalling the frame loop — the same "the batch IS the poll" shape the channel band is built
+        # around (agnos planning/ipc.md §9.4).
+        pty_pump(2);
+
+        fb_render();
+        var dst = win_present_begin(0);
+        if (dst != 0) {
+            pix_blit_region(fb_buf(), fb_width(), 0, fb_height(), dst, fb_width());
+            var prc = win_present_commit(0, 0, 0, fb_width(), fb_height());
+            if (f == 0) {
+                if (prc == 0) { puka__say("puka: first present ok\n", 23); }
+                else { puka__say("puka: first present REFUSED\n", 28); }
+            }
+        }
+        else { if (f == 0) { puka__say("puka: no present buffer\n", 24); } }
+
+        # Input: one key per poll, forwarded to the child as raw bytes. `win_next_key` fills
+        # [codepoint, mods, state]; only presses with a byte value are sent.
+        var kev = alloc(32);
+        if (win_next_key(0, kev) == 1) {
+            var cp = load64(kev);
+            if (cp > 0) {
+                if (cp < 128) {
+                    var kb = alloc(8);
+                    store8(kb, cp);
+                    pty_write(kb, 1);
+                }
+            }
+        }
+
+        f = f + 1;
+        if (frames > 0) { if (f >= frames) { live = 0; } }
+    }
+
+    pty_close();
+    win_close(0);
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
+    puka__say("puka: start\n", 12);
+    args_init();
+    # ⛔ THE DEMO IS THE FALLBACK, NOT THE DEFAULT-BY-ACCIDENT. puka tries to be a terminal first and
+    # only prints the M1 canned stream when there is no compositor to host it — so a missing display
+    # server degrades to something visible instead of an empty screen, and CI (which has no
+    # compositor) still exercises the parse -> grid -> render path exactly as it did before.
+    if (argc() > 1) {
+        if (load8(argv(1)) == 100) { puka_demo(); return 0; }    # 'd' -> --demo
+    }
+    if (puka_terminal(PUKA_ROWS, PUKA_COLS, PUKA_FRAMES) == 0) { return 0; }
     puka_demo();
     return 0;
 }
