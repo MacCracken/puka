@@ -60,11 +60,8 @@ fn puka_demo(): i64 {
 #
 # Returns 0 on a clean exit, or -1 when no window/PTY is available so the caller can fall back.
 fn puka_terminal(rows, cols, frames): i64 {
-    puka__say("puka: term_init\n", 16);
     term_init(rows, cols);
-    puka__say("puka: fb_init\n", 14);
     fb_init(PUKA_CELL_W, PUKA_CELL_H);
-    puka__say("puka: win_open\n", 15);
     # ⚠ SAY WHICH STEP FAILED. All three failures below look identical from outside — a blank window,
     # or no window at all — and on agnos three processes share one console, so a numeric code printed
     # here lands mid-line inside another proc's output. Distinct ASCII lines survive interleaving.
@@ -131,14 +128,20 @@ fn puka_terminal(rows, cols, frames): i64 {
 
 fn main(): i64 {
     alloc_init();
-    puka__say("puka: start\n", 12);
     args_init();
     # ⛔ THE DEMO IS THE FALLBACK, NOT THE DEFAULT-BY-ACCIDENT. puka tries to be a terminal first and
     # only prints the M1 canned stream when there is no compositor to host it — so a missing display
     # server degrades to something visible instead of an empty screen, and CI (which has no
     # compositor) still exercises the parse -> grid -> render path exactly as it did before.
+    # ⛔ SKIP THE DASHES BEFORE COMPARING. This read `load8(argv(1)) == 100` ('d') against the FIRST
+    # byte, which for `--demo` is '-' (45) — so the flag never matched and `--demo` reached the demo
+    # only by falling through the terminal path and failing. It printed two failure lines on the way,
+    # which is exactly what an explicitly-requested mode must not do.
     if (argc() > 1) {
-        if (load8(argv(1)) == 100) { puka_demo(); return 0; }    # 'd' -> --demo
+        var a = argv(1);
+        var di = 0;
+        while (load8(a + di) == 45) { di = di + 1; }              # skip leading '-'
+        if (load8(a + di) == 100) { puka_demo(); return 0; }      # 'd' -> -d / --demo
     }
     if (puka_terminal(PUKA_ROWS, PUKA_COLS, PUKA_FRAMES) == 0) { return 0; }
     puka_demo();

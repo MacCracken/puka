@@ -2,6 +2,63 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.9] - 2026-08-07 — puka is a TERMINAL: a live agnsh in a composited window
+
+⭐⭐ **`src/main.cyr` was still the M1 headless demo.** It now opens a setu window, mints a PTY on the
+agnos `#97` channel band, spawns `/bin/agnsh` onto it, and paints the shell's output as glyphs into the
+window it presents. That completes agnos **ipc bite 9** — *"a live agnsh prompt in a composited window,
+the gate no candidate could pass"*.
+
+The frame loop is small because every hard part already sat behind a seam, which is what the seams were
+for: `pty_pump` reads the child and feeds `term_feed` · `fb_render` paints the cell grid ·
+`pix_blit_region` converts RGB → the backend's XRGB8888 buffer · `win_*` is the setu backend.
+
+### Fixed — `--demo` matched the wrong byte and reached the demo only by failing
+
+⛔ The flag check compared the FIRST byte of `argv(1)` against `'d'`, which for `--demo` is `'-'`. The
+flag never matched: `--demo` reached the demo by falling through the terminal path and failing, printing
+two display-failure lines on the way. An explicitly requested mode must not report failures for a thing
+it was told not to attempt. Leading dashes are now skipped, so `-d` and `--demo` both match.
+
+⚠ **The fallback path still explains itself** — that is the difference between the two, and it is the
+point: no flag means "be a terminal if you can", and the reason it could not is worth printing.
+
+⚠ **The demo is now the FALLBACK, not the default.** puka tries to be a terminal first and prints the
+M1 canned stream only when there is no compositor to host it — so a missing display degrades to
+something visible, and CI (which has none) still exercises parse → grid → render exactly as before.
+
+### Changed — setu pin 0.7.4 → 0.8.4
+
+⛔ **0.7.4 predates the channel-band cutover and has no agnos arm at all**, so `setu_client_connect`
+returned 0 on agnos with none of setu's own refusal messages — a silent failure that looks like "no
+compositor running" and is not. `window_setu.cyr` now says so explicitly when a connect is refused.
+
+### Verified — `harness/puka-terminal-test.py` (in agnos)
+
+**PASS, three consecutive runs, deterministic.** puka opens a window + PTY, presents its surface, the
+compositor sees a client, and the panel carries **4991 pixels of exact RGB (192,192,192)** — puka's
+`fb_def_fg`.
+
+⭐ **The oracle is external and controlled.** Measured negative control: the same desktop WITHOUT puka
+has **0** such pixels. Nothing else on screen uses that colour — the compositor's chrome is dark greys
+and cyan — so a nonzero count means glyphs were rasterised and composited, not merely that a window
+appeared. puka's own markers and the compositor's claim are self-reports by the programs under test;
+the pixel count is the only witness that is neither.
+
+⚠ **The gate had to stop racing the clock.** On a fixed capture delay one run in three screendumped
+before puka's first present and reported 0 glyph px on a boot where everything worked — which reads as
+a rendering failure rather than a capture taken too early. The capture now waits for puka's
+"first present ok" marker. A timing-dependent oracle that sometimes says zero is worse than none: it
+teaches you to distrust a real red.
+
+⚠ **`/bin/puka` is overridden in that harness's seed only.** The shared rootfs stages setu's slim
+`present_probe` under that name, and `aethersafha-clients-test.py`'s oracle counts *its* colours —
+swapping the shared rootfs would silently invalidate a passing gate. Confirmed still PASS (3500 px).
+
+⚠ **Input is wired but unexercised.** `win_next_key` is still a stub in the setu backend, so keystrokes
+reach `pty_write` only once the compositor's key forwarding is consumed. Output, PTY and rendering are
+proven; typing is not.
+
 ## [0.6.8] - 2026-08-07 — the AGNOS-native PTY backend (agnos ipc bite 9)
 
 ### Added — `src/pty.cyr` has a real agnos arm; the M5 "kernel syscall gap" is closed
