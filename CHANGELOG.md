@@ -2,7 +2,7 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — puka EXITS when the compositor closes its window
+## [0.6.11] - 2026-08-08 — puka EXITS when the compositor closes its window
 
 ⛔⛔ **puka used to ignore being closed.** aethersafha's F4 removed the window from its own vector and
 told nobody, so on the 2026-08-08 iron burn the terminal was left **orphaned alive** — still holding its
