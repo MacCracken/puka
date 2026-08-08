@@ -2,6 +2,28 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased] — puka EXITS when the compositor closes its window
+
+⛔⛔ **puka used to ignore being closed.** aethersafha's F4 removed the window from its own vector and
+told nobody, so on the 2026-08-08 iron burn the terminal was left **orphaned alive** — still holding its
+`#97` channel end and its `#86` GPU-visible shm slot, of which there are only **16 system-wide**. The
+operator saw it as *"not closing properly"*.
+
+⭐ **The platform layer already had the vocabulary**: `WIN_EV_CLOSE` exists because the wayland backend
+raises it (`src/platform/window.cyr:18`, `:101`). The setu backend now raises it too, on `SETU_CLOSE`
+(kind 7 — in the protocol from the start, never sent and never handled), and the frame loop drops `live`
+so the existing `pty_close` + `win_close` teardown runs. ⚠ That teardown and the process exit are what
+release the endpoint and the slot; the kernel reclaims them on process death.
+
+⚠ **`win_poll_events` is now called ONCE per frame with its result captured.** It consumes a message per
+call, so testing its return value twice would have dropped every other event.
+
+⚠ **Recorded, not silently fixed:** the `WIN_EV_KEY` test is equality, and `WIN_EV_*` are powers of two
+that the wayland backend ORs together — so on the host path a frame carrying both a key and a frame-done
+reports `KEY | FRAME` and the key is missed. That is a latent **host-build** defect (the setu backend
+returns single events), and fixing it changes behaviour on a path this change does not exercise. The new
+`CLOSE` test uses a bit test for exactly this reason.
+
 ## [0.6.10] - 2026-08-07 — the LINE DISCIPLINE: a shell you can type into, iron-proven
 
 ⭐ `win_poll_events` / `win_next_key` are no longer stubs in the setu backend. The compositor forwards

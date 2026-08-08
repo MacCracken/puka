@@ -142,6 +142,15 @@ fn win_poll_events(win): i64 {
     if (setuwin_client == 0) { return WIN_EV_NONE; }
     var m = setu_msg_new();
     if (setu_client_poll_input(setuwin_client, m) != 1) { return WIN_EV_NONE; }
+    # ⛔⛔ THE COMPOSITOR CLOSED OUR WINDOW. Report it as `WIN_EV_CLOSE` — the platform layer already
+    # has that event because the wayland backend raises it (src/platform/window.cyr:18, :101), so the
+    # engine above needs no new vocabulary, only this wire.
+    # ⚠ Until this landed, aethersafha's F4 removed the window from its own list and told nobody, so
+    # puka kept running: on the 2026-08-08 iron burn the terminal was left **orphaned alive** with its
+    # `#97` channel end and its `#86` GPU-visible shm slot held for the rest of the boot — and there
+    # are only 16 of those slots system-wide. Our EXIT is what releases them.
+    # ⚠ `SETU_CLOSE` (kind 7) has always been in the protocol; it was never sent and never handled.
+    if (setu_msg_kind(m) == SETU_CLOSE) { return WIN_EV_CLOSE; }
     if (setu_msg_kind(m) != SETU_INPUT_KEY) { return WIN_EV_NONE; }
     var code = setuwin__hid_to_evdev(setu_msg_arg(m, 1));
     if (code == 0) { return WIN_EV_NONE; }               # unmapped usage — drop, never guess

@@ -184,7 +184,30 @@ fn puka_terminal(rows, cols, frames): i64 {
         # backend produces, so `input_from_keycode` (the shared keycode->child-bytes bridge) does the
         # encoding for both. That is why arrows and named keys come out as proper CSI sequences here
         # instead of a hand-rolled byte: the encode discipline already existed and is not duplicated.
-        if (win_poll_events(0) == WIN_EV_KEY) {
+        # ⚠ CALLED ONCE, RESULT CAPTURED. `win_poll_events` CONSUMES a message per call, so testing its
+        # return value twice would drop every other event — which is why this is a variable and not two
+        # calls.
+        var wev = win_poll_events(0);
+        # ⛔⛔ THE COMPOSITOR CLOSED OUR WINDOW (setu `SETU_CLOSE`, or a dead wayland connection). Leave
+        # the loop so `pty_close` + `win_close` below run: that teardown, and the process exit after it,
+        # is what releases the `#97` channel end and the `#86` GPU-visible shm slot back to the kernel.
+        # ⚠ Until this landed, aethersafha's F4 removed the window and told nobody, so puka kept running
+        # forever — on the 2026-08-08 iron burn the terminal was left orphaned ALIVE holding one of only
+        # 16 system-wide shm slots for the rest of the boot. "Not closing properly", exactly as reported.
+        # ⚠ TESTED AS A BIT, NOT FOR EQUALITY. `WIN_EV_*` are powers of two and the wayland backend ORs
+        # them together (src/platform/window.cyr:100-108), so `CLOSE | FRAME` is a value this can really
+        # carry. The setu backend returns one event at a time, so equality happens to work there — which
+        # is exactly the kind of accident that holds until the other backend is used.
+        if ((wev & WIN_EV_CLOSE) != 0) {
+            puka__say("puka: compositor closed the window -- exiting\n", 46);
+            live = 0;
+        }
+        # ⚠ LEFT AS EQUALITY, DELIBERATELY, and it is mask-fragile: on the wayland path a frame that
+        # carries both a key and a frame-done reports `KEY | FRAME` and this test misses the key. That is
+        # a latent host-build defect, not an agnos one (the setu backend returns single events), and
+        # fixing it changes behaviour on a path this change does not exercise. Recorded, not silently
+        # altered — see the note above for why the CLOSE test above does use a bit test.
+        if (wev == WIN_EV_KEY) {
             var kev = alloc(32);
             if (win_next_key(0, kev) == 1) {
                 # ⭐ ONE LINE PER KEY, ON PURPOSE — this is a COUNT, not a first-occurrence latch.
