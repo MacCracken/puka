@@ -2,7 +2,7 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — terminal INPUT: keystrokes reach agnsh's stdin
+## [0.6.10] - 2026-08-07 — the LINE DISCIPLINE: a shell you can type into, iron-proven
 
 ⭐ `win_poll_events` / `win_next_key` are no longer stubs in the setu backend. The compositor forwards
 `SETU_INPUT_KEY` carrying the **HID usage code** — not a codepoint and not an evdev keycode — so the
@@ -43,7 +43,6 @@ build turned the fix into a controlled experiment for free.
 ⇒ **The line discipline is now hardware-validated in both directions: ICRNL + echo + erase + ONLCR.**
 ⭐ And the layout gate's QEMU calibration transferred to the panel — because the numbers were derived from
 the **mutant**, not from a passing run.
-
 
 ⛔ **The same burn rendered agnsh's output as a STAIRCASE** — every line starting where the previous one
 ended, then breaking mid-word at the right edge. Reported as *"doesn't appear to respect the window
