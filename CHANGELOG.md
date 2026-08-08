@@ -32,7 +32,18 @@ keys arrived (crab 2, puka 17). A 6.40 ms GPU frame polls fast enough. ⚠ Still
 ⭐ `puka: byte refused by the line discipline` fired once — the Esc that quit the compositor was forwarded
 here too, and correctly declined rather than entering a command line.
 
-### Fixed — ONLCR: the child's bare LF must also return the carriage (the burn found this)
+### Fixed — ONLCR: the child's bare LF must also return the carriage (the burn found this, a re-flash confirmed it)
+
+⭐⭐ **RE-FLASHED AND CONFIRMED ON IRON, same day.** Operator: *"flashed and clean… puka displays shell in
+terminal as expected with expected wrap."* The kernel was **byte-identical** across the two flashes (same
+1,969,248 B artifact, same burn-tag, re-prepped from unchanged source), so **`/bin/puka` was the only
+variable** — the staircase and its absence are attributable to the terminal and nothing else. A reproducible
+build turned the fix into a controlled experiment for free.
+
+⇒ **The line discipline is now hardware-validated in both directions: ICRNL + echo + erase + ONLCR.**
+⭐ And the layout gate's QEMU calibration transferred to the panel — because the numbers were derived from
+the **mutant**, not from a passing run.
+
 
 ⛔ **The same burn rendered agnsh's output as a STAIRCASE** — every line starting where the previous one
 ended, then breaking mid-word at the right edge. Reported as *"doesn't appear to respect the window
