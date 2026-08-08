@@ -2,6 +2,160 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased] — terminal INPUT: keystrokes reach agnsh's stdin
+
+⭐ `win_poll_events` / `win_next_key` are no longer stubs in the setu backend. The compositor forwards
+`SETU_INPUT_KEY` carrying the **HID usage code** — not a codepoint and not an evdev keycode — so the
+seam translates before handing anything to the engine.
+
+⭐ **HID usage → evdev keycode is the PS/2 set-1 make code for the main block**, because Linux derived
+its keycodes from set-1 (Esc 1, digits 2..11, A 30, Enter 28, Backspace 14, Tab 15, Space 57). The
+agnos kernel carries the same mapping for its own console (`hid_usage_to_ps2`), so this is that table's
+shape rather than a second invention. An **unmapped usage returns 0 and is dropped** — emitting a wrong
+keycode would type a plausible character the user never pressed.
+
+The decoded keycode then goes through `input_from_keycode`, the SAME keycode→child-bytes bridge the
+Wayland backend uses, so arrows and named keys produce proper CSI sequences instead of a hand-rolled
+byte. The encode discipline already existed and is not duplicated.
+
+### ⭐⭐ IRON-PROVEN 2026-08-07 — a live agnsh answering in a composited window, on real silicon
+
+The `AE-T2` work below was burned on archaemenid (AGNOS 1.56.41, `smp: cpus online: 4`) and **passed**:
+`puka: terminal up -- 80x24, shell on a pty` → `first present ok` → TAB → **`puka: key received` ×5**
+(`h-e-l-p-Enter`, not one keystroke lost) → **`puka: line sent to the shell`**, and the panel shows agnsh's
+help output rendered with a live `[ASSIST] >` prompt. 278 frames, clean Esc.
+
+⭐ **The QEMU key-loss defect did NOT reproduce.** QEMU lost 5 of 9 keys at a ~100 ms hold because the xHCI
+HID ring is drained once per compositor frame; on iron the operator typed at human speed and **19 of 19**
+keys arrived (crab 2, puka 17). A 6.40 ms GPU frame polls fast enough. ⚠ Still real for any slow frame.
+
+⭐ `puka: byte refused by the line discipline` fired once — the Esc that quit the compositor was forwarded
+here too, and correctly declined rather than entering a command line.
+
+### Fixed — ONLCR: the child's bare LF must also return the carriage (the burn found this)
+
+⛔ **The same burn rendered agnsh's output as a STAIRCASE** — every line starting where the previous one
+ended, then breaking mid-word at the right edge. Reported as *"doesn't appear to respect the window
+wrapping"*. **It is neither**, and width was eliminated by measurement before anything changed: agnsh's
+longest `help` line is **77 of 80 columns**, so nothing on that screen should have wrapped.
+
+- agnsh emits a **bare LF**, like every agnos program, because the agnos kernel console makes LF mean
+  newline **and** carriage return (`agnos/kernel/arch/x86_64/fb_console.cyr:1051-1053`).
+- puka's engine is a **correct VT100**: LF is `term_index()`, down one row and nothing else.
+- ⇒ Line 2 began at column 53 where line 1 ended, overflowed 80, and broke mid-word. Every fragment in
+  that photograph is arithmetic.
+
+Every Unix tty closes this with **ONLCR** on the output path. This repo shipped ICRNL, echo and erase — the
+**input half only** — and the echo code even stated the rule (*"a bare LF would stair-step every line to
+the right"*) without applying it to the child's output. **One half of a line discipline is not a line
+discipline.** New `ld_out_needs_cr` / `ld_out_feed`, called by `pty_pump`, gated on `LD_OWNED_HERE` so Linux
+devpts (which already does ONLCR) is untouched. Follows POSIX ONLCR exactly: NL → CR-NL unconditionally, no
+look-back, because a second carriage return is idempotent.
+
+⛔ **Deliberately NOT fixed in the shell.** Every agnos program emits bare LF for the same correct reason,
+so patching agnsh would leave owl, kriya and `iam` broken in a window and add stray CRs to their console
+output. The terminal owns it — *"the child never learns it has one."*
+
+⛔⛔ **The lesson is about the instrument: a pixel count cannot see a layout defect.**
+`puka-terminal-test.py` passed this build **before and after** the fix with byte-identical numbers
+(4991 → 5176 → 6032 both times), because a staircase draws **exactly the same characters** and only puts
+them in the wrong places. The gate was blind by construction; the operator's eye was the only oracle that
+could see it. It now counts occupied **text rows** — calibrated on both arms of the same build in QEMU:
+**correct = 6 · staircase = 8 · ceiling 7**.
+
+**49/49** in `tests/line_discipline.tcyr` (was 37), including a negative control that reproduces the
+staircase in the real engine (raw LF leaves the cursor at column 3) and an end-to-end check that two real
+agnsh help lines occupy exactly two rows. ⚠ The first version of that test reimplemented `pty_pump`'s loop
+inside the test file, so deleting the real call site would have left it green — the shared `ld_out_feed`
+exists so the test and the pump run the same code.
+
+### ⭐⭐ The shell now ANSWERS — a line discipline, and it was one byte
+
+**`src/line_discipline.cyr`** (new) is decomposition item **(iii)**: a PTY is a bidirectional local
+channel, an end handed to a child at spawn, and a line discipline. agnos supplies the first two on the
+`#97` band and deliberately supplies none of the third — there is no termios, no ICRNL, no ECHO — so it
+belongs in the terminal.
+
+⛔ **The defect was a single byte, traced statically end to end with no burn and no probe.** Enter is HID
+usage `0x28` → evdev keycode 28 → `evdev__keymap` returns **`0x0D`** (`input/evdev.cyr:74`, "Enter -> CR")
+→ `utf8_encode` → the single byte **13** on the child's stdin. agnoshi's `read_line` terminates a line on
+**`ch == 10`** and on nothing else (`agnoshi/src/agnsh.cyr:366`). CR is 13, so the line could never
+complete: every keystroke, Enter included, accumulated in the shell's carry buffer while it correctly
+waited forever. ⭐ **puka is right to send CR** — a terminal sends CR for Enter (VT100/xterm), and the
+byte that reaches a program is LF because a discipline translated it. On Linux devpts does that (ICRNL),
+which is exactly why `tests/input_pty.tcyr` passed on the host and proved nothing about agnos.
+
+⛔ **The previous entry's hypothesis was aimed right and wrong in mechanism**, and is corrected rather
+than deleted: it read *"something in its agnos `read_line` path is not completing a line from single-byte
+records"*. Single-byte records accumulate **correctly** — `agnsh.cyr:363-375` refills and keeps
+accumulating across as many reads as it takes. Nothing about record size was ever wrong. What was missing
+was **CR→LF and echo**.
+
+**Cooked, not a pass-through translate**, and the reason is erase: agnsh has no backspace handling of its
+own (the kernel console line discipline used to do it), so a BS forwarded to the child would leave the
+mistyped byte in its buffer while the screen showed it gone — **the screen would lie about what the shell
+is about to run**. Buffering the line here means the child receives exactly one complete, edited line,
+byte-for-byte the contract agnsh already has with the console. The child cannot tell the difference.
+
+- **CR or LF terminates** — the completed line is copied out with a trailing LF and the pending buffer is
+  cleared **inside `ld_feed`**, so no caller has to remember to reset one. A caller that forgot would
+  silently prepend the previous command to the next, which reads as a shell bug rather than a terminal one.
+- **DEL (`0x7F`, what Backspace encodes to) and BS erase**, and on an empty line emit **nothing** — an
+  unconditional erase walks the cursor left over the shell's own prompt.
+- **Echo is puka's job now.** agnsh does not echo, deliberately: on the console *"the kernel now owns echo
+  + line discipline"*. A channel fd has no kernel echo, which was the second half of why the panel never
+  changed — a byte that arrived perfectly was invisible.
+- ⛔ **Every byte is either shown and sent, or refused and counted — never sent-but-unshown.** Control
+  bytes and CSI sequences are **refused** (`ld_drops_get`, and a console line per refusal) rather than
+  forwarded un-echoed: agnsh has no line editor, so a forwarded `ESC[A` would land in its line as `^[[A`
+  and make the command unrunnable while the screen showed nothing.
+- A line is handed over in **≤64-byte records**, because the band is a record transport. Not a carve-out:
+  the kernel rules on exactly this case at `agnos/kernel/core/syscall.cyr:7257-7266` — *"a stream writer's
+  bytes arrive as several records — which is exactly what a tty does"*.
+
+**`LD_OWNED_HERE`** gates it — 1 on agnos, **0 on Linux**, where devpts already cooks and echoes and
+running ours would translate CR twice and print every character twice. It is a variable rather than an
+`#ifdef` at the call site, so both paths compile on both targets and the cooked path stays reachable from
+a host test.
+
+### Measured — QEMU, agnos 1.56.41, `AE_CLIENTS_MODE=desktop`
+
+`agnos/scripts/harness/puka-terminal-test.py`, repeated and byte-identical across runs:
+
+| | |
+|---|---|
+| keys delivered to puka | **9 of 9** forwarded (tab is consumed by the compositor) |
+| keystrokes echoed | glyph px **4991 → 5176** |
+| a completed line reached the shell | **yes** |
+| **the shell answered** | glyph px **5176 → 6032** (floor +52, derived from this run's own scale) |
+
+**37/37** in the new `tests/line_discipline.tcyr` (host), **13 suites green**, both targets build.
+⛔ **QEMU only — never burned.**
+
+### ⚠ Found on the way: keys are LOST when a frame is slower than a keypress
+
+Not a terminal defect, recorded because it presents as one. **A USB HID keyboard reports state on poll; it
+does not queue events.** agnos drains the xHCI HID ring only inside `kbscan #42`'s bounded `sti` window
+(`agnos/kernel/core/syscall.cyr:8746-8757`), and the compositor calls that **once per frame** — so a key
+whose press and release both complete inside one frame is never sampled at all.
+
+Measured on the QEMU CPU composite path at QEMU's default ~100 ms hold: **0 of 9**, **4 of 9**, **4 of 9**
+keys delivered. ⚠ The 4-of-9 runs still completed a line and got an answer, which is precisely what makes
+this so easy to misread as a line-discipline bug. At a 500 ms hold: **9 of 9**, twice, deterministically.
+
+⚠ **A human holds a key ~100 ms and would lose keys on this same path.** The fix is a faster frame
+(`AE-0a`) or IRQ-buffered HID reports — system work, not terminal work. The harness now counts delivered
+keys and names the layer, so the loss can never hide behind a terminal verdict again.
+
+### ⚠ Shift is still not reachable
+
+⚠ A press-only surface (the default, and what a terminal wants —
+FULL_KEYS would double-type every character) carries no modifier state in the message, and the
+compositor does not forward the HID modifier byte as a usage. The engine therefore sees unshifted
+keycodes. Stated rather than faked: inventing a mods value would silently produce the wrong glyph.
+
+⚠ Requires aethersafha's **unreleased** TAB focus-cycling fix to be typable at all with two clients.
+
 ## [0.6.9] - 2026-08-07 — puka is a TERMINAL: a live agnsh in a composited window
 
 ⭐⭐ **`src/main.cyr` was still the M1 headless demo.** It now opens a setu window, mints a PTY on the

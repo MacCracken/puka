@@ -9,6 +9,12 @@ include "src/parser.cyr"
 include "src/grid.cyr"
 include "src/unicode.cyr"
 include "src/terminal.cyr"
+# ⚠ line_discipline.cyr is required because pty.cyr's agnos `pty_pump` applies ONLCR through it
+# (`LD_OWNED_HERE` + `ld_out_needs_cr`). It is PURE — no syscalls, no deps, includes nothing — so adding
+# it to a unit costs nothing. ⛔ A cyrius VARIABLE forward-reference does not resolve and an undefined
+# FUNCTION is a hard error, so a cross-module reference added to pty.cyr breaks every test unit that
+# compiles pty.cyr without this line, while `cyrius build src/main.cyr` stays green. Run `cyrius test`.
+include "src/line_discipline.cyr"
 include "src/pty.cyr"
 include "src/input.cyr"
 

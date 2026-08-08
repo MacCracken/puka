@@ -9,6 +9,10 @@ include "src/parser.cyr"
 include "src/grid.cyr"
 include "src/unicode.cyr"
 include "src/terminal.cyr"
+include "src/input.cyr"
+include "src/input/evdev.cyr"
+include "src/input/keymap.cyr"
+include "src/line_discipline.cyr"
 include "src/render/pixfmt.cyr"
 include "src/render/atlas.cyr"
 include "src/render/fb.cyr"
@@ -19,6 +23,11 @@ var demo_buf[256];
 
 fn puka__say(s, n): i64 { return syscall(1, 1, s, n); }
 
+# First-occurrence latch for the "a line reached the shell" marker. ⚠ puka's own fd 1 is the CONSOLE
+# (the compositor's inherited stdio); only the CHILD's stdio rides the channel, which is why these land
+# in the serial log rather than inside the terminal window.
+var puka_line_marked = 0;
+
 # kashi's built-in VGA cell is 8x16; the grid is the classic 80x24. PUKA_FRAMES = 0 means run until
 # the child exits — a positive value bounds the loop for harnesses that must not hang.
 var PUKA_CELL_W = 8;
@@ -27,6 +36,11 @@ var PUKA_ROWS   = 24;
 var PUKA_COLS   = 80;
 var PUKA_FRAMES = 0;
 var PUKA_SHELL  = "/bin/agnsh";
+
+# ⚠ Who owns the line discipline is `LD_OWNED_HERE`, declared with the discipline itself in
+# `src/line_discipline.cyr` — 1 on agnos (a channel fd has none), 0 on Linux (devpts already cooks and
+# echoes, so running ours would double-echo). It is a variable, not an `#ifdef` here, so both paths
+# compile on both targets and the cooked path is reachable from the host test.
 
 fn puka_demo(): i64 {
     term_init(24, 80);
@@ -48,6 +62,67 @@ fn puka_demo(): i64 {
     return 0;
 }
 
+# Send a completed line to the child, in records the band will accept.
+#
+# ⚠ `pty_write` is ONE RECORD PER CALL, <= 64 BYTES — the band is a record transport and a longer send is
+# a framing error, not something it splits for you. A typed line can exceed that (the grid is 80 columns),
+# so the line is handed over in <= 64-byte pieces. ⭐ That is not a carve-out invented here: the kernel
+# already rules on it for exactly this case, at `agnos/kernel/core/syscall.cyr:7257-7266` — "write(2) IS A
+# BYTE STREAM; CH_SEND IS A RECORD. THE DIFFERENCE IS DELIBERATE … a stream writer's bytes arrive as
+# several records — which is exactly what a tty does", added because agnsh's own banner exceeds 64 bytes in
+# one write. Record boundaries still hold; a PTY's stdin simply is not a message stream, and agnsh's
+# `read_line` accumulates across reads by design.
+#
+# ⛔ A REFUSED WRITE STOPS THE LINE, IT DOES NOT RETRY. `pty_write` <= 0 means the peer is gone or the
+# record was rejected; spinning would burn the frame loop against a dead shell. Returns bytes delivered.
+fn puka__send_line(p, n): i64 {
+    var off = 0;
+    while (off < n) {
+        var chunk = n - off;
+        if (chunk > 64) { chunk = 64; }
+        var w = pty_write(p + off, chunk);
+        if (w <= 0) { return off; }
+        off = off + w;
+    }
+    return off;
+}
+
+# Deliver one encoded keypress to the child, through the line discipline when we own it.
+#
+# ⛔ ECHO IS THIS FUNCTION'S JOB AND NOTHING ELSE'S. agnsh does not echo — deliberately, because on the
+# console "the kernel now owns echo + line discipline" (`agnoshi/src/agnsh.cyr:274`) — and a channel fd
+# has no kernel echo. That is the second half of why the panel's glyph count never moved: even a byte
+# that arrived perfectly was invisible. `term_feed` is the same entry `pty_pump` uses for child output,
+# so an echoed character and a shell-printed one land in the grid by one path.
+fn puka_input_deliver(kb, kn): i64 {
+    if (LD_OWNED_HERE == 0) { return pty_write(kb, kn); }
+    var i = 0;
+    while (i < kn) {
+        var act = ld_feed(load8(kb + i));
+        if (act == LD_ECHO) {
+            term_feed(ld_echo());
+        }
+        if (act == LD_ERASE) { term_feed(0x08); term_feed(0x20); term_feed(0x08); }
+        # ⚠ A REFUSAL IS REPORTED, ALWAYS. `puka-terminal-test.py` counts these, and a byte the
+        # discipline declines is the one case where the screen and the child legitimately differ from
+        # what was typed — so it must never be inferred from silence.
+        if (act == LD_DROP) { puka__say("puka: byte refused by the line discipline\n", 42); }
+        if (act == LD_LINE) {
+            # ⭐ THE MARKER THAT SEPARATES TWO DIFFERENT BUGS. Its presence means a CR arrived and a
+            # line was handed to the child; its absence with keys missing means Enter never arrived at
+            # all. `puka-terminal-test.py` reads exactly this to decide which layer to blame.
+            if (puka_line_marked == 0) { puka_line_marked = 1; puka__say("puka: line sent to the shell\n", 29); }
+            # The child is sent LF alone; the GRID gets CR+LF, because the cursor has to come back to
+            # column 0 as well as move down — a bare LF would stair-step every line to the right.
+            term_feed(0x0D);
+            term_feed(0x0A);
+            puka__send_line(ld_line(), ld_line_len());
+        }
+        i = i + 1;
+    }
+    return kn;
+}
+
 # ⭐⭐ THE TERMINAL. Window + PTY + engine + renderer, wired end to end — a real shell hosted in a
 # composited window. This is what M1's demo was a placeholder for, and on agnos it is the remaining
 # half of ipc bite 9 ("a live agnsh prompt in a composited window").
@@ -62,6 +137,7 @@ fn puka_demo(): i64 {
 fn puka_terminal(rows, cols, frames): i64 {
     term_init(rows, cols);
     fb_init(PUKA_CELL_W, PUKA_CELL_H);
+    ld_init();
     # ⚠ SAY WHICH STEP FAILED. All three failures below look identical from outside — a blank window,
     # or no window at all — and on agnos three processes share one console, so a numeric code printed
     # here lands mid-line inside another proc's output. Distinct ASCII lines survive interleaving.
@@ -103,17 +179,26 @@ fn puka_terminal(rows, cols, frames): i64 {
         }
         else { if (f == 0) { puka__say("puka: no present buffer\n", 24); } }
 
-        # Input: one key per poll, forwarded to the child as raw bytes. `win_next_key` fills
-        # [codepoint, mods, state]; only presses with a byte value are sent.
-        var kev = alloc(32);
-        if (win_next_key(0, kev) == 1) {
-            var cp = load64(kev);
-            if (cp > 0) {
-                if (cp < 128) {
-                    var kb = alloc(8);
-                    store8(kb, cp);
-                    pty_write(kb, 1);
-                }
+        # ⭐ INPUT: compositor -> engine -> child. `win_poll_events` latches one key per frame and
+        # `win_next_key` hands it over as [evdev keycode, mods, state] — the SAME shape the Wayland
+        # backend produces, so `input_from_keycode` (the shared keycode->child-bytes bridge) does the
+        # encoding for both. That is why arrows and named keys come out as proper CSI sequences here
+        # instead of a hand-rolled byte: the encode discipline already existed and is not duplicated.
+        if (win_poll_events(0) == WIN_EV_KEY) {
+            var kev = alloc(32);
+            if (win_next_key(0, kev) == 1) {
+                # ⭐ ONE LINE PER KEY, ON PURPOSE — this is a COUNT, not a first-occurrence latch.
+                # `puka-terminal-test.py` counts these against the number it typed, so a run that loses
+                # keystrokes says so instead of looking like a line-discipline failure. The two have
+                # different causes in different layers: keys are produced by the xHCI HID ring and are
+                # only drained inside `kbscan #42`'s bounded sti window (agnos
+                # `kernel/core/syscall.cyr:8746-8757`), so a slow compositor frame can miss one.
+                # Measured: 1 run in 3 lost several keys INCLUDING Enter, which presents as "the shell
+                # never answered" while every byte that did arrive was handled correctly.
+                puka__say("puka: key received\n", 19);
+                var kb = alloc(32);
+                var kn = input_from_keycode(load64(kev), load64(kev + 8), kb);
+                if (kn > 0) { puka_input_deliver(kb, kn); }
             }
         }
 

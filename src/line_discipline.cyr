@@ -1,0 +1,197 @@
+# line_discipline.cyr — the canonical (cooked) line discipline.
+#
+# ⭐⭐ THIS IS DECOMPOSITION ITEM (iii), AND IT IS THE WHOLE OF `AE-T2`. A PTY is (i) a bidirectional
+# local channel, (ii) an end handed to a child at spawn, (iii) a line discipline. agnos supplies (i) and
+# (ii) directly on the `#97` channel band (`src/pty.cyr`, agnos `planning/ipc.md` §1) and deliberately
+# supplies NOTHING of (iii) — there is no termios, no ICRNL, no ECHO, and the design says there should
+# not be: "only (iii) is terminal-specific". Terminal-specific means it lives in the terminal. Here.
+#
+# ⛔ THE BUG THIS FIXES, AND IT WAS ONE BYTE. `AE-T` put a live agnsh in a composited window and its
+# output rendered — 4991 px of exact RGB(192,192,192) on the panel. Input then measured: TAB cycled
+# focus, the compositor forwarded, puka received **8 key events, encoded 8, wrote 8** to the PTY, and
+# **agnsh answered with 0 bytes, forever**. Traced statically, end to end, with no burn and no probe:
+#
+#   Enter = HID usage 0x28 -> evdev keycode 28 -> `evdev__keymap` returns **0x0D** (`input/evdev.cyr:74`,
+#   "Enter -> CR") -> `input__printable` -> `utf8_encode(0x0D)` = the single byte **0x0D** -> the child.
+#   agnoshi's `read_line` terminates a line on **`ch == 10`** and on nothing else (`agnsh.cyr:366`).
+#
+# CR is 13. The line could never complete, so every keystroke — Enter included — accumulated in agnsh's
+# carry buffer as ordinary data and the shell correctly waited forever for a line it was never going to
+# get. ⭐ **puka is right to send CR**: a terminal sends CR for Enter (VT100/xterm), and the byte that
+# reaches a program's stdin is LF because a line discipline translated it. On Linux the devpts kernel
+# side does that (ICRNL) — which is exactly why `tests/input_pty.tcyr` passes on the host and proved
+# nothing about agnos. The translation had no home on agnos until this file.
+#
+# ⛔ THE EARLIER HYPOTHESIS WAS AIMED RIGHT AND WRONG IN MECHANISM, and is recorded so it is not
+# re-derived: it read "something in its agnos `read_line` path is not completing a line from single-byte
+# records." Single-byte records accumulate **correctly** — `agnsh.cyr:363-375` refills and keeps
+# accumulating across as many reads as it takes, and the channel arm's rule that `-2` means WOULD_BLOCK
+# rather than EOF was already fixed. Nothing about record size was ever wrong: what was missing was the
+# CR->LF translation and the echo.
+#
+# ⛔ WHY COOKED AND NOT A PASS-THROUGH TRANSLATE. Translating CR->LF per keystroke and forwarding each
+# byte as it arrives would complete a line, but it cannot support erase: agnsh has no backspace handling
+# of its own (the kernel console line discipline used to do it), so a BS forwarded to the child leaves
+# the mistyped byte in its buffer while the screen shows it gone. **The screen would lie about what the
+# shell is about to run** — worse than having no erase at all. Buffering the line here means the child
+# receives exactly one complete, edited line, which is byte-for-byte the contract agnsh already has with
+# the kernel console. The child cannot tell the difference, and that is `pty.cyr`'s stated goal.
+#
+# ⛔ EVERY BYTE IS EITHER SHOWN AND SENT, OR REFUSED AND COUNTED — never sent-but-unshown. That is the
+# invariant the whole file exists to hold, and it is why unrepresentable input (arrow CSI sequences,
+# control bytes) is DROPPED here rather than passed through un-echoed: agnsh has no line editor, so a
+# forwarded `ESC[A` would land in its line as `^[[A` and make the command unrunnable, while the screen
+# showed nothing. Refusing is honest; drops are counted (`ld_drops_get`) because a silent drop is a lie.
+#
+# PURE of syscalls and I/O (the one exception is `ld_out_feed`, which calls the engine — see it). That is
+# deliberate: the caller owns echo and delivery (`src/main.cyr`),
+# so the whole discipline is assertable on the HOST, where agnos cannot be reached.
+# `tests/line_discipline.tcyr` runs it there, including a negative control on the CR bug itself.
+# ⚠ The ONE target-conditional thing in this file is `LD_OWNED_HERE` below — a fact about which side owns
+# the discipline, not about how it behaves. Every rule is unconditional.
+
+# ⭐ WHO OWNS THE DISCIPLINE — a CAPABILITY, tested as a variable rather than an `#ifdef` at the call
+# site, so both paths compile on both targets and the cooked path stays reachable from a host test.
+# [[feedback_prefer_generic_abstraction_at_call_sites]]
+#
+# ⛔ ON LINUX THIS MUST STAY 0. devpts already cooks and echoes (ICRNL + ECHO), so running the discipline
+# there would translate CR twice and print every character twice. On agnos a channel fd has no discipline
+# whatsoever — that is the gap this file fills.
+#ifdef CYRIUS_TARGET_AGNOS
+var LD_OWNED_HERE = 1;
+#endif
+#ifndef CYRIUS_TARGET_AGNOS
+var LD_OWNED_HERE = 0;
+#endif
+
+var LD_NONE  = 0;      # nothing to do
+var LD_ECHO  = 1;      # accepted: echo `ld_echo()` into the grid
+var LD_ERASE = 2;      # erase one cell (the caller emits BS, space, BS)
+var LD_LINE  = 3;      # a line is COMPLETE: send `ld_line()` / `ld_line_len()` to the child
+var LD_DROP  = 4;      # refused, not representable in cooked mode — counted, never forwarded
+
+# ⛔ MODULE-SCOPE `var X[N]` IS N x u64 (8N BYTES) IN CYRIUS; function-local is the byte form. [64] is
+# therefore 512 bytes, and `LD_MAX` 480 keeps the appended LF inside it with room to spare. Sizing these
+# by the function-local rule is the defect that made client 1's state smash client 0's in the
+# compositor. [[feedback_cyrius_var_array_u64_units]]
+var LD_MAX = 480;
+var ld_pending[64];    # the line being typed (512 B)
+var ld_ready[64];      # the last COMPLETED line, LF included (512 B)
+var ld_ready_len = 0;
+var ld_len = 0;
+var ld_echo_b = 0;
+var ld_drops = 0;
+
+# ⭐⭐ THE OUTPUT HALF — ONLCR. Returns 1 if the child's byte must be preceded by a CR.
+#
+# ⛔ THIS WAS MISSING FROM THE FIRST CUT AND THE IRON BURN FOUND IT. `AE-T2` proved the shell ANSWERS on
+# hardware — and its answer rendered as a staircase, each line starting where the previous one ended and
+# breaking mid-word at the right edge. The reported symptom was "the shell doesn't respect the window
+# wrapping". It is not a wrapping bug and it is not a width bug:
+#
+#   · agnsh's longest `help` line is **77 columns** against an 80-column grid, MEASURED. Nothing on that
+#     screen should have wrapped at all, so width is eliminated as a cause rather than argued about.
+#   · agnsh emits a bare **LF**, like every agnos program, because the agnos KERNEL CONSOLE treats LF as
+#     newline AND carriage return (`agnos/kernel/arch/x86_64/fb_console.cyr:1051-1053` — `fb_cur_x = 0;
+#     fb_cur_y = fb_cur_y + 1`).
+#   · puka's engine is a **correct VT100**: LF is `term_index()`, down one row and NOTHING else
+#     (`src/terminal.cyr:178`). So line 2 began at column 53 where line 1 ended, ran past column 80, and
+#     wrapped mid-word. Every fragment in that photo is arithmetic.
+#
+# ⇒ The gap is the classic one every Unix tty closes with **ONLCR**: the line discipline translates the
+# child's `\n` into `\r\n` on the way OUT. This file shipped ICRNL, echo and erase — the INPUT half — and
+# the echo path even states this exact rule ("a bare LF would stair-step every line to the right") without
+# applying it to the child's output. One half of a line discipline is not a line discipline.
+#
+# ⛔ DO NOT FIX THIS IN THE SHELL. Every agnos program emits bare LF for the same correct reason, so
+# patching agnsh leaves owl, kriya, iam and everything else broken in a window, and adds stray CRs to
+# their console output. The terminal owns it — `src/pty.cyr`'s own header: *"the child never learns it has
+# one … a channel every program must be rewritten for would be an API, not a PTY."*
+#
+# ⚠ FOLLOWS POSIX ONLCR EXACTLY: NL maps to CR-NL **unconditionally**, with no look-back at the previous
+# byte. A program that already emits CRLF therefore produces CR CR LF, which is harmless because a second
+# carriage return is idempotent — the cursor is already at column 0. Tracking the previous byte would add
+# state to a pure function to fix nothing.
+fn ld_out_needs_cr(b): i64 {
+    if (b == 0x0A) { return 1; }
+    return 0;
+}
+
+# Feed ONE byte of the child's output into the engine, applying ONLCR.
+#
+# ⛔ THIS EXISTS SO THE TEST AND `pty_pump` RUN THE SAME CODE. The first version of the ONLCR test
+# reimplemented this loop inside the test file, which meant deleting the real call site would have left
+# it green — the same vacuity that made the `AE-0a` ghost test pass against a mutant. A rule asserted
+# against a replica of its caller is not a tested caller.
+# ⚠ This is the one function here that touches the engine (`term_feed`), so a unit including
+# line_discipline.cyr must also include terminal.cyr. Every unit that does already includes it.
+fn ld_out_feed(b): i64 {
+    if (ld_out_needs_cr(b) == 1) { term_feed(0x0D); }
+    term_feed(b);
+    return 0;
+}
+
+fn ld_init(): i64 {
+    ld_len = 0;
+    ld_ready_len = 0;
+    ld_echo_b = 0;
+    ld_drops = 0;
+    return 0;
+}
+
+fn ld_line(): i64       { return &ld_ready; }
+fn ld_line_len(): i64   { return ld_ready_len; }
+fn ld_echo(): i64       { return ld_echo_b; }
+fn ld_drops_get(): i64  { return ld_drops; }
+fn ld_pending_len(): i64 { return ld_len; }
+
+# Complete the pending line: copy it to `ld_ready` with a trailing LF and clear the pending buffer.
+#
+# ⛔ THE HANDOFF IS ATOMIC INSIDE ld_feed, SO NO CALLER HAS TO REMEMBER TO RESET. Returning LD_LINE
+# while leaving the completed bytes in the pending buffer would make correctness depend on the caller
+# calling an `ld_reset()` — and a caller that forgot would silently prepend the previous command to the
+# next one, which reads as a shell bug rather than a terminal one.
+fn ld__terminate(): i64 {
+    var i = 0;
+    while (i < ld_len) { store8(&ld_ready + i, load8(&ld_pending + i)); i = i + 1; }
+    store8(&ld_ready + ld_len, 0x0A);       # ⭐ CR became LF here. This is the fix.
+    ld_ready_len = ld_len + 1;
+    ld_len = 0;
+    return LD_LINE;
+}
+
+# Feed ONE byte from the encoder. Returns the action the caller must perform.
+fn ld_feed(b): i64 {
+    # CR and LF both terminate. CR is what a terminal actually sends for Enter; LF is accepted too so a
+    # pasted or synthesised newline behaves identically instead of being dropped as a control byte.
+    if (b == 0x0D) { return ld__terminate(); }
+    if (b == 0x0A) { return ld__terminate(); }
+
+    # DEL is what `evdev__keymap` returns for Backspace (code 14 -> 0x7F); BS is accepted for the same
+    # reason CR and LF both terminate.
+    if (b == 0x7F) {
+        # ⛔ NOTHING TO ERASE MUST EMIT NOTHING. An unconditional erase walks the cursor left over the
+        # shell's own prompt, so the terminal would eat characters it never received.
+        if (ld_len == 0) { return LD_NONE; }
+        ld_len = ld_len - 1;
+        return LD_ERASE;
+    }
+    if (b == 0x08) {
+        if (ld_len == 0) { return LD_NONE; }
+        ld_len = ld_len - 1;
+        return LD_ERASE;
+    }
+
+    # Printable ASCII only. Anything else is refused rather than forwarded — see the header.
+    if (b < 0x20) { ld_drops = ld_drops + 1; return LD_DROP; }
+    if (b > 0x7E) { ld_drops = ld_drops + 1; return LD_DROP; }
+
+    # A full line refuses further input rather than dropping the tail silently: the operator sees their
+    # keystrokes stop landing, which is a true signal, instead of typing into a void.
+    if (ld_len >= LD_MAX) { ld_drops = ld_drops + 1; return LD_DROP; }
+
+    store8(&ld_pending + ld_len, b);
+    ld_len = ld_len + 1;
+    ld_echo_b = b;
+    return LD_ECHO;
+}

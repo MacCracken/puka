@@ -1,0 +1,191 @@
+# line_discipline.tcyr — the cooked line discipline, and a negative control on the bug it fixes.
+#
+# ⭐ RUNS ON THE HOST, ABOUT AN agnos-ONLY CODE PATH. `src/line_discipline.cyr` is pure by design
+# precisely so this is possible: on Linux the devpts kernel side cooks and echoes, so the discipline is
+# never ENGAGED here (`PUKA_LOCAL_LD = 0`), but every rule in it is assertable anyway. The alternative —
+# testing it only under QEMU — is how `AE-T2` shipped broken in the first place: `tests/input_pty.tcyr`
+# passes on the host through a real pts whose ICRNL silently supplied the one translation agnos lacks.
+#
+# ⛔ THE CENTRAL ASSERTION IS THE NEGATIVE CONTROL, not the happy path. It re-derives the defect from the
+# PRODUCTION encoder — `input_from_keycode(28, …)` for Enter — proves the byte really is CR (13), proves
+# agnoshi's terminator rule really is LF (10) and only LF, and therefore proves the translation is load-
+# bearing rather than decorative. If someone "simplifies" `evdev__keymap` to emit LF, `enter_is_cr` fails
+# and says why. If someone deletes the translation, `cr_becomes_lf` fails.
+
+include "src/parser.cyr"
+include "src/grid.cyr"
+include "src/unicode.cyr"
+include "src/terminal.cyr"
+include "src/input.cyr"
+include "src/input/evdev.cyr"
+include "src/input/keymap.cyr"
+include "src/line_discipline.cyr"
+
+var kbuf[8];            # 8 u64 = 64 bytes — module scope, so the u64 rule applies
+var rowbuf[32];         # 256 bytes — a row read back out of the grid
+
+# ⭐ Feeds through `ld_out_feed` — the REAL function `pty_pump` calls, not a copy of its loop.
+fn out_feed_str(s): i64 {
+    var i = 0;
+    while (load8(s + i) != 0) { ld_out_feed(load8(s + i)); i = i + 1; }
+    return 0;
+}
+
+# Trimmed length of a rendered grid row — the external invariant: what is actually ON the screen.
+fn row_text_len(r): i64 { return term_render_row_trim(r, &rowbuf, 256); }
+
+# Feed a NUL-terminated ASCII string through the discipline, returning the last action.
+fn feed_str(s): i64 {
+    var i = 0;
+    var act = LD_NONE;
+    while (load8(s + i) != 0) { act = ld_feed(load8(s + i)); i = i + 1; }
+    return act;
+}
+
+# The completed line as it will reach the child, compared byte-for-byte against `want` (+ its LF).
+fn ready_is(want): i64 {
+    var n = strlen(want);
+    if (ld_line_len() != n + 1) { return 0; }
+    var i = 0;
+    while (i < n) {
+        if (load8(ld_line() + i) != load8(want + i)) { return 0; }
+        i = i + 1;
+    }
+    if (load8(ld_line() + n) != 0x0A) { return 0; }
+    return 1;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("line discipline: the CR->LF translation agnos has no kernel side for");
+
+    # ---- the negative control: the defect, re-derived from the production encoder ----
+    # Enter is evdev keycode 28. No mods. This is the exact call `src/main.cyr` makes per keypress.
+    var kn = input_from_keycode(28, MOD_NONE, &kbuf);
+    assert(kn == 1, "enter encodes to exactly one byte");
+    assert(load8(&kbuf) == 0x0D, "enter_is_cr: the encoder emits CR (13), as a terminal must");
+    assert(load8(&kbuf) != 0x0A, "enter is NOT already LF — the translation is load-bearing");
+
+    # agnoshi's rule, restated here as the thing being satisfied: `read_line` ends a line on ch == 10
+    # and on nothing else (agnoshi/src/agnsh.cyr:366). So a CR alone can never complete a line.
+    ld_init();
+    var act = ld_feed(0x0D);
+    assert(act == LD_LINE, "cr_completes_a_line");
+    assert(ld_line_len() == 1, "bare Enter is a one-byte line");
+    assert(load8(ld_line()) == 0x0A, "cr_becomes_lf: what reaches the child is LF (10), not CR (13)");
+
+    # ---- a typed command ----
+    ld_init();
+    assert(feed_str("ls") == LD_ECHO, "printables are accepted and echoable");
+    assert(ld_pending_len() == 2, "two bytes pending, nothing sent yet");
+    assert(ld_line_len() == 0, "nothing is delivered before Enter");
+    assert(ld_feed(0x0D) == LD_LINE, "Enter completes it");
+    assert(ready_is("ls") == 1, "the child receives exactly \"ls\\n\"");
+
+    # ---- echo: every accepted byte is reported for display, in order ----
+    ld_init();
+    assert(ld_feed(0x61) == LD_ECHO, "'a' accepted");
+    assert(ld_echo() == 0x61, "echo byte is the byte typed");
+    assert(ld_feed(0x42) == LD_ECHO, "'B' accepted");
+    assert(ld_echo() == 0x42, "echo tracks the latest byte");
+
+    # ---- erase, which is why this is COOKED and not a pass-through translate ----
+    ld_init();
+    feed_str("lz");
+    assert(ld_feed(0x7F) == LD_ERASE, "DEL (what Backspace encodes to) erases");
+    assert(ld_pending_len() == 1, "the erased byte is gone from what the child will get");
+    ld_feed(0x73);
+    ld_feed(0x0D);
+    assert(ready_is("ls") == 1, "the child receives the CORRECTED line, never the typo");
+
+    assert(ld_feed(0x08) == LD_NONE, "BS on an empty line emits NOTHING — it must not eat the prompt");
+    assert(ld_pending_len() == 0, "and cannot underflow the buffer");
+
+    # ---- refusals are counted, never forwarded ----
+    ld_init();
+    var d0 = ld_drops_get();
+    assert(ld_feed(0x1B) == LD_DROP, "ESC is refused");
+    assert(ld_feed(0x5B) == LD_ECHO, "'[' is an ordinary printable — only ESC itself is control");
+    assert(ld_drops_get() == d0 + 1, "the refusal is COUNTED, because a silent drop is a lie");
+    ld_init();
+    assert(ld_feed(0x03) == LD_DROP, "Ctrl-C is refused rather than half-implemented as a signal");
+    assert(ld_pending_len() == 0, "a refused byte never enters the line");
+
+    # ---- the atomic handoff: two commands in a row must not concatenate ----
+    ld_init();
+    feed_str("one");
+    ld_feed(0x0D);
+    assert(ready_is("one") == 1, "first line");
+    feed_str("two");
+    ld_feed(0x0D);
+    assert(ready_is("two") == 1, "second line is NOT \"onetwo\" — ld_feed clears pending itself");
+
+    # ---- the full-line refusal ----
+    ld_init();
+    var i = 0;
+    while (i < LD_MAX) { ld_feed(0x78); i = i + 1; }
+    assert(ld_pending_len() == LD_MAX, "the buffer fills to exactly LD_MAX");
+    assert(ld_feed(0x78) == LD_DROP, "and then refuses, rather than overrunning 512 bytes of module data");
+    assert(ld_pending_len() == LD_MAX, "the refusal changed nothing");
+    assert(ld_feed(0x0D) == LD_LINE, "a full line still completes");
+    assert(ld_line_len() == LD_MAX + 1, "with its LF inside the allocation");
+
+    # ---- the whole chain, as main.cyr drives it: keycodes in, child bytes out ----
+    # 'l','s' then Enter, through the production encoder each time.
+    ld_init();
+    var n1 = input_from_keycode(38, MOD_NONE, &kbuf);      # evdev 38 = 'l'
+    assert(n1 == 1, "'l' encodes to one byte");
+    ld_feed(load8(&kbuf));
+    var n2 = input_from_keycode(31, MOD_NONE, &kbuf);      # evdev 31 = 's'
+    assert(n2 == 1, "'s' encodes to one byte");
+    ld_feed(load8(&kbuf));
+    input_from_keycode(28, MOD_NONE, &kbuf);               # Enter
+    assert(ld_feed(load8(&kbuf)) == LD_LINE, "the encoder's Enter completes the line");
+    assert(ready_is("ls") == 1, "keycodes 38,31,28 deliver \"ls\\n\" — the AE-T2 path, end to end");
+
+    # ---- the gate itself: the host must NOT cook, or every character double-echoes ----
+    assert(LD_OWNED_HERE == 0, "on Linux devpts owns the discipline — puka must not run its own");
+
+    # ⭐⭐ THE OUTPUT HALF — ONLCR. Found by the 2026-08-07 iron burn: `AE-T2` proved the shell answers,
+    # and its answer rendered as a STAIRCASE. Not a wrapping bug and not a width bug — agnsh's longest
+    # help line is 77 of 80 columns, measured, so nothing on that screen should have wrapped.
+    test_group("line discipline: ONLCR — the child's bare LF must also return the carriage");
+    assert(ld_out_needs_cr(0x0A) == 1, "LF needs a CR in front of it");
+    assert(ld_out_needs_cr(0x0D) == 0, "CR does not");
+    assert(ld_out_needs_cr(0x41) == 0, "an ordinary character does not");
+    assert(ld_out_needs_cr(0x09) == 0, "nor does TAB");
+
+    # ⛔ THE NEGATIVE CONTROL IS THE BUG ITSELF, REPRODUCED IN THE REAL ENGINE. Feed a bare LF the way
+    # `pty_pump` used to and the cursor stays in the column it was in — that IS the staircase, and it
+    # proves the engine is a correct VT100 rather than broken. Then feed it through the discipline and the
+    # cursor comes home. If someone removes the ONLCR call, the second assert fails and the first still
+    # passes, which names the direction of the regression.
+    term_init(24, 80);
+    term_feed_str("abc");
+    term_feed(0x0A);                       # raw LF, no discipline — the pre-fix path
+    assert_eq(grid_cursor_col(), 3, "raw LF leaves the cursor at column 3 — the STAIRCASE");
+    assert_eq(grid_cursor_row(), 1, "...having moved down one row, which is correct VT100 behaviour");
+
+    term_init(24, 80);
+    term_feed_str("abc");
+    ld_out_feed(0x0A);                     # the REAL function pty_pump calls
+    assert_eq(grid_cursor_col(), 0, "ONLCR brings the cursor back to column 0");
+    assert_eq(grid_cursor_row(), 1, "and still down exactly one row");
+
+    # ⭐ THE ACTUAL IRON CASE, END TO END, with agnsh's real bytes. Two of its help lines are 53 and 51
+    # columns; on the burn they landed as one 104-column run that wrapped mid-word. Through the discipline
+    # each must start at column 0 and NOT wrap at all.
+    term_init(24, 80);
+    out_feed_str("  help                                 show this help\n");
+    out_feed_str("  version                              show version\n");
+    assert_eq(grid_cursor_row(), 2, "two agnsh help lines occupy exactly two rows, not four");
+    assert_eq(grid_cursor_col(), 0, "and the third line starts at the left margin");
+    assert_eq(row_text_len(0), 53, "row 0 holds the whole 53-column line");
+    assert_eq(row_text_len(1), 51, "row 1 holds the whole 51-column line — nothing spilled");
+
+    return assert_summary();
+}
+
+fn _entry(): i64 { var rc = main(); syscall(SYS_EXIT, rc); return 0; }
+_entry();

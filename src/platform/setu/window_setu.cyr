@@ -88,9 +88,83 @@ fn win_present_commit(win, x, y, w, h): i64 {
     return setu_client_present(setuwin_client, setuwin_buf, win_w, win_h);
 }
 
-# No compositor->client event stream is wired yet (input is a later bite gated on
-# the compositor's real key-forwarding). Return WIN_EV_NONE.
-fn win_poll_events(win): i64 { return WIN_EV_NONE; }
+# ⭐ INPUT. The compositor forwards SETU_INPUT_KEY with the **HID usage code** (`bhumi_key_usage`),
+# not a codepoint and not an evdev keycode — so the seam has to translate before handing anything to
+# the engine, which speaks evdev like the Wayland backend does.
+#
+# ⭐ HID usage -> evdev keycode IS the PS/2 set-1 make code for the main block, because Linux derived
+# its keycodes from set-1: Esc 1, digits 2..11, A 30, Enter 28, Backspace 14, Tab 15, Space 57. The
+# agnos kernel carries the same mapping for its own console (`hid_usage_to_ps2`,
+# `arch/x86_64/usb/hid_translate.cyr`) — this is that table's shape, not a second invention.
+#
+# ⛔ RETURNS 0 FOR AN UNMAPPED USAGE, and the caller must drop it rather than send a byte. Emitting a
+# wrong keycode is worse than emitting none: it would type a plausible character the user did not press.
+fn setuwin__hid_to_evdev(u): i64 {
+    if (u >= 0x04) { if (u <= 0x1D) {                    # a..z
+        # a..m then n..z, split only to stay inside the 120-column lint.
+        var la = "\x1E\x30\x2E\x20\x12\x21\x22\x23\x17\x24\x25\x26\x32";
+        var lb = "\x31\x18\x19\x10\x13\x1F\x14\x16\x2F\x11\x2D\x15\x2C";
+        if (u <= 0x10) { return load8(la + (u - 0x04)); }
+        return load8(lb + (u - 0x11));
+    } }
+    if (u >= 0x1E) { if (u <= 0x26) { return 2 + (u - 0x1E); } }   # 1..9 -> 2..10
+    if (u == 0x27) { return 11; }                                   # 0
+    if (u == 0x28) { return 28; }                                   # Enter
+    if (u == 0x29) { return 1; }                                    # Esc
+    if (u == 0x2A) { return 14; }                                   # Backspace
+    if (u == 0x2B) { return 15; }                                   # Tab
+    if (u == 0x2C) { return 57; }                                   # Space
+    if (u == 0x2D) { return 12; }                                   # -
+    if (u == 0x2E) { return 13; }                                   # =
+    if (u == 0x2F) { return 26; }                                   # [
+    if (u == 0x30) { return 27; }                                   # ]
+    if (u == 0x31) { return 43; }                                   # backslash
+    if (u == 0x33) { return 39; }                                   # ;
+    if (u == 0x34) { return 40; }                                   # '
+    if (u == 0x35) { return 41; }                                   # `
+    if (u == 0x36) { return 51; }                                   # ,
+    if (u == 0x37) { return 52; }                                   # .
+    if (u == 0x38) { return 53; }                                   # /
+    if (u == 0x4F) { return 106; }                                  # Right
+    if (u == 0x50) { return 105; }                                  # Left
+    if (u == 0x51) { return 108; }                                  # Down
+    if (u == 0x52) { return 103; }                                  # Up
+    return 0;                                                       # unmapped — caller drops it
+}
+
+# Poll the compositor for one inbound message. Returns WIN_EV_KEY when a key was latched,
+# else WIN_EV_NONE. One message per call: `setu_client_poll_input` hands out one frame at a time.
+var setuwin_key_code = 0;
+var setuwin_key_mods = 0;
+var setuwin_key_have = 0;
+
+fn win_poll_events(win): i64 {
+    if (setuwin_client == 0) { return WIN_EV_NONE; }
+    var m = setu_msg_new();
+    if (setu_client_poll_input(setuwin_client, m) != 1) { return WIN_EV_NONE; }
+    if (setu_msg_kind(m) != SETU_INPUT_KEY) { return WIN_EV_NONE; }
+    var code = setuwin__hid_to_evdev(setu_msg_arg(m, 1));
+    if (code == 0) { return WIN_EV_NONE; }               # unmapped usage — drop, never guess
+    setuwin_key_code = code;
+    # ⚠ MODS ARE ALWAYS 0 HERE, DELIBERATELY. A press-only surface (the default, and what a terminal
+    # wants — FULL_KEYS would double-type every character) carries no modifier state in this message,
+    # and the compositor does not forward the HID modifier byte as a usage. So Shift-ed characters are
+    # NOT yet reachable: the engine sees an unshifted keycode. Stated rather than faked, because
+    # inventing a mods value here would silently produce the wrong glyph.
+    setuwin_key_mods = 0;
+    setuwin_key_have = 1;
+    return WIN_EV_KEY;
+}
+
 fn win_resize_apply(win): i64 { return 0; }              # setu: no compositor-driven resize yet
-fn win_next_key(win, out24): i64 { return 0; }
+
+# Hand out the latched key as [evdev keycode, mods, state=press]. Returns 1 when one was waiting.
+fn win_next_key(win, out24): i64 {
+    if (setuwin_key_have == 0) { return 0; }
+    setuwin_key_have = 0;
+    store64(out24, setuwin_key_code);
+    store64(out24 + 8, setuwin_key_mods);
+    store64(out24 + 16, 1);
+    return 1;
+}
 fn win_close(win): i64 { setu_client_close(setuwin_client); return 0; }

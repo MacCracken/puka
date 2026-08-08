@@ -330,8 +330,21 @@ fn pty_pump(max_idle): i64 {
     while (go == 1) {
         var n = sys_chan_recv(pty_master, buf, 128);
         if (n > 0) {
+            # ⭐⭐ ONLCR ON THE WAY IN FROM THE CHILD — the OUTPUT half of the line discipline.
+            # agnsh (and every agnos program) emits a bare LF, because the kernel console treats LF as
+            # newline AND carriage return. puka's engine is a correct VT100 where LF only moves DOWN, so
+            # without this every line starts where the previous one ended: a staircase that then wraps
+            # mid-word at the right edge and reads as a "wrapping" bug. Found by the 2026-08-07 iron burn.
+            # Rule and full reasoning: `ld_out_needs_cr` in src/line_discipline.cyr.
+            # ⚠ Gated on LD_OWNED_HERE, not on the target: on Linux devpts already applies ONLCR, and
+            # doing it twice would emit a redundant CR for every line.
             var i = 0;
-            while (i < n) { term_feed(load8(buf + i)); i = i + 1; }
+            while (i < n) {
+                var ob = load8(buf + i);
+                if (LD_OWNED_HERE == 1) { ld_out_feed(ob); }
+                if (LD_OWNED_HERE == 0) { term_feed(ob); }
+                i = i + 1;
+            }
             total = total + n;
             idle = 0;
         }
