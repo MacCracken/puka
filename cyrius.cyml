@@ -65,6 +65,8 @@ modules = ["src/font_data.cyr"]
 # independently; Linux is a different target.
 [deps.setu]
 git     = "https://github.com/MacCracken/setu.git"
-tag     = "0.8.4"
+# ⚠ `path` added 2026-08-12 — setu 0.8.5 centralises the rendezvous ($SETU_SOCKET).
+path    = "../setu"
+tag     = "0.8.5"
 modules = ["dist/setu.cyr"]
 ---

@@ -28,7 +28,8 @@
 # `-smp 1`; never on iron, `-smp 4` fault-kills). The replacement transport is the agnos socket
 # (`anu`) — agnos `docs/development/planning/ipc.md` §9/§10. This win_* backend is unaffected
 # in shape; only what `setu_client_connect` dials changes.
-# ⚠ The `$SETU_SOCKET` / default path below is ADVISORY and always was — setu ignores it.
+# ⛔ CORRECTED 2026-08-12: this said the path was "ADVISORY and always was — setu ignores it". FALSE
+# since setu 0.8.4 — `setu_un_path` honours it — and since 0.8.5 setu also resolves `$SETU_SOCKET`.
 #
 # Co-compiled after [deps.setu]'s dist (setu_client_*); includes nothing.
 
@@ -54,8 +55,10 @@ fn win_backend_select(): i64 { return 1; }   # 1 = setu (0 = wayland)
 # present buffer. Returns an opaque handle (1) or 0 on connect failure. gpu_ctx
 # is ignored (CPU present path).
 fn win_open(title, tlen, cols, rows, cell_w, cell_h, gpu_ctx): i64 {
-    var path = getenv("SETU_SOCKET");
-    if (path == 0) { path = "/tmp/aethersafha-setu.sock"; }
+    # 0 = ask setu, which resolves `$SETU_SOCKET` then `SETU_UNIX_PATH` since 0.8.5. ⭐ puka's own
+    # getenv is GONE, not because it was wrong — it was the only one of three clients that got the
+    # override right — but because one implementation in setu makes all three agree by construction.
+    var path = 0;
     var c = setu_client_connect(path);
     # ⚠ SAY IT. A silent 0 here is indistinguishable from "no compositor running", and the cause is
     # usually neither: a client built against a pre-cutover setu has no agnos arm at all and fails

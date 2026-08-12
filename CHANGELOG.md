@@ -2,6 +2,18 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.12] - 2026-08-12 — one rendezvous, named by setu
+
+⭐ Passes **0** to setu instead of hardcoding `"/tmp/aethersafha-setu.sock"`, so the socket is named in
+one place — `setu_un_path` (setu **0.8.5**), which resolves an explicit path, then `$SETU_SOCKET`, then
+`SETU_UNIX_PATH`. Four repos each carried that literal; they agreed, but all four had to be edited in
+step for that to stay true.
+⚠ `[deps.setu]` gains `path = "../setu"` alongside its tag — it was the one dep here declaring a tag
+with no path override, so a local setu change could not be built against at all. Verified: with the old
+vendored 0.8.4 this client silently ignored `$SETU_SOCKET` and `--clients` answered 94.
+⛔ Also corrects a comment asserting the path was *"advisory and always was — setu ignores it"*, false
+since setu 0.8.4.
+
 ## [0.6.11] - 2026-08-08 — puka EXITS when the compositor closes its window
 
 ⛔⛔ **puka used to ignore being closed.** aethersafha's F4 removed the window from its own vector and
