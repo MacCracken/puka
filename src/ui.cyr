@@ -1,0 +1,76 @@
+# puka UI — the dhancha WIDGET TREE puka's window is built from.
+#
+# ⭐⭐ THE REUNION (M7-D). dhancha is described in its own README as *"the spiritual extraction of
+# puka's windowing code"*, and puka was the last app still hand-drawing its whole window: it routed
+# CONNECT / FD / CLOSE through the toolkit and did its own present, because the toolkit had nothing
+# that could hold a terminal grid.
+#
+# ⛔ THE GRID IS **NOT** DECOMPOSED INTO WIDGETS, AND THAT IS THE DESIGN, NOT A SHORTCUT. An 80×24
+# terminal is 1920 cells, each with a foreground, a background, attributes, a wide-glyph spacer flag
+# and a possible cursor. As widgets that is more memory than the scrollback and it throws away the
+# DIRTY-ROW scanner that makes a keystroke echo repaint sixteen scanlines instead of the screen.
+# `fb_render` stays exactly as it is. What changes is where its pixels land: a dhancha `CANVAS`
+# (0.9.9) is a widget-tree slot the app paints itself, so the grid keeps its renderer AND the window
+# gains layout, clipping and hit-testing for everything around it.
+#
+# ⚠ AND THE PRESENT PATH DOES NOT GROW A COPY. `dh_surface_wrap` builds a sadish surface header over
+# the buffer `win_present_begin` already returned, so the widget tree draws straight into the memory
+# the compositor is going to read. Rendering into a dhancha-owned surface and copying it across would
+# have added a second full-frame copy per keystroke — adopting the toolkit would have made puka
+# measurably slower, which is the wrong kind of "port".
+
+# The grid CANVAS and the window root. Built once (`puka_ui_build`) and reused every frame — the
+# tree is retained, unlike crab's, because puka's content is a mutable grid rather than a rebuilt
+# directory listing.
+var puka_ui_root = 0;
+var puka_ui_grid = 0;
+
+# The CANVAS draw callback. `fb_render` has already repainted the dirty rows into the RGB24 grid
+# buffer; this hands that buffer to dhancha, which converts and clips it into the surface.
+#
+# ⛔ `dh_canvas_blit_rgb24` SETS THE ALPHA BYTE, and puka's own `pix_blit_region` does not — it packs
+# `(r<<16)|(g<<8)|b`, leaving byte 3 at ZERO. That was correct for the path it was written for and is
+# NOT correct here: under agnos's `gpu_shader_op #92` op 0x01 (premultiplied src-over,
+# `out = src + dst*(1 - src_a)`) an alpha of 0 collapses the blend to `out = src + dst`, so the
+# terminal renders as an additive over-bright ghost of itself rather than as opaque text. This stack
+# has paid that bill twice already; the conversion lives in the toolkit now so it is paid once.
+fn puka_grid_draw(wgt, sds, clx, cly, clw, clh): i64 {
+    return dh_canvas_blit_rgb24(wgt, sds, fb_buf(), fb_width(), fb_height(), clx, cly, clw, clh);
+}
+
+# Build the window tree. -> the root widget.
+# ⚠ The grid is FLEX 1 so it takes whatever height is left after any chrome. Today there is no
+# chrome and the grid fills the window; the point of the tree is that adding a find bar (a dhancha
+# TEXTINPUT), tabs, or a scrollback indicator is now a widget insertion rather than a rewrite of the
+# present path — which is precisely what puka could not do while it hand-drew everything.
+fn puka_ui_build(): i64 {
+    var root = dh_widget_new(WINDOW);
+    dh_widget_set_layout(root, BOX_V);
+    dh_widget_set_bg(root, 0 - 1);              # the grid paints every pixel it owns; no fill under it
+    var grid = dh_canvas_new(&puka_grid_draw, 0);
+    dh_widget_set_flex(grid, 1);
+    dh_widget_add_child(root, grid);
+    puka_ui_root = root;
+    puka_ui_grid = grid;
+    return root;
+}
+
+fn puka_ui_root_get(): i64 { return puka_ui_root; }
+fn puka_ui_grid_get(): i64 { return puka_ui_grid; }
+
+# Render one frame of the window tree into a caller-owned XRGB8888 buffer.
+# `dst` is what `win_present_begin` returned; `w`/`h` are the present buffer's dimensions and
+# `stride_px` its pixels-per-row. -> 0 on success, -1 if there is nothing to draw into.
+#
+# ⚠ THE SURFACE IS WRAPPED PER FRAME, not cached. `win_present_begin` hands back a pointer that is
+# only valid until the matching commit; a wrapper held across frames would eventually point at a
+# buffer the backend has swapped out from under it.
+fn puka_ui_present(dst, w, h, stride_px): i64 {
+    if (dst == 0) { return 0 - 1; }
+    if (puka_ui_root == 0) { puka_ui_build(); }
+    var sds = dh_surface_wrap(dst, w, h, stride_px);
+    if (sds == 0) { return 0 - 1; }
+    dh_layout_apply(puka_ui_root, w, h);
+    dh_draw_widget(sds, puka_ui_root, 0, 0, 0, w, h);
+    return 0;
+}

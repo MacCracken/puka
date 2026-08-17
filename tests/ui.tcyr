@@ -1,0 +1,106 @@
+# ui.tcyr — the dhancha WIDGET-TREE present path (M7-D).
+#
+# ⭐⭐ WHAT THIS PROVES. puka's window used to be hand-drawn end to end: `fb_render` painted the grid
+# into an RGB24 buffer and `pix_blit_region` copied it straight into the compositor's present buffer.
+# It now goes through a dhancha widget tree whose CANVAS leaf performs that blit. The grid renderer
+# is untouched — the checks below assert that the SAME pixels arrive, and that two things which were
+# wrong before are now right: the alpha byte, and the fact that the window has a tree at all.
+#
+# ⛔ THE ALPHA CHECK IS THE ONE THAT COULD ONLY EVER FAIL ON IRON. `pix_blit_region` packs
+# `(r<<16)|(g<<8)|b` and leaves byte 3 at ZERO. Every host-side dump of that buffer looks perfect —
+# the RGB is correct. Under agnos's `gpu_shader_op #92` op 0x01, which is premultiplied src-over
+# (`out = src + dst*(1 - src_a)`), alpha 0 collapses the blend to `out = src + dst`: the terminal
+# renders as an additive over-bright ghost composited onto the desktop instead of as opaque text.
+# Stdlib auto-included via cyrius.cyml.
+
+include "src/parser.cyr"
+include "src/grid.cyr"
+include "src/unicode.cyr"
+include "src/terminal.cyr"
+include "lib/kashi_font_data.cyr"
+include "src/render/pixfmt.cyr"
+include "src/render/atlas.cyr"
+include "src/render/fb.cyr"
+include "lib/dhancha.cyr"
+include "src/ui.cyr"
+
+# The full 32-bit word at (x,y) in a present buffer of `stride` pixels per row.
+fn word_at(buf, stride, x, y): i64 {
+    return load32(buf + (y * stride + x) * 4) & 0xFFFFFFFF;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("ui — the widget tree is built, and the grid is a CANVAS in it");
+    term_init(20, 4);
+    fb_init(8, 16);
+    var root = puka_ui_build();
+    assert_neq(root, 0, "the window has a root widget");
+    assert_eq(dh_widget_kind(root), WINDOW, "the root is a WINDOW");
+    var grid = puka_ui_grid_get();
+    assert_neq(grid, 0, "the grid slot exists");
+    # ⛔ A CANVAS, NOT 1920 WIDGETS. An 80x24 grid decomposed into per-cell widgets would cost more
+    # than the scrollback and would discard the dirty-row scanner. The escape hatch is the design.
+    assert_eq(dh_widget_kind(grid), CANVAS, "the grid is a CANVAS, not a widget per cell");
+    assert_neq(dh_canvas_draw_fn(grid), 0, "...with a draw callback attached");
+    assert_eq(dh_widget_parent(grid), root, "and it hangs off the root");
+
+    test_group("ui — a rendered frame carries the grid's pixels into a caller-owned buffer");
+    fb_set_default_colors(0x00FF00, 0x000080);       # green on navy, so both are unmistakable
+    grid_set_pen(0, 0x00FF00, 0x000080);
+    term_feed_str("A");
+    fb_render_full();
+    var w = fb_width();
+    var h = fb_height();
+    var stride = w;
+    var dst = alloc(w * h * 4);
+    var i = 0;
+    while (i < w * h) { store32(dst + i * 4, 0x00000000); i = i + 1; }
+    assert_eq(puka_ui_present(dst, w, h, stride), 0, "the frame presents");
+
+    # ⛔⛔ THE ALPHA BYTE. Checked on the FULL word — masking it off is exactly the check that would
+    # have passed while the desktop ghosted.
+    var bg_word = word_at(dst, stride, w - 1, h - 1);   # a cell the glyph does not touch
+    assert_eq(bg_word, 0xFF000080, "background arrives OPAQUE (navy, alpha 255)");
+    # ⚠ Stated as arithmetic rather than by eye: alpha must be 255 everywhere, not merely non-zero.
+    assert_eq((bg_word >> 24) & 255, 255, "  ...alpha is exactly 255, not 0 and not partial");
+
+    # The glyph's shape reaches the buffer too — the CANVAS is drawing real content, not a flat fill.
+    # ⚠ ASSERTED AS "the cell is not uniform, and every pixel in it is opaque" rather than against a
+    # specific foreground value. Which RGB a cell resolves to is puka's COLOUR MODEL, which
+    # `render.tcyr` already tests against the RGB24 buffer; re-deriving it here would test that layer
+    # twice and this one — whether the widget-tree path carries pixels through intact — not at all.
+    var glyph_a = word_at(dst, stride, 0, 0);
+    var differs = 0;
+    var all_opaque = 1;
+    var y = 0;
+    while (y < 16) {
+        var x = 0;
+        while (x < 8) {
+            var v = word_at(dst, stride, x, y);
+            if (v != glyph_a) { differs = 1; }
+            if (((v >> 24) & 255) != 255) { all_opaque = 0; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    assert_eq(differs, 1, "the glyph cell has SHAPE — ink and paper, not one flat colour");
+    assert_eq(all_opaque, 1, "  ...and every pixel of it arrives with alpha 255");
+
+    test_group("ui — the wrapped surface writes into the CALLER's buffer, not a copy");
+    # ⚠ `dh_surface_wrap` must not allocate a surface of its own: puka hands it the compositor's
+    # present buffer, and a toolkit that copied instead would add a full frame of work per keystroke.
+    var probe = alloc(w * h * 4);
+    var sds = dh_surface_wrap(probe, w, h, stride);
+    assert_eq(sd_surface_pixels(sds), probe, "the surface points AT the caller's memory");
+    assert_eq(sd_surface_stride(sds), stride * 4, "and carries the caller's stride");
+
+    test_group("ui — a present with no buffer refuses instead of writing through a null");
+    assert_eq(puka_ui_present(0, w, h, stride), 0 - 1, "a null present buffer is refused");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

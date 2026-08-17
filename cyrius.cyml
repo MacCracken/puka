@@ -88,6 +88,6 @@ modules = ["dist/setu.cyr"]
 [deps.dhancha]
 git     = "https://github.com/MacCracken/dhancha.git"
 path    = "../dhancha"
-tag    = "0.9.5"
+tag    = "0.9.9"
 modules = ["dist/dhancha.cyr"]
 ---

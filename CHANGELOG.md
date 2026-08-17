@@ -2,6 +2,70 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.15] - 2026-08-17 — the reunion: puka's window is a dhancha widget tree
+
+### Changed — the present path goes through the toolkit
+
+dhancha's README calls it *"the spiritual extraction of puka's windowing code"*, and puka was the last
+app still hand-drawing its entire window: `fb_render` painted the grid into an RGB24 buffer and
+`pix_blit_region` copied it straight into the compositor's present buffer. That is now a **dhancha
+widget tree** (`src/ui.cyr`) whose `CANVAS` leaf performs the blit.
+
+⛔ **THE GRID IS NOT DECOMPOSED INTO WIDGETS, AND THAT IS THE DESIGN.** An 80×24 terminal is 1920
+cells, each with a foreground, background, attributes, a wide-glyph spacer flag and a possible cursor.
+As widgets that costs more memory than the scrollback and throws away the **dirty-row scanner** that
+makes a keystroke echo repaint sixteen scanlines instead of the screen. `fb_render` is untouched; what
+changed is where its pixels land. dhancha 0.9.9's `CANVAS` exists precisely so a renderer like this
+keeps working while the window around it becomes a tree.
+
+⚠ **The point is what is now possible, not what changed on screen.** A find bar (a dhancha
+`TEXTINPUT`), tabs, or a scrollback indicator is now a widget insertion instead of a rewrite of the
+present path — which is exactly what puka could not do while it hand-drew everything.
+
+### Fixed — ⛔ the present blit left the alpha byte at ZERO
+
+`pix_blit_region` packs `(r << 16) | (g << 8) | b`, so byte 3 was **0** on every pixel puka presented.
+That is correct for the path it was written for and wrong for a compositor that reads it: under agnos's
+`gpu_shader_op #92` op 0x01 — premultiplied src-over, `out = src + dst * (1 - src_a)` — an alpha of 0
+collapses the blend to `out = src + dst`. The terminal does not vanish; it renders as an **additive
+over-bright ghost** composited onto whatever is behind it, which is far harder to notice than a black
+rectangle.
+
+⚠ **It could not have been caught on the host before this release.** Every RGB dump of that buffer is
+correct — the defect is in a byte no host-side check looked at. `dh_canvas_blit_rgb24` sets it to 255,
+and `tests/ui.tcyr` asserts on the **full 32-bit word**.
+
+⚠ `pix_blit_region` itself is unchanged and still correct for its own path — the fix is that the
+present path no longer uses it.
+
+### Changed — no extra copy was added
+
+`dh_surface_wrap` (dhancha 0.9.9) points a sadish surface header **at** the buffer
+`win_present_begin` returned, so the widget tree draws directly into the memory the compositor reads.
+Rendering into a toolkit-owned surface and copying it across would have added a second full-frame copy
+per keystroke — adopting the toolkit would have made puka measurably slower, which is the wrong kind
+of port.
+
+⚠ The surface is wrapped **per frame**, never cached: `win_present_begin` hands back a pointer valid
+only until the matching commit.
+
+### Changed — `[deps.dhancha]` -> **0.9.9**
+
+### Testing
+
+`tests/ui.tcyr` (14 checks): the root is a `WINDOW`, the grid is a `CANVAS` with a draw callback, a
+rendered frame carries the grid's pixels into a caller-owned buffer with **alpha 255**, the glyph cell
+has shape rather than one flat colour, the wrapped surface points at the caller's memory with the
+caller's stride, and a null present buffer is refused.
+
+⚠ The glyph check asserts *"not uniform, and every pixel opaque"* rather than a specific foreground
+value: which RGB a cell resolves to is puka's colour model, which `render.tcyr` already covers against
+the RGB24 buffer. Asserting it again here would test that layer twice and this one — whether the
+widget-tree path carries pixels through intact — not at all.
+
+Mutation-tested: reverting to the alpha-dropping `pix_blit_region` fails 3 checks, and a `CANVAS` with
+no draw callback fails 5. Full suite 49/49 plus the new 14.
+
 ## [0.6.14] - 2026-08-17 — desktop-stack catch-up: dhancha 0.9.5, setu 0.8.6, one language version
 
 ### Changed — `[deps.dhancha]` 0.9.4 -> **0.9.5**

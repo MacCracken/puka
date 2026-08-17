@@ -17,6 +17,7 @@ include "src/render/pixfmt.cyr"
 include "src/render/atlas.cyr"
 include "src/render/fb.cyr"
 include "src/platform/setu/window_setu.cyr"
+include "src/ui.cyr"                        # the dhancha widget tree the window is built from (M7-D)
 include "src/pty.cyr"
 
 var demo_buf[256];
@@ -170,7 +171,19 @@ fn puka_terminal(rows, cols, frames): i64 {
         fb_render();
         var dst = win_present_begin(0);
         if (dst != 0) {
-            pix_blit_region(fb_buf(), fb_width(), 0, fb_height(), dst, fb_width());
+            # ⭐⭐ THROUGH THE WIDGET TREE (M7-D). This was a direct `pix_blit_region` from the grid
+            # buffer into the present buffer — puka drawing its entire window by hand. It is now a
+            # dhancha render whose CANVAS leaf performs that same blit, so the window has a widget
+            # tree and the grid keeps its dirty-row renderer untouched.
+            # ⛔ NOT AN EXTRA COPY: `dh_surface_wrap` (dhancha 0.9.9) points a sadish surface header
+            # AT `dst`, so the tree draws into the present buffer directly. Rendering into a
+            # toolkit-owned surface and copying it here would have added a second full-frame copy
+            # per keystroke and made adopting the toolkit a measurable regression.
+            # ⚠ It also fixes an alpha defect this path always had: `pix_blit_region` packs
+            # `(r<<16)|(g<<8)|b` and leaves byte 3 at ZERO, which under agnos's `#92` op 0x01
+            # premultiplied blend renders the terminal as an additive over-bright ghost rather than
+            # as opaque text. `dh_canvas_blit_rgb24` sets it to 255.
+            puka_ui_present(dst, fb_width(), fb_height(), fb_width());
             var prc = win_present_commit(0, 0, 0, fb_width(), fb_height());
             if (f == 0) {
                 if (prc == 0) { puka__say("puka: first present ok\n", 23); }
