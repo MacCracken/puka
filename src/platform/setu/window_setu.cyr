@@ -59,7 +59,12 @@ fn win_open(title, tlen, cols, rows, cell_w, cell_h, gpu_ctx): i64 {
     # getenv is GONE, not because it was wrong — it was the only one of three clients that got the
     # override right — but because one implementation in setu makes all three agree by construction.
     var path = 0;
-    var c = setu_client_connect(path);
+    # ⭐ THROUGH dhancha (2026-08-16). `dh_client_connect` is a one-line delegation to this same setu
+    # entry point, so behaviour is identical; what changes is that the transport seam is now the shared
+    # toolkit's. When the wire moves again — it has twice, TCP -> AF_UNIX -> the agnos `#97` channel band
+    # — consumers routed through dhancha follow, and ones that are not get left behind silently. dhancha
+    # itself was left behind exactly that way (pinned setu 0.7.4 across the cutover, fixed in 0.9.4).
+    var c = dh_client_connect(path);
     # ⚠ SAY IT. A silent 0 here is indistinguishable from "no compositor running", and the cause is
     # usually neither: a client built against a pre-cutover setu has no agnos arm at all and fails
     # with none of setu's own refusal messages. (Measured: puka pinned setu 0.7.4 and did exactly
@@ -76,7 +81,7 @@ fn win_open(title, tlen, cols, rows, cell_w, cell_h, gpu_ctx): i64 {
 }
 
 fn win_caps(win): i64 { return WIN_CAP_SHM; }
-fn win_fd(win): i64 { return setu_client_fd(setuwin_client); }
+fn win_fd(win): i64 { return dh_client_fd(setuwin_client); }
 fn win_size_px(win, out16): i64 { store64(out16, win_w); store64(out16 + 8, win_h); return 0; }
 
 # CPU path: the XRGB8888 buffer puka blits into. It persists across frames so the
@@ -179,4 +184,4 @@ fn win_next_key(win, out24): i64 {
     store64(out24 + 16, 1);
     return 1;
 }
-fn win_close(win): i64 { setu_client_close(setuwin_client); return 0; }
+fn win_close(win): i64 { dh_client_close(setuwin_client); return 0; }

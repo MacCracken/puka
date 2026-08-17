@@ -69,4 +69,23 @@ git     = "https://github.com/MacCracken/setu.git"
 path    = "../setu"
 tag     = "0.8.5"
 modules = ["dist/setu.cyr"]
+
+# ⭐⭐ dhancha — the client-side widget toolkit, added 2026-08-16 so puka stops being the last app that
+# reaches the compositor around the shared layer instead of through it.
+# ⛔ WHY IT WAS NOT HERE BEFORE, and it was not puka's fault: dhancha's dist bundle did not SHIP its
+# client layer until 0.9.4 (`src/dh_client.cyr` / `setu_client.cyr` / `setu_input.cyr` were missing from
+# `modules`), so `dh_client_connect` was undefined downstream and hand-rolling setu was the only option
+# any consumer had. Fixed in dhancha 0.9.4; this is the consumer half.
+# ⚠ SCOPE, STATED HONESTLY: puka routes CONNECT / FD / CLOSE through dhancha. `present` and `poll_input`
+# stay on setu directly, because dhancha's `dh_client_present` renders a WIDGET SURFACE and
+# `dh_client_next_event` returns a `DhEvent` — puka presents a raw XRGB terminal buffer and maps HID to
+# evdev itself. Those are different models and swapping them is a port, not a rename. The seam that
+# matters — where the transport is decided — is now shared.
+# ⛔ dhancha is the "spiritual extraction of puka's windowing code", so the eventual reunion is puka
+# adopting the widget tree. That is a project; this is the dependency it needs first.
+[deps.dhancha]
+git     = "https://github.com/MacCracken/dhancha.git"
+path    = "../dhancha"
+tag     = "0.9.4"
+modules = ["dist/dhancha.cyr"]
 ---

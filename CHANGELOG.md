@@ -2,6 +2,35 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.13] - 2026-08-16 — the transport seam moves to dhancha
+
+### Changed — `win_open` / `win_fd` / `win_close` go through `dh_client_*`, and `[deps.dhancha]` lands
+
+puka was the last app reaching the compositor around the shared toolkit instead of through it. It now
+routes CONNECT / FD / CLOSE through dhancha's client layer.
+
+⛔ **IT WAS NOT puka's FAULT, AND THE CAUSE IS WORTH RECORDING.** dhancha's dist bundle did not SHIP its
+client layer until 0.9.4 — `src/dh_client.cyr`, `src/setu_client.cyr` and `src/setu_input.cyr` were
+absent from its `modules` list — so `dh_client_connect` was **undefined downstream** and hand-rolling
+setu was the only option any consumer had. Proven by rewiring first and getting
+`2 reachable undefined function(s)`.
+
+⚠ **SCOPE, STATED PLAINLY.** `setu_client_present` and `setu_client_poll_input` STAY on setu directly.
+dhancha's `dh_client_present` renders a WIDGET SURFACE and `dh_client_next_event` returns a `DhEvent`;
+puka presents a raw XRGB terminal buffer and maps HID to evdev itself. Those are different models — a
+port, not a rename. What is now shared is the seam that has moved twice (TCP -> AF_UNIX -> the agnos
+`#97` channel band) and stranded a consumer each time.
+
+⚠ **SIZE, MEASURED RATHER THAN ASSERTED: 1,541,744 -> 1,633,616 B (+91,872, +6%).** An earlier draft of
+this work was DEFERRED on the argument that adding dhancha's draw stack (sadish + rupa + rekha) would
+grow puka into the recorded `spawn_path #43` iron size hazard. The growth is 6%, and the hazard was
+never measured before it was invoked. ⇒ Measure the thing you are about to refuse on.
+
+**Verified in QEMU** (`scripts/harness/puka-terminal-test.py`, agnos 1.56.45): `puka: terminal up --
+80x24, shell on a pty` -> `puka: first present ok`, `presented: 2` (puka AND crab, both rewired), spawned
+through `spawn_path #43`, `exit 95`. ⛔ That does NOT close the iron size hazard — its own record says
+"QEMU does not reproduce it" — but the binary is the same order of size as the one that burned green.
+
 ## [0.6.12] - 2026-08-12 — one rendezvous, named by setu
 
 ⭐ Passes **0** to setu instead of hardcoding `"/tmp/aethersafha-setu.sock"`, so the socket is named in
