@@ -8,7 +8,7 @@ language = "cyrius"
 # band wrappers — `sys_chan_mint` / `sys_chan_send` / `sys_chan_recv` / `sys_chan_close` and the
 # `CH_E_*` result codes — which landed in cyrius 6.5.8. On the old 6.5.5 pin the agnos arm failed with
 # `undefined variable 'CH_E_PEERGONE'`, which reads like a puka bug and is a toolchain floor.
-cyrius = "6.5.9"
+cyrius = "6.5.21"
 
 [build]
 entry = "src/main.cyr"
@@ -30,6 +30,8 @@ stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "b
 # VGA 9x16) cover the renderer's needs.
 [deps.kashi]
 git     = "https://github.com/MacCracken/kashi.git"
+# ⚠ `path` — kashi is VENDORED (lib/kashi_font_data.cyr); every other dep in this stack carries both.
+path    = "../kashi"
 tag     = "1.0.4"
 modules = ["src/font_data.cyr"]
 
@@ -67,7 +69,7 @@ modules = ["src/font_data.cyr"]
 git     = "https://github.com/MacCracken/setu.git"
 # ⚠ `path` added 2026-08-12 — setu 0.8.5 centralises the rendezvous ($SETU_SOCKET).
 path    = "../setu"
-tag     = "0.8.5"
+tag     = "0.8.6"
 modules = ["dist/setu.cyr"]
 
 # ⭐⭐ dhancha — the client-side widget toolkit, added 2026-08-16 so puka stops being the last app that
@@ -86,6 +88,6 @@ modules = ["dist/setu.cyr"]
 [deps.dhancha]
 git     = "https://github.com/MacCracken/dhancha.git"
 path    = "../dhancha"
-tag     = "0.9.4"
+tag    = "0.9.5"
 modules = ["dist/dhancha.cyr"]
 ---
