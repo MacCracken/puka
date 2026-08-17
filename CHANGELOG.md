@@ -2,6 +2,42 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.14] - 2026-08-17 — desktop-stack catch-up: dhancha 0.9.5, setu 0.8.6, one language version
+
+### Changed — `[deps.dhancha]` 0.9.4 -> **0.9.5**
+
+0.6.13 put puka's transport seam on the toolkit; this keeps it current. The two toolkit fixes are
+`dh_hit_test` clipping to the parent and `dh_surface_present` refusing instead of silently succeeding.
+⚠ **Neither is reachable from puka today**, and saying so matters more than claiming the upgrade:
+puka routes CONNECT / FD / CLOSE through `dh_client_*` but renders a raw XRGB terminal buffer and maps
+HID to evdev itself, so it touches no widget tree and never calls `dh_surface_present`. The bump keeps
+the declared graph honest and takes the fixes for free when the widget tree is adopted.
+
+### Changed — `[deps.setu]` 0.8.5 -> **0.8.6**
+
+`present_probe` honours `SETU_CLOSE`. ⭐ Directly relevant here: the probe is what gets staged into the
+`/bin/puka` slot by default, and it inherited the exact leak **puka itself fixed on 2026-08-08** — an
+orphaned client holding one of 16 system-wide `#86` slots for the rest of the boot. Measured on iron
+with the probe in the slot: 16 → 15 → 14 → 13, one per desktop launch. A fix puka had already paid for
+came back through its stand-in.
+
+### Changed — cyrius pin 6.5.9 -> **6.5.21**, matching agnos, aethersafha and dhancha
+
+One language version across the desktop stack.
+
+### Fixed — `[deps.kashi]` gains a `path` override
+
+Every other dep here carries `git` + `path`; kashi did not. ⛔ `path` WINS over `tag` — re-verify the
+tag against kashi's `VERSION` at each cut.
+
+⚠ Unblocked a hard `cyrius deps` failure (*"dep dhancha requires 'kashi_font_data'"*) whose cause was
+in dhancha's dist sidecar, not here — kashi is VENDORED and belongs to neither the stdlib nor a fetched
+dep list. Fixed in dhancha 0.9.5.
+
+**Verified**: `--agnos` build OK, 1,637,800 B. ⚠ Grown from 1,633,616 B; the recorded `spawn_path #43`
+iron size hazard is unchanged in kind and QEMU still spawns it (`puka: terminal up -- 80x24, shell on a
+pty` → `first present ok`), but that hazard's own note says QEMU does not reproduce it.
+
 ## [0.6.13] - 2026-08-16 — the transport seam moves to dhancha
 
 ### Changed — `win_open` / `win_fd` / `win_close` go through `dh_client_*`, and `[deps.dhancha]` lands
