@@ -1,0 +1,66 @@
+# engine_bundle.tcyr — the terminal ENGINE stands alone, which is what makes `dist/puka.cyr`
+# embeddable by other programs.
+#
+# ⭐⭐ WHY THIS EXISTS. puka was the only repo in the desktop stack that published NOTHING — no
+# `[lib]`, no `dist/` — so a program wanting to embed a terminal had to vendor puka's source and
+# inherit its pty, its platform layer and its input stack. The engine had been kept clean of all of
+# that (terminal.cyr's own header: *"the caller (the PTY owner) is responsible ... terminal.cyr does
+# not depend on the PTY layer"*), and nothing checked that claim or shipped the result.
+#
+# ⚠ THIS SUITE INCLUDES ONLY THE ENGINE MODULES — the same list as `[lib] modules`. If an engine
+# file grows a call into the app half (pty / platform / input / line_discipline), this stops
+# compiling. That is the point: the boundary is asserted by the include list, not by a comment.
+include "lib/kashi_font_data.cyr"
+include "src/parser.cyr"
+include "src/grid.cyr"
+include "src/unicode.cyr"
+include "src/terminal.cyr"
+include "src/render/pixfmt.cyr"
+include "src/render/atlas.cyr"
+include "src/render/fb.cyr"
+
+fn main() {
+    alloc_init();
+    kashi_font_init();
+
+    test_group("engine — a consumer drives it with no pty, no window, no app code");
+    term_init(4, 20);
+    assert_eq(grid_get_rows(), 4, "rows as asked");
+    assert_eq(grid_get_cols(), 20, "cols as asked — ⚠ term_init is (rows, cols)");
+    fb_init(8, 16);
+    assert_eq(fb_width(), 160, "framebuffer sized from the grid (20 cols x 8px)");
+    assert_eq(fb_height(), 64, "  ...and 4 rows x 16px");
+
+    test_group("engine — text fed in reaches pixels");
+    term_feed_str("hi");
+    assert_eq(grid_glyph(0, 0), 104, "'h' landed in the grid");
+    assert_eq(grid_glyph(0, 1), 105, "'i' next to it");
+    var painted = fb_render_full();
+    assert_neq(painted, 0, "the renderer painted rows");
+    # ⚠ Asserted on the ENGINE's own RGB24 buffer, which is the surface an embedder blits from.
+    var p = fb_buf();
+    var ink = 0;
+    var i = 0;
+    while (i < fb_width() * fb_height()) {
+        if (load8(p + i * 3) != 0) { ink = 1; }
+        i = i + 1;
+    }
+    assert_eq(ink, 1, "glyph pixels reached the buffer an embedder reads");
+
+    test_group("engine — the escape parser works without the app half");
+    term_feed_str("\x1b[2J");
+    assert_eq(grid_glyph(0, 0), 32, "ED cleared the screen to blanks");
+
+    test_group("engine — resize is the caller's to propagate, not the engine's");
+    # ⛔ THE SEAM THAT MAKES THIS EMBEDDABLE. `term_resize` changes the grid and NOTHING else — it
+    # does not reach for a pty to tell the child. An engine that called `pty_set_winsize` here could
+    # not be embedded by a program whose terminal is not backed by a pty at all.
+    term_resize(6, 30);
+    assert_eq(grid_get_rows(), 6, "the grid resized");
+    assert_eq(grid_get_cols(), 30, "  ...both axes");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

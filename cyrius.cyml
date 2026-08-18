@@ -15,6 +15,20 @@ entry = "src/main.cyr"
 test = "src/test.cyr"
 output = "puka"
 
+# `cyrius distlib` -> dist/puka.cyr: the terminal ENGINE, for programs that embed a terminal rather
+# than run one. Excludes the app half (main, pty, platform, input, line_discipline) on purpose.
+# Order is main.cyr's include order. Consumers must also declare [deps.kashi] — fb.cyr blits its glyphs.
+[lib]
+modules = [
+    "src/parser.cyr",
+    "src/grid.cyr",
+    "src/unicode.cyr",
+    "src/terminal.cyr",
+    "src/render/pixfmt.cyr",
+    "src/render/atlas.cyr",
+    "src/render/fb.cyr",
+]
+
 [deps]
 # Base set + the extras mabda's amalgam needs (args/hashmap/tagged/fnptr/mmap/
 # dynlib/sakshi) so `dist/mabda.cyr` resolves its stdlib globals (MAP_SHARED,

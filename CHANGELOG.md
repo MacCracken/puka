@@ -2,6 +2,39 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.17] - 2026-08-17 — puka publishes its terminal engine
+
+### Added — `[lib]` + `dist/puka.cyr`, so other programs can embed a terminal
+
+puka was the only repo in the desktop stack that published **nothing** — no `[lib]`, no `dist/`. A
+program wanting a terminal inside it had to vendor puka's source and inherit its pty, platform layer
+and input stack along with the parts it actually wanted.
+
+The bundle is the **engine only**: parser, grid, unicode, terminal, and the render trio
+(pixfmt/atlas/fb). 2,017 lines. The app half — main, pty, platform, input, line_discipline — is
+excluded. Verified: `dist/puka.cyr` defines no `pty_*`, `win_*`, `input_from*`, `evdev_*`,
+`puka_ui_*` or `setu_*` function.
+
+⚠ Consumers must also declare `[deps.kashi]` — `fb.cyr` blits its glyphs from the system font.
+
+⭐ **The engine was already clean; nothing had shipped it.** `terminal.cyr` has long carried the
+rule — *"the caller (the PTY owner) is responsible for pushing the new size to the child; terminal.cyr
+does not depend on the PTY layer"* — and no check enforced it and no bundle delivered on it.
+
+⚠ Composes with dhancha's `CANVAS` (0.9.9): an embedder blits the engine's RGB24 buffer into a
+widget-tree slot, which is exactly what puka's own `src/ui.cyr` does since 0.6.15. A terminal does
+not have to decompose into per-cell widgets to live in a widget tree.
+
+### Testing — `tests/engine_bundle.tcyr` (11 checks)
+
+Drives the engine with no pty, no window and no app code: sizes a grid, feeds text, renders, and
+asserts glyph pixels reach the RGB24 buffer an embedder blits from; runs an escape sequence; and
+resizes.
+
+⛔ **The suite includes only the engine modules — the same list as `[lib] modules` — so the boundary
+is asserted by the build, not by a comment.** Mutation-tested: making `term_resize` call
+`pty_set_winsize` fails to compile with `undefined function`, which is the whole guarantee.
+
 ## [0.6.16] - 2026-08-17 — toolchain pin to 6.5.27
 
 ### Changed — `cyrius = "6.5.21"` -> **6.5.27**
