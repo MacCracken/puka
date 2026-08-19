@@ -57,7 +57,16 @@ fn main() {
             type_cp(0x68);            # 'h'
             type_cp(0x69);            # 'i'
             type_cp(0x0D);            # Enter (CR codepoint — no special branch)
-            pty_pump(200);
+            # ⛔ WAIT FOR THE ECHO, NOT FOR A QUIET PERIOD — the same latent flake that broke
+            # tests/pty.tcyr in CI 2026-08-19. `pty_pump` returns after N consecutive EMPTY reads,
+            # which is not "the child has echoed"; a loaded runner that splits the echo across reads
+            # can exhaust the budget mid-stream. Bounded, so a child that never echoes still fails.
+            var rounds = 0;
+            while (rounds < 40) {
+                pty_pump(20);
+                if (grid_glyph(0, 1) == 0x69) { rounds = 40; }
+                if (grid_glyph(0, 1) != 0x69) { rounds = rounds + 1; }
+            }
             pty_close();              # EOF/SIGHUP so cat exits
             pty_wait();
             assert_eq(grid_glyph(0, 0), 0x68, "echoed 'h' landed at (0,0) via the encoder");

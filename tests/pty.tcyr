@@ -57,7 +57,22 @@ fn main() {
             pty_close();
             assert(1, "skipped: no spawn");
         } else {
-            pty_pump(200);          # up to ~200ms of idle before giving up
+            # ⛔⛔ WAIT FOR THE END STATE, NOT FOR A QUIET PERIOD. This was a single
+            # `pty_pump(200)`, and `pty_pump` returns after N CONSECUTIVE EMPTY READS — which is not
+            # the same fact as "the child is done". `/bin/echo` writes "hello world\n" and the pts
+            # expands it to "hello world\r\n"; when a loaded runner splits that across two reads,
+            # the idle budget can expire between them, leaving row 0 correct and the cursor still on
+            # row 0. CI 2026-08-19 failed exactly that way — `cursor advanced past the echoed line
+            # (got 0, expected 1)` with the row assertion passing — while it passed 6/6 locally.
+            # ⇒ Pump until the terminal reaches the state under test, with a BOUNDED total so a
+            # child that never writes still fails (and fails for the right reason) instead of
+            # hanging. Each round is a full idle budget, so a slow child gets ~40x the old wait.
+            var rounds = 0;
+            while (rounds < 40) {
+                pty_pump(20);
+                if (grid_cursor_row() > 0) { rounds = 40; }
+                if (grid_cursor_row() == 0) { rounds = rounds + 1; }
+            }
             pty_wait();
             pty_close();
             # /bin/echo writes "hello world\n"; the pts maps \n -> \r\n, so

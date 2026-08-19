@@ -2,7 +2,7 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.6.19] - 2026-08-19 — a present that fails is no longer silent
+## [0.6.19] - 2026-08-19 — a silent present, and two tests that waited for silence
 
 ### Fixed — only frame 0 reported its present result
 
@@ -21,6 +21,31 @@ indistinguishable from the compositor-side defect it was being used to diagnose.
 ### Changed — cyrius pin 6.5.28 (unchanged); no functional change to the resize path
 
 0.6.18's reflow is intact. The compositor-side half of that defect is aethersafha 0.16.13.
+
+
+### Fixed — `tests/pty.tcyr` failed in CI and passed locally
+
+`FAIL: cursor advanced past the echoed line (got 0, expected 1)`, with the row-content assertion
+PASSING in the same run — so the text arrived and the trailing newline did not.
+
+`pty_pump(max_idle)` returns after N **consecutive empty reads**, which is not the same fact as "the
+child is done". `/bin/echo` writes `hello world\n` and the pts expands it to `hello world\r\n`; when
+a loaded runner splits that across two reads, the idle budget can expire between them. The test then
+asserts on a half-consumed stream. It is timing, not content — which is why it passed 6/6 locally
+and failed on CI.
+
+⇒ Both pty tests now pump **until the state under test is reached**, with a bounded round count so a
+child that never writes still fails, and fails for the right reason.
+
+⭐ **Demonstrated, not assumed.** Starving the budget to `pty_pump(1)` to force the split: the old
+single-pump shape failed **2 assertions in 6 of 6 runs**; the new loop passed **6 of 6** on the same
+budget. Passing runs alone proved nothing here — the flaky version also passed 6/6 at the normal
+budget.
+
+### Fixed — `tests/input_pty.tcyr` had the identical latent shape
+
+`pty_pump(200)` then assert on the pts echo of `hi`. Same race, not yet observed failing. Hardened
+the same way rather than waiting for a red CI to find it.
 
 
 ## [0.6.18] - 2026-08-19 — the terminal follows the window
