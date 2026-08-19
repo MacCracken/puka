@@ -46,6 +46,7 @@ var puka_line_marked = 0;
 
 # kashi's built-in VGA cell is 8x16; the grid is the classic 80x24. PUKA_FRAMES = 0 means run until
 # the child exits — a positive value bounds the loop for harnesses that must not hang.
+var puka_pres_fail = 0;   # bounded count of reported present failures
 var puka_szpx = 0;      # alloc(16) scratch for win_size_px; see puka_terminal
 var PUKA_CELL_W = 8;
 var PUKA_CELL_H = 16;
@@ -222,6 +223,19 @@ fn puka_terminal(rows, cols, frames): i64 {
             if (f == 0) {
                 if (prc == 0) { puka__say("puka: first present ok\n", 23); }
                 else { puka__say("puka: first present REFUSED\n", 28); }
+            }
+            # ⛔ A PRESENT THAT FAILS AFTER FRAME 0 WAS SILENT. Only frame 0 was reported, so a
+            # surface that stopped reaching the compositor — which is exactly what a resize risks,
+            # since setu RECREATES the `#86` slot at the new byte count — looked identical to a
+            # surface that was arriving fine. Bounded so a persistent failure cannot flood a console
+            # three procs share.
+            if (prc != 0) {
+                if (puka_pres_fail < 8) {
+                    puka_pres_fail = puka_pres_fail + 1;
+                    puka__say("puka: present REFUSED, rc ", 26); puka__say_num(0 - prc);
+                    puka__say(" at ", 4); puka__say_num(fb_width()); puka__say("x", 1);
+                    puka__say_num(fb_height()); puka__say("\n", 1);
+                }
             }
         }
         else { if (f == 0) { puka__say("puka: no present buffer\n", 24); } }

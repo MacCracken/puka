@@ -2,6 +2,27 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.19] - 2026-08-19 — a present that fails is no longer silent
+
+### Fixed — only frame 0 reported its present result
+
+`win_present_commit`'s return code was checked on the first frame and discarded thereafter, so a
+surface that STOPPED reaching the compositor looked exactly like one arriving fine. That is the
+worst case for a resize: setu recreates the `#86` slot at the new byte count, and if that create is
+refused the client keeps rendering into a buffer nobody reads. Now reported (bounded at 8) with the
+rc and the extent.
+
+⭐ It paid for itself immediately. In QEMU, maximizing produced
+`puka: present REFUSED, rc 43 at 2048x2016` — rc 43 is setu's inline fallback failing after
+`setu_buf_create` refused 16.5 MB. QEMU has no GPU carveout, so buffers go through `#71` at a **2 MB**
+cap; on iron `#86` allows 32 MB and 2560x1408 = 14.4 MB fits. Without this line the run was
+indistinguishable from the compositor-side defect it was being used to diagnose.
+
+### Changed — cyrius pin 6.5.28 (unchanged); no functional change to the resize path
+
+0.6.18's reflow is intact. The compositor-side half of that defect is aethersafha 0.16.13.
+
+
 ## [0.6.18] - 2026-08-19 — the terminal follows the window
 
 ### Fixed — maximizing puka grew the frame and not the terminal
