@@ -8,7 +8,7 @@ language = "cyrius"
 # band wrappers — `sys_chan_mint` / `sys_chan_send` / `sys_chan_recv` / `sys_chan_close` and the
 # `CH_E_*` result codes — which landed in cyrius 6.5.8. On the old 6.5.5 pin the agnos arm failed with
 # `undefined variable 'CH_E_PEERGONE'`, which reads like a puka bug and is a toolchain floor.
-cyrius = "6.5.27"
+cyrius = "6.5.28"
 
 [build]
 entry = "src/main.cyr"
@@ -113,6 +113,6 @@ modules = ["dist/setu.cyr"]
 [deps.dhancha]
 git     = "https://github.com/MacCracken/dhancha.git"
 path    = "../dhancha"
-tag    = "0.9.10"
+tag    = "0.9.12"
 modules = ["dist/dhancha.cyr"]
 ---

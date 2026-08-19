@@ -24,6 +24,21 @@ var demo_buf[256];
 
 fn puka__say(s, n): i64 { return syscall(1, 1, s, n); }
 
+# Decimal print of a non-negative value, no newline. The resize line has to carry the NEW grid dims:
+# "resized" on its own proves an event arrived, not that the grid actually grew, and those are the
+# two things a harness must be able to tell apart.
+fn puka__say_num(v): i64 {
+    if (v < 0) { puka__say("-", 1); v = 0 - v; }
+    if (v == 0) { return puka__say("0", 1); }
+    var d = alloc(24);
+    var n = 0;
+    while (v > 0) { store8(d + n, 48 + v % 10); v = v / 10; n = n + 1; }
+    var out = alloc(24);
+    var i = 0;
+    while (i < n) { store8(out + i, load8(d + n - 1 - i)); i = i + 1; }
+    return puka__say(out, n);
+}
+
 # First-occurrence latch for the "a line reached the shell" marker. ⚠ puka's own fd 1 is the CONSOLE
 # (the compositor's inherited stdio); only the CHILD's stdio rides the channel, which is why these land
 # in the serial log rather than inside the terminal window.
@@ -31,6 +46,7 @@ var puka_line_marked = 0;
 
 # kashi's built-in VGA cell is 8x16; the grid is the classic 80x24. PUKA_FRAMES = 0 means run until
 # the child exits — a positive value bounds the loop for harnesses that must not hang.
+var puka_szpx = 0;      # alloc(16) scratch for win_size_px; see puka_terminal
 var PUKA_CELL_W = 8;
 var PUKA_CELL_H = 16;
 var PUKA_ROWS   = 24;
@@ -159,6 +175,15 @@ fn puka_terminal(rows, cols, frames): i64 {
     }
     puka__say("puka: terminal up -- 80x24, shell on a pty\n", 43);
 
+    # Scratch for `win_size_px` (out16: [+0] = surface width, [+8] = height). Allocated ONCE — the
+    # loop reads it every frame and `alloc` has no free, so a per-frame allocation would leak 16 B
+    # per present for the life of the terminal.
+    puka_szpx = alloc(16);
+    if (puka_szpx == 0) {
+        puka__say("puka: size-scratch alloc FAILED\n", 32);
+        pty_close(); win_close(0); return 0 - 1;
+    }
+
     var f = 0;
     var live = 1;
     while (live == 1) {
@@ -183,7 +208,16 @@ fn puka_terminal(rows, cols, frames): i64 {
             # `(r<<16)|(g<<8)|b` and leaves byte 3 at ZERO, which under agnos's `#92` op 0x01
             # premultiplied blend renders the terminal as an additive over-bright ghost rather than
             # as opaque text. `dh_canvas_blit_rgb24` sets it to 255.
-            puka_ui_present(dst, fb_width(), fb_height(), fb_width());
+            # ⚠ THE STRIDE IS THE SURFACE'S, NOT THE FRAMEBUFFER'S. `dst` is the backend's present
+            # buffer and its row pitch is the surface width; `fb_width()` is the GRID's pixel extent.
+            # The two are equal at open by construction and stayed equal only because nothing ever
+            # resized. They diverge the moment the grid clamps at GRID_MAX (480 cols = 3840 px), and
+            # a width written at one pitch and read at another SKEWS the frame diagonally rather
+            # than leaving a gap — a failure that looks like a renderer bug, not a stride bug.
+            win_size_px(0, puka_szpx);
+            var surf_w = load64(puka_szpx);
+            if (surf_w < fb_width()) { surf_w = fb_width(); }
+            puka_ui_present(dst, fb_width(), fb_height(), surf_w);
             var prc = win_present_commit(0, 0, 0, fb_width(), fb_height());
             if (f == 0) {
                 if (prc == 0) { puka__say("puka: first present ok\n", 23); }
@@ -214,6 +248,44 @@ fn puka_terminal(rows, cols, frames): i64 {
         if ((wev & WIN_EV_CLOSE) != 0) {
             puka__say("puka: compositor closed the window -- exiting\n", 46);
             live = 0;
+        }
+        # ⭐⭐ THE COMPOSITOR ASKED US TO RESIZE. Maximize/fullscreen changes the WINDOW; the surface
+        # is ours and only we can grow it, so until we adopt the ask and re-attach, aethersafha
+        # clamps its blit to the buffer we last gave it. That is the 2026-08-19 iron report:
+        # "fullscreen of puka expands the window but not the terminal display itself."
+        # ⛔ `WIN_EV_RESIZE` and `win_resize_apply` have existed in the platform ABI the whole time —
+        # the wayland backend even raises the event — and NOTHING in this loop consumed either, so
+        # neither backend ever reflowed. The setu backend additionally stubbed `win_resize_apply` to
+        # `return 0`. Three layers of a contract present with no consumer.
+        # ⚠ ORDER MATTERS: adopt the pixels first (win_resize_apply), then derive rows/cols from the
+        # ADOPTED size — the backend floors it to whole cells, so deriving from the raw ask would
+        # compute a grid the surface cannot hold.
+        if ((wev & WIN_EV_RESIZE) != 0) {
+            if (win_resize_apply(0) == 0) {
+                win_size_px(0, puka_szpx);
+                var nw = load64(puka_szpx);
+                var nh = load64(puka_szpx + 8);
+                var ncols = nw / PUKA_CELL_W;
+                var nrows = nh / PUKA_CELL_H;
+                if (ncols > 0) { if (nrows > 0) {
+                    # `term_resize` -> `grid_resize` clamps to GRID_MAX_* and marks every row dirty,
+                    # so the next `fb_render` repaints the whole frame; `fb_resize` then refits the
+                    # pixel buffer to the grid's new extent.
+                    term_resize(nrows, ncols);
+                    if (fb_resize() < 0) { puka__say("puka: fb refit FAILED after resize\n", 35); }
+                    # ⚠ ACCEPTED AND IGNORED ON AGNOS, deliberately — there is no TIOCSWINSZ on the
+                    # `#97` channel band (src/pty.cyr "NO WINDOW SIZE"). The GRID reflows, which is
+                    # what the report was about; the child shell is NOT told, so its own wrapping is
+                    # unchanged until a resize-aware pty protocol exists. Called anyway so the seam
+                    # is real on the host and this line does not have to be found later.
+                    pty_set_winsize(0, nrows, ncols);
+                    puka__say("puka: resized by the compositor -- grid ", 40);
+                    puka__say_num(grid_get_cols()); puka__say("x", 1);
+                    puka__say_num(grid_get_rows()); puka__say(" cells, ", 8);
+                    puka__say_num(fb_width()); puka__say("x", 1);
+                    puka__say_num(fb_height()); puka__say(" px\n", 4);
+                } }
+            }
         }
         # ⚠ LEFT AS EQUALITY, DELIBERATELY, and it is mask-fragile: on the wayland path a frame that
         # carries both a key and a frame-done reports `KEY | FRAME` and this test misses the key. That is

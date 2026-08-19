@@ -2,6 +2,65 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.18] - 2026-08-19 — the terminal follows the window
+
+### Fixed — maximizing puka grew the frame and not the terminal
+
+Iron 2026-08-19: "fullscreen of puka expands the window but not the terminal display itself."
+Maximize changes the WINDOW; the surface belongs to the client, so only the client can grow it.
+aethersafha has SENT `SETU_CONFIGURE` since 0.16.8 and clamps its blit until the client re-attaches
+— puka never handled the message, so the grid stayed 80x24 inside a full-screen frame.
+
+⛔ **The contract existed at three layers with no consumer.** `WIN_EV_RESIZE` and `win_resize_apply`
+were already in the platform ABI and the wayland backend already raises the event; the setu backend
+stubbed `win_resize_apply` to `return 0` ("no compositor-driven resize yet"); and the engine loop
+tested for neither, so **no** backend ever reflowed. Now: `SETU_CONFIGURE` maps to `WIN_EV_RESIZE`,
+`win_resize_apply` adopts the size and refits the present buffer, and the loop reflows
+`term_resize` -> `fb_resize` and repaints.
+
+Verified in QEMU (`agnos/scripts/harness/puka-resize-test.py`): pre-fix the event never arrives at
+the grid; post-fix **80x24 -> 256x126 cells (2048x2016 px)** on a 2048x2048 framebuffer — the screen
+minus the 32 px titlebar. The oracle is the new grid size, not the event: "resized" alone only
+proves a message arrived, and the defect was that the grid did not follow.
+
+### Fixed — the present passed the FRAMEBUFFER width as the SURFACE stride
+
+`puka_ui_present(dst, fb_width(), fb_height(), fb_width())` wrote into the backend's buffer using
+the grid's pixel width as the row pitch. Those are equal at open by construction and stayed equal
+only because nothing ever resized. They diverge once the grid clamps at `GRID_MAX_COLS` (480 cols =
+3840 px), and a frame written at one pitch and read at another SKEWS diagonally — which reads as a
+renderer fault, not a stride fault. Now passes the surface's own width.
+
+### Changed — a configure is floored to WHOLE CELLS before it is adopted
+
+The compositor asks in pixels and does not know the surface is a character grid. Adopting 1445 px
+of height would leave a 5 px band no cell can address, and a surface that is not `cols*8 x rows*16`
+reintroduces the stride mismatch above. `win_resize_apply` quantizes, so surface == grid extent by
+construction. A degenerate ask (<= 0, or smaller than one cell) is refused rather than adopted.
+
+⚠ The present buffer is **grow-only** with capacity tracked separately from `win_w*win_h*4`
+(`fb_cap` in `render/fb.cyr` is the same idiom): `alloc` has no free, so reallocating per configure
+during a drag would leak a full surface per frame, and testing growth against the *logical* size
+would realloc a buffer that already fits.
+
+⚠ **The child shell is NOT told.** `pty_set_winsize` is accepted and ignored on agnos — there is no
+TIOCSWINSZ on the `#97` channel band (see the "NO WINDOW SIZE" note in `src/pty.cyr`). puka's grid
+reflows, which is what the report was about; a resize-aware pty protocol is separate work.
+
+### Changed — dhancha tag 0.9.10 -> **0.9.12**, matching the vendored bundle
+
+`cyrius build` re-vendors `lib/dhancha.cyr` from `path = "../dhancha"`, so the bundle was 0.9.12
+while the manifest still declared 0.9.10. ⛔ **The path WINS over the tag** — CI clones by tag and
+would have built a different library than every local build and every staged binary. Corrected to
+what was actually compiled; 0.9.12 is tagged and released.
+
+### Changed — cyrius pin 6.5.27 -> 6.5.28
+
+⚠ The pin selects the **stdlib snapshot**, so this also re-vendored `lib/dynlib.cyr` — whitespace
+only, 6.5.28's paren-continuation reindent (2 spaces per open-paren level), the same reformat the
+agnos kernel took.
+
+
 ## [0.6.17] - 2026-08-17 — puka publishes its terminal engine
 
 ### Added — `[lib]` + `dist/puka.cyr`, so other programs can embed a terminal

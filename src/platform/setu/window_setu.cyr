@@ -47,6 +47,16 @@ var win_w = 0;
 var win_h = 0;
 var setuwin_client = 0;   # *SetuClient (setu_client_connect)
 var setuwin_buf    = 0;   # persistent XRGB8888 present buffer (win_w*win_h*4)
+# ⚠ CAPACITY, TRACKED SEPARATELY from win_w*win_h*4. The buffer is grow-only, so after a shrink the
+# logical size understates what is allocated; testing growth against the logical size would realloc
+# a surface that already fits — and `alloc` has no free, so that leaks. `fb_cap` in render/fb.cyr is
+# the same idiom.
+var setuwin_cap    = 0;   # bytes actually allocated at setuwin_buf
+# Cell metrics, kept from win_open so a configure can be quantized to WHOLE CELLS. The compositor
+# asks in pixels and has no idea our surface is a character grid; adopting 1445 px of height would
+# leave a 5 px band the grid can never address.
+var setuwin_cell_w = 0;
+var setuwin_cell_h = 0;
 
 fn win_backend_select(): i64 { return 1; }   # 1 = setu (0 = wayland)
 
@@ -71,12 +81,15 @@ fn win_open(title, tlen, cols, rows, cell_w, cell_h, gpu_ctx): i64 {
     # that.) The floor is setu >= 0.8.0 on agnos.
     if (c == 0) { syscall(1, 1, "setuwin: setu connect refused\n", 30); return 0; }
     setuwin_client = c;
+    setuwin_cell_w = cell_w;
+    setuwin_cell_h = cell_h;
     win_w = cols * cell_w;
     win_h = rows * cell_h;
     var nbytes = win_w * win_h * 4;
     setuwin_buf = alloc(nbytes);
     if (setuwin_buf == 0) { syscall(1, 1, "setuwin: present-buffer alloc FAILED\n", 37); return 0; }
     memset(setuwin_buf, 0, nbytes);
+    setuwin_cap = nbytes;
     return 1;
 }
 
@@ -145,6 +158,11 @@ fn setuwin__hid_to_evdev(u): i64 {
 var setuwin_key_code = 0;
 var setuwin_key_mods = 0;
 var setuwin_key_have = 0;
+# ⭐ The size the compositor last ASKED for (`SETU_CONFIGURE`). Held separately from win_w/win_h
+# because it is a REQUEST, not a fact: nothing changes until `win_resize_apply` adopts it and the
+# engine re-attaches at the new extent. 0 = nothing pending.
+var setuwin_cfg_w = 0;
+var setuwin_cfg_h = 0;
 
 fn win_poll_events(win): i64 {
     if (setuwin_client == 0) { return WIN_EV_NONE; }
@@ -159,6 +177,28 @@ fn win_poll_events(win): i64 {
     # are only 16 of those slots system-wide. Our EXIT is what releases them.
     # ⚠ `SETU_CLOSE` (kind 7) has always been in the protocol; it was never sent and never handled.
     if (setu_msg_kind(m) == SETU_CLOSE) { return WIN_EV_CLOSE; }
+    # ⭐⭐ THE COMPOSITOR ASKS US TO RESIZE (`SETU_CONFIGURE`; arg0 = id, arg1 = w, arg2 = h,
+    # arg3 = state). Maximize/fullscreen is the compositor changing the WINDOW; the surface is ours
+    # and only we can grow it. Until we re-attach at this size aethersafha CLAMPS its blit to the
+    # buffer we last gave it — so the frame grows and the terminal does not, which is exactly the
+    # 2026-08-19 iron report ("fullscreen expands the window but not the terminal display").
+    # ⚠ This message has been in the protocol since setu 0.7.x and had no sender until aethersafha
+    # 0.16.8 and no handler here until now. The event vocabulary already existed too
+    # (`WIN_EV_RESIZE`, `win_resize_apply`) — the wayland backend raises it; this backend answered
+    # WIN_EV_NONE and the engine consumed neither.
+    if (setu_msg_kind(m) == SETU_CONFIGURE) {
+        var cw = setu_msg_arg(m, 1);
+        var ch = setu_msg_arg(m, 2);
+        # ⛔ REFUSE A DEGENERATE ASK rather than adopting it. A 0 or negative extent would size the
+        # grid to nothing and divide by the cell size into a 0-row terminal; the compositor asking
+        # is not the same as the ask being usable.
+        if (cw <= 0) { return WIN_EV_NONE; }
+        if (ch <= 0) { return WIN_EV_NONE; }
+        if (cw == win_w) { if (ch == win_h) { return WIN_EV_NONE; } }   # already that size
+        setuwin_cfg_w = cw;
+        setuwin_cfg_h = ch;
+        return WIN_EV_RESIZE;
+    }
     if (setu_msg_kind(m) != SETU_INPUT_KEY) { return WIN_EV_NONE; }
     var code = setuwin__hid_to_evdev(setu_msg_arg(m, 1));
     if (code == 0) { return WIN_EV_NONE; }               # unmapped usage — drop, never guess
@@ -173,7 +213,46 @@ fn win_poll_events(win): i64 {
     return WIN_EV_KEY;
 }
 
-fn win_resize_apply(win): i64 { return 0; }              # setu: no compositor-driven resize yet
+# Adopt the size the compositor last asked for: update win_w/win_h and refit the present buffer.
+# The engine reflows the grid + framebuffer after this and repaints fully.
+# Returns 0, or -1 if there is nothing pending / the refit failed.
+#
+# ⚠ GROW-ONLY, like the wayland backend's shm. `alloc` here has no free, so reallocating on every
+# configure during a drag would leak a full surface per frame; the buffer keeps its high-water size
+# and a shrink just uses less of it. `win_present_commit` ships win_w x win_h, so the extra tail is
+# never read.
+fn win_resize_apply(win): i64 {
+    if (setuwin_cfg_w <= 0) { return 0 - 1; }
+    if (setuwin_cfg_h <= 0) { return 0 - 1; }
+    if (setuwin_cell_w <= 0) { return 0 - 1; }
+    if (setuwin_cell_h <= 0) { return 0 - 1; }
+    # ⭐ FLOOR TO WHOLE CELLS. `fb_resize` sizes the framebuffer as cols*cell_w x rows*cell_h, and the
+    # present writes that image into this surface — so a surface that is not a whole number of cells
+    # has a remainder strip the renderer never covers, and (worse) a width mismatch means the image
+    # is written at one row pitch and read at another, which SKEWS the whole frame rather than
+    # leaving a gap. Quantizing here keeps surface == grid extent by construction.
+    var qw = setuwin_cfg_w / setuwin_cell_w * setuwin_cell_w;
+    var qh = setuwin_cfg_h / setuwin_cell_h * setuwin_cell_h;
+    if (qw <= 0) { return 0 - 1; }                                    # smaller than one cell
+    if (qh <= 0) { return 0 - 1; }
+    setuwin_cfg_w = qw;
+    setuwin_cfg_h = qh;
+    var need = setuwin_cfg_w * setuwin_cfg_h * 4;
+    if (need <= 0) { return 0 - 1; }                                  # overflow backstop
+    if (need / 4 != setuwin_cfg_w * setuwin_cfg_h) { return 0 - 1; }
+    if (need > setuwin_cap) {
+        var p = alloc(need);
+        if (p == 0) { return 0 - 1; }                                 # keep the old surface intact
+        setuwin_buf = p;
+        setuwin_cap = need;
+        memset(setuwin_buf, 0, need);
+    }
+    win_w = setuwin_cfg_w;
+    win_h = setuwin_cfg_h;
+    setuwin_cfg_w = 0;
+    setuwin_cfg_h = 0;
+    return 0;
+}
 
 # Hand out the latched key as [evdev keycode, mods, state=press]. Returns 1 when one was waiting.
 fn win_next_key(win, out24): i64 {
