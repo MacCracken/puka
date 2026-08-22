@@ -242,7 +242,20 @@ fn pty_close(): i64 {
 
 #ifdef CYRIUS_TARGET_AGNOS
 # ============================================================================
-# AGNOS-NATIVE PTY — the `#97` channel band (agnos >= 1.56.40, ipc bite 9)
+# AGNOS-NATIVE PTY — the `#97` channel band (agnos >= **1.56.46**, ipc bite 9)
+#
+# ⛔⛔ THE FLOOR IS 1.56.46, NOT 1.56.40, AND AN OLDER KERNEL FAILS IN THE WORST WAY: it looks like a
+# working terminal. `#97` has existed since 1.56.40, so on 1.56.40..1.56.45 the shell opens, echoes,
+# accepts input and answers — every agnsh BUILTIN renders — while **every program the shell launches
+# is silent**. `chan_auth` accepted only `chan_end_owner == proc_current_get()`, and a child that
+# inherits the terminal fd by fd-table copy is not the owner, so its writes were refused with
+# CH_E_BADFD and discarded. Measured in QEMU 2026-08-22: `ls`, `ls /`, `kriya ls` and
+# `kriya ls /bin` ALL rendered an identical 266 glyph px — agnsh's prompt, not one byte of output —
+# while the builtin `help` rendered +11,186. agnos 1.56.46 adds `chan_end_pty[]` and lets a
+# DESCENDANT of the owner use a PTY-mode endpoint; `ls` then rendered 1560.
+# ⚠ puka needs NO change for this and never did — it already endows with `CH_ENDOW_STDIO`. The floor
+# is recorded here because "the terminal works but nothing you run in it prints" is otherwise
+# indistinguishable from a puka bug, and it cost a full investigation to place.
 # ============================================================================
 # ⭐ THE KERNEL GAP THE STUBS BELOW REFERRED TO IS CLOSED. A PTY decomposes into (i) a bidirectional
 # local channel, (ii) an end handed to a child at spawn, and (iii) a line discipline — only (iii) is

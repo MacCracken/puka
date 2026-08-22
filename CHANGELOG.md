@@ -2,6 +2,26 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.20] - 2026-08-22 — the kernel floor is 1.56.46, because below it nothing you run prints
+
+### Changed — documented kernel floor 1.56.40 -> **1.56.46**
+
+No code change. `#97` has existed since 1.56.40, so puka *appeared* to work on 1.56.40..1.56.45: the
+window opens, keys echo, agnsh answers and every BUILTIN renders — while **every program the shell
+launches is silent**.
+
+Cause is in the kernel, not here: `chan_auth` accepted only `chan_end_owner == proc_current_get()`,
+and a child that inherits the terminal fd by fd-table copy is not the owner, so its writes were
+refused (`CH_E_BADFD`) and discarded. agnos 1.56.46 adds `chan_end_pty[]` and admits a DESCENDANT of
+the owner to a PTY-mode endpoint.
+
+Measured, QEMU (`agnos/scripts/harness/puka-child-stdout-test.py`, glyph px at RGB 192,192,192):
+before, `ls` / `ls /` / `kriya ls` / `kriya ls /bin` all rendered an identical **266** — agnsh's
+prompt; after, `ls` renders **1560**. Builtin control `help` unchanged at +11,186 throughout.
+
+⚠ puka already endowed with `CH_ENDOW_STDIO` and needed no change. The floor is recorded because
+"the terminal works but nothing you run in it prints" is otherwise indistinguishable from a puka bug.
+
 ## [0.6.19] - 2026-08-19 — a silent present, and two tests that waited for silence
 
 ### Fixed — only frame 0 reported its present result
