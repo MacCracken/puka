@@ -38,7 +38,7 @@ fn main() {
 
     test_group("input: encoded keystrokes reach a real child via the pts");
 
-#ifdef CYRIUS_TARGET_LINUX
+    #ifdef CYRIUS_TARGET_LINUX
     term_init(24, 80);
     var m = pty_open();
     if (m < 0) {
@@ -73,12 +73,12 @@ fn main() {
             assert_eq(grid_glyph(0, 1), 0x69, "echoed 'i' landed at (0,1)");
         }
     }
-#endif
+    #endif
 
-#ifndef CYRIUS_TARGET_LINUX
+    #ifndef CYRIUS_TARGET_LINUX
     skip("pty backend is Linux-only (agnos input/pty is M5)");
     assert(1, "skipped: non-linux target");
-#endif
+    #endif
 
     return assert_summary();
 }

@@ -17,6 +17,7 @@ enum WinAbi {
     WIN_EV_KEY    = 2;
     WIN_EV_CLOSE  = 4;
     WIN_EV_FRAME  = 8;
+    WIN_EV_SCROLL = 16;    # wheel; raised by the setu backend, not yet plumbed here
     WIN_CAP_SHM   = 0;     # win_present_begin returns a CPU pixel buffer
     WIN_CAP_GPU   = 1;     # win_present_begin returns 0; caller records GPU draws
 }
@@ -104,9 +105,9 @@ fn win_poll_events(win): i64 {
     # The compositor configured a new size (the serial was already acked in the
     # dispatch). Surface it once; the caller adopts it via win_resize_apply.
     if (wl_cfg_w > 0) { if (wl_cfg_h > 0) {
-        if (wl_cfg_w != win_w) { m = m | WIN_EV_RESIZE; }
-        if (wl_cfg_h != win_h) { m = m | WIN_EV_RESIZE; }
-    } }
+            if (wl_cfg_w != win_w) { m = m | WIN_EV_RESIZE; }
+            if (wl_cfg_h != win_h) { m = m | WIN_EV_RESIZE; }
+        } }
     return m;
 }
 
@@ -124,5 +125,11 @@ fn win_resize_apply(win): i64 {
 # Drain one key record: out24[+0]=evdev keycode, [+8]=value(1=press), [+16]=mods.
 # Returns 1 if a record was produced, 0 if the queue is empty.
 fn win_next_key(win, out24): i64 { return wl_pop_key(out24); }
+
+# ⚠ ABI PARITY, HONESTLY EMPTY. The setu backend forwards the wheel (setu 0.8.8 kind 12); the Wayland
+# path has no `wl_pointer` binding yet, so there is no delta to report and this returns 0 rather than
+# leaving the symbol undefined — the engine calls one seam and must compile against either backend.
+# Wiring it means binding wl_seat's POINTER capability and decoding wl_pointer.axis.
+fn win_next_scroll(win): i64 { return 0; }
 
 fn win_close(win): i64 { wl_close(); return 0; }

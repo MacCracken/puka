@@ -2,6 +2,205 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.22] - 2026-08-31 — the first audit, and two gates that were green over nothing
+
+P(-1) hardening sweep. All of `src/` (5,788 lines) read line-by-line; findings filed in
+[`docs/audit/2026-08-31-audit.md`](docs/audit/2026-08-31-audit.md) and **repaired in this release**
+rather than carried. `cyrius lint` reports 0 warnings across every file and found none of it.
+
+### Fixed — 🔴 two lazy allocations that poisoned their own guard, then wrote to the null page
+
+`grid_alt_screen` and `grid__sb_push` both published their FIRST pointer before knowing the second
+had succeeded — and `grid_alt_g == 0` / `grid_sb_g == 0` *is* the "not yet allocated" test. A
+half-successful pair therefore poisoned the guard permanently: every later call skipped the alloc
+block and ran against a null second pointer — `store64(0 + i * 8, …)` across all **69,120** cells for
+the alt screen, a full row per scroll for the ring.
+
+⛔ **REACHABLE FROM UNTRUSTED PTY OUTPUT, not merely from memory pressure.** `ESC[?1049h` is what vim,
+less, htop and tmux send on startup, so any byte stream can ask for the alt screen at will; the
+scrollback path is reached by **ordinary scrolling**. Both functions returned `-1` on the first
+failure and every one of the five call sites discarded it, so the first half of the sequence was
+silent and the second half was corruption.
+
+⇒ Both now allocate into locals and publish **both pointers or neither**, which is what makes the
+zero-test an honest question again.
+
+### Fixed — 🔴 an unvalidated wire length in the Wayland client: OOB read + information disclosure
+
+`wl_registry.global`'s interface-name length is a `u32` straight off the socket, and nothing tied it
+to the message that carried it. A `global` event declaring `L = 0xFFFFFFFF` made
+`load32(&wl_rbuf + wire_str_next(o + 12, L))` a read roughly **4 GB past** an 8,192-byte buffer; with
+`wl_verbose` on, `wl__emit(sp, L - 1)` wrote that many bytes of puka's own address space to stdout.
+
+⭐ **`wl__streq` WAS ALREADY SAFE, AND IS THE MODEL THE FIX FOLLOWS** — it compares `strlen(lit)`
+against `len` first, so a bogus length never reached its loop. The other two readers of `L` had no
+such check. The length is now validated against the message's own declared size before anything
+indexes with it.
+
+⛔ **AND EVERY OTHER FIELD READ WAS UNBOUNDED TOO.** Handlers loaded at fixed offsets (`o + 8`,
+`o + 16`, `o + 20`) with nothing checking the compositor sent that far. `wl__parse` bounds a message
+against the bytes RECEIVED, which is a different fact from "long enough to hold this field": a
+truncated 8-byte message carrying a key opcode, arriving at the tail of a full buffer, read 16 bytes
+past it. All field reads now go through a size-checked `wl__u32`; a short field reads 0, which every
+consumer already treats as absent.
+
+⚠ Scope, honestly: the compositor is a semi-trusted peer and this is not remotely exploitable — puka
+has no network surface. It matters because a sovereign client that decodes the wire itself does not
+get to assume the peer's framing is honest, and `wire.cyr` is the file this project's own docs call
+*"the new untrusted-input boundary"*.
+
+### Fixed — unbounded heap leaks on the per-keystroke and per-frame paths
+
+`alloc` has no `free`, so an allocation inside the event loop is permanent.
+
+- **64 B per keystroke** — `src/main.cyr` allocated its key scratch twice inside the loop body.
+  ⛔ **The file states this exact rule 130 lines earlier**, for `puka_szpx`: *"Allocated ONCE — the
+  loop reads it every frame and `alloc` has no free, so a per-frame allocation would leak 16 B per
+  present for the life of the terminal."* The key path predated that idiom. Both returns were also
+  unchecked — a failed `alloc` returned 0 and `win_next_key(0, 0)` would have stored through null.
+- **48 B per number printed** — `puka__say_num` used two `alloc(24)`. Not a cold path: the resize
+  branch calls it **six times per compositor configure**, and a drag configures continuously.
+- **128 B per frame on agnos** — `pty_pump` allocated per call, and `main` calls it once per frame:
+  ~**7.7 KB/s at 60 fps**, unbounded. The Linux arm directly above already used a stack buffer.
+- **`pty_open` (agnos)** allocated its fd pair per call — unchecked, and `pty_open` legitimately
+  repeats after a `pty_close`.
+
+### Fixed — a byte that aborted a UTF-8 sequence was eaten
+
+`E2 41` — a truncated 3-byte lead followed by `'A'` — yielded U+FFFD and **silently dropped the
+'A'**. The aborting byte was never part of the sequence it interrupted; it starts the next character.
+The decoder now flags it unconsumed (`utf8_rejected`) and `term_feed` re-dispatches it exactly once —
+provably once, because the decoder is back in ground state and that branch cannot flag again. Matches
+Unicode 15 §3.9 maximal-subpart practice and every other terminal. ⚠ A caller that ignores the flag
+behaves exactly as before.
+
+### Fixed — the child could inherit a truncated environment variable
+
+`pty__build_child_env` recorded each entry's pointer BEFORE scanning for its NUL, so an environment
+cut off by the 8,191-byte read cap handed the child a complete-looking `PATH=/usr/bin:/usr/lo…`. A
+silently shortened PATH or HOME misbehaves in ways that look like anything except a truncated
+environment. An unterminated tail is now dropped — a missing variable fails loudly, a corrupt one
+does not. ⚠ The caps themselves (8,191 B / 125 vars) stay silent, deliberately: raising them is a BSS
+decision, not a correctness one.
+
+### Fixed — bounds guards that were asymmetric with the rest of their own module
+
+- `grid__copy_row`, `grid_insert_cells`, `grid_delete_cells` stride the backing store directly and
+  carried **no row guard**, while every other write path in `grid.cyr` checks. Safe only because all
+  callers happen to pass the cursor row — an invariant that was real and **written down nowhere**.
+- `grid__view_gword` / `grid__view_cword` had no range checks, while their non-viewport twins
+  (`grid_glyph` / `grid_fg` / `grid_attr` / `grid_bg`) all do.
+- `win_open` had no overflow backstop on `win_w * win_h * 4`, though `win_resize_apply` did — and
+  `win_open` is the path that takes cols/rows from the caller rather than from the grid's clamps.
+
+### Fixed — 🔴 two P(-1) gates were passing while measuring nothing
+
+⛔ **`cyrius fuzz` fuzzed NOTHING.** `fuzz_main` was `if (len == 0) { return 0; } return 0;` — it
+printed `fuzz: ok` and passed, for the module CLAUDE.md names as *the highest-priority audit target,
+the untrusted-input boundary*. A harness that cannot fail is worse than no harness: it is a claim of
+coverage that does not exist.
+
+⇒ Replaced with a real harness against **`term_feed`** — the whole untrusted path (parser → UTF-8 →
+grid), not just `vt_feed`, because the interesting defects live at the seams. 16 targeted adversarial
+sequences (every cursor/edit/scroll verb driven at the 65,535 parameter clamp, degenerate and
+inverted scroll regions, alt-screen thrash across all three modes, ESC storms, OSC overflow past
+`VT_STR_CAP`, truncated UTF-8 spanning an escape, overlong/surrogate/out-of-range encodings) plus 400
+rounds of fixed-seed pseudo-random and escape-biased noise — roughly **820,000 adversarial bytes**,
+asserting grid invariants after each. **1,297 assertions, all green, and also green under
+`cyrius fuzz --poison`.** Deterministic by construction, so a failure reproduces exactly.
+
+⭐ **MUTATION-VERIFIED — "the harness is real now" is the one claim here that must not be taken on
+trust.** Deleting the cursor-row clamp from `grid_cursor_set` turns the run red: **4 failures** across
+both the targeted and the escape-noise sections. The stub it replaced passed that same mutation in
+silence.
+
+⛔ **`cyrius bench` timed an empty function.** It could not have detected a parser rewritten to be ten
+times slower. Replaced with five hot-path baselines — see below.
+
+### Changed — measured optimizations, all provable rather than heuristic
+
+| bench | before | after |
+|---|---|---|
+| `vt_feed` printable | 10 ns | 10 ns |
+| `vt_feed` CSI SGR sequence (7 B) | 123 ns | 122 ns |
+| **`term_feed` printable (full pipeline)** | **300 ns** | **186 ns** |
+| `grid_scroll_up` 1 line (+scrollback) | 10.29 µs | 10.24 µs |
+| **`fb_render` 80×24 all-dirty frame** | **3.177 ms** | **1.694 ms** |
+
+- **`char_width` ASCII early-out.** Every plain `'A'` walked ~15 range checks in `uc__zero_width` and
+  ~15 more in `uc__wide` — thirty calls to `uc__in` — to return 1. ⭐ The early-out is PROVABLE, not a
+  guess: the lowest zero-width entry is U+0300 and the lowest wide entry is U+1100, so nothing in
+  `0x20..0x7E` can be either (and NUL, which *is* zero-width, is excluded by the lower bound).
+- **Damage bitset in shifts, not division**, and `grid_cursor_set` no longer marks the same row twice
+  when the cursor stays on its line. That path runs three times per printed character.
+- **`fb__fill_rect` clamps once per rectangle** instead of calling the per-pixel guarded `fb__plot`
+  **245,760** times per frame. ⛔ **The safety property is unchanged and that is the point** — this is
+  not "trust the caller": the clamp is the SAME clamp, hoisted out of the loop, so every offset
+  written is inside `fb_w * fb_h * 3` by construction. `fb__plot` remains the guarded path for
+  scattered glyph writes.
+
+⚠ `fb_render` at 1.7 ms is an **all-dirty upper bound, not a per-frame cost** — the damage bitset
+means a keystroke repaints one row. The remaining cost is the per-cell glyph blit; not pursued, and
+recorded in the audit rather than silently dropped.
+
+### Added — the wheel scrolls the scrollback (the deferred half of 0.6.21)
+
+setu 0.8.8 shipped `SETU_INPUT_PTR_SCROLL` (kind 12) and 0.6.21 recorded it as available and
+unconsumed. Now wired: a new `WIN_EV_SCROLL` bit, `win_next_scroll` on both backends, and the event
+loop driving `grid_scroll_view`.
+
+⛔ **`grid_scroll_view` AND THE WHOLE VIEWPORT RING HAVE EXISTED SINCE THE SCROLLBACK BITE, AND
+`src/main.cyr` NEVER MOVED THEM.** `programs/puka_term.cyr` wired PageUp/PageDown on the Wayland
+path, so the feature looked done — while the terminal that actually runs on agnos had no way to reach
+history at all. Typing now also snaps back to the live bottom via `grid_view_reset`, which was
+written for exactly that ("on user input", `grid.cyr`) and likewise had no caller on this path.
+
+⚠ Deltas are accumulated, not latched-one: the compositor already sums detents since its last
+forward, so a frame carrying two messages must not drop the first. ⚠ Only useful with
+agnos >= 1.56.49 / bhumi >= 1.4.3 — below those the kernel's HID drain discarded the wheel byte.
+⚠ The Wayland backend's `win_next_scroll` honestly returns 0: `wl_pointer` is not bound yet.
+
+### Fixed — `fmt` was failing, and had been (the deferred half of 0.6.21)
+
+11 `src/` and `tests/` files plus the generated bundle needed reformatting; the *committed*
+`dist/puka.cyr` was already fmt-dirty before regeneration. Whitespace only — `git diff -w` over the
+reformat is empty (the paren-continuation reindent). `cyrius audit`'s fmt gate is now clean
+tree-wide, `programs/` and `dist/` included.
+
+### Fixed — a header that under-claimed its own module
+
+`window_setu.cyr` said *"Input over setu is a later bite … `win_poll_events` / `win_next_key` are
+present-parity stubs for now"* — false for several releases; the file handles `SETU_CLOSE`,
+`SETU_CONFIGURE` and `SETU_INPUT_KEY` with a full HID-usage→evdev translation. A header that
+under-claims invites someone to re-implement a seam that already works.
+
+### Testing
+
+**604 passed, 0 failed** (566 → 604; +38). New regression coverage for every behavioural fix: the
+UTF-8 re-dispatch at both decoder and terminal level, the grid row guards, the viewport accessor
+guards, adversarial CSI params against every grid verb, and `fb__fill_rect`'s clamp (negative
+origins, both-axis overruns, fully-off-screen and negative-extent rectangles).
+
+⚠ **One of those tests failed first, and the test was wrong, not the code** — a rectangle at
+(-100,-100) sized 40×40 spans x ∈ [-100,-60) and is entirely off-screen, so asserting it painted the
+corner was the error. Corrected to a rect that genuinely straddles, plus a separate case for the
+fully-negative extent.
+
+⛔ **NOT COVERED, AND IT IS THE FIX THAT MOST DESERVES IT**: A-03/A-04, the Wayland wire validation.
+`client.cyr` needs a live compositor and the subsystem has no headless harness, so those two are
+verified by reading only. That gap is the strongest argument for the `wire.cyr` byte-vector tests
+already scoped in the roadmap.
+
+### Verification
+
+`cyrius test` 604/0 · `cyrius fuzz` 1,297 assertions green (and under `--poison`) · `cyrius lint` 0
+warnings · `cyrius fmt` clean tree-wide · `cyrius vet` 14 deps, 0 untrusted, 0 missing ·
+`cyrius distlib --check` current · `--agnos` and `--aarch64` both build.
+
+⚠ **No agnos or live-compositor run.** Source review plus headless tests on the Linux dev host; the
+`--agnos` result is that it compiles. Every runtime claim in this entry is a benchmark or a test on
+that host, not an iron burn.
+
 ## [0.6.21] - 2026-08-31 — the stack catches up, and it skipped a compiler bug on the way
 
 ### Changed — toolchain pin **6.5.28 → 6.5.36**

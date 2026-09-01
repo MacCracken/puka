@@ -5,20 +5,27 @@
 
 ## Version
 
-**0.6.21** (2026-08-31) — see [`../../CHANGELOG.md`](../../CHANGELOG.md). Release narrative belongs
+**0.6.22** (2026-08-31) — see [`../../CHANGELOG.md`](../../CHANGELOG.md). Release narrative belongs
 there, not here.
 
-⛔ **SCOPE OF THIS REFRESH, STATED SO IT IS NOT MISREAD AS A FULL AUDIT.** 0.6.21 was a version +
-dependency bump, and only the three blocks that bump invalidated — **Version**, **Toolchain**,
-**Dependencies** — were re-derived from the tree on 2026-08-31. The **Source**, **Tests**,
-**Carry-forward**, **Dep gaps**, **Consumers** and **Next** sections below still carry the staleness
-they had at 0.6.7 (they describe the tree as of 2026-08-02, fourteen releases back) and were **not**
-verified here. Trust them at that date, not this one.
+⭐ **0.6.22 IS THIS REPO'S FIRST P(-1) AUDIT** — all 5,788 lines of `src/` read line-by-line, 17
+findings filed and repaired: [`../audit/2026-08-31-audit.md`](../audit/2026-08-31-audit.md). Three
+were memory-safety defects reachable from data puka does not control (two lazy allocations that
+poisoned their own guard and then wrote to the null page; an unvalidated Wayland wire length giving
+an out-of-bounds read and an information disclosure). Two P(-1) gates — `cyrius fuzz` and
+`cyrius bench` — were passing over **empty harnesses** and now measure something.
+
+⛔ **SCOPE, STATED SO IT IS NOT MISREAD.** **Version**, **Toolchain**, **Dependencies** and **Tests**
+were re-derived from the tree on 2026-08-31. The **Source**, **Carry-forward**, **Dep gaps**,
+**Consumers** and **Next** sections below still carry the staleness they had at 0.6.7 (they describe
+the tree as of 2026-08-02) and were **not** re-verified — the audit read the code, not these
+paragraphs. Trust them at that date, not this one.
 
 Since 0.6.7, in brief (the CHANGELOG is authoritative): the **setu/dhancha window + UI edge**
 (`win_*` over dhancha's client layer, `src/ui.cyr`), **`dist/puka.cyr` as an embeddable engine**
 (0.6.17, `[lib] modules`), the **line discipline** (`src/line_discipline.cyr`), fullscreen/terminal
-repairs, and the documented **agnos kernel floor 1.56.46** (0.6.20).
+repairs, the documented **agnos kernel floor 1.56.46** (0.6.20), a **whole-stack dependency refresh**
+(0.6.21 — cyrius 6.5.36, dhancha 0.9.26, setu 0.8.8) and the **first hardening audit** (0.6.22).
 
 ⛔ **The setu TCP transport is RETIRED (2026-08-03) and puka has NO standing agnos desktop claim on the
 replacement.** It is retired as the WRONG PRIMITIVE for a local display protocol — nothing to route,
@@ -89,9 +96,32 @@ marked at every write chokepoint and consumed by the renderer
 
 ## Tests
 
-- `tests/parser.tcyr` (70), `tests/grid.tcyr` (92, resize + per-row damage + multi-word bitset rows≥64 + **scrollback ring/viewport**), `tests/unicode.tcyr` (28), `tests/terminal.tcyr` (72, + DECCKM/2004 getters + **alt-screen 1049/1047/47**), `tests/render.tcyr` (54 — palette/resolve/paint/glyph/cursor/PPM + `fb_resize` grow/shrink), `tests/atlas.tcyr` (14 — kashi glyph atlas vs `kashi_glyph_row`, bit-for-bit), `tests/input.tcyr` (67 — byte-exact + `vt_feed` round-trips + paste), `tests/fbdev.tcyr` (25 — pixel pack + stride/clamp blit vs a fake fb), `tests/evdev.tcyr` (49 — synthetic-event decode + L/R modifiers), `tests/pty.tcyr` (2) + `tests/input_pty.tcyr` (2, real PTY echo — both skip-clean), `tests/puka.tcyr` (2 smoke) — **477 assertions, all green** (`cyrius test`).
-- `tests/puka.bcyr` / `tests/puka.fcyr` — bench / fuzz stubs (fuzzing the parser against adversarial input is the M-hardening target).
-- **The Wayland subsystem (M6) has no headless tests** — it needs a live compositor, so it is verified by running `programs/puka_term.cyr` on Hyprland (the pure `wire.cyr` codec gets unit tests against captured byte-vectors in M7). The 410 above are the engine + framebuffer cores.
+**604 assertions, all green** (`cyrius test`), across 17 `.tcyr` files. Re-counted 2026-08-31; this
+block previously claimed 477 and predated several files.
+
+- Engine core: `parser.tcyr` (70), `grid.tcyr` (102 — resize, per-row damage, multi-word bitset rows
+  ≥ 64, scrollback ring/viewport, **and the 0.6.22 row/viewport bounds guards**), `unicode.tcyr` (43
+  — **incl. the 0.6.22 aborting-byte re-dispatch**), `terminal.tcyr` (77 — DECCKM/2004 getters,
+  alt-screen 1049/1047/47, **and the end-to-end UTF-8 re-dispatch**).
+- Render: `render.tcyr` (62 — palette/resolve/paint/glyph/cursor/PPM, `fb_resize` grow+shrink,
+  **and `fb__fill_rect`'s clamp**), `atlas.tcyr` (14 — kashi glyph atlas, bit-for-bit),
+  `fbdev.tcyr` (25), `ui.tcyr` (11), `engine_bundle.tcyr` (11 — drives `dist/puka.cyr` as a consumer
+  would, with no PTY, window or app code).
+- I/O edge: `input.tcyr` (67 — byte-exact, `vt_feed` round-trips, paste), `evdev.tcyr` (49),
+  `line_discipline.tcyr` (49), `pty.tcyr` (2) + `input_pty.tcyr` (2, real PTY echo — both
+  skip-clean), `puka.tcyr` (2 smoke).
+- **`tests/puka.fcyr` — the fuzz harness, real since 0.6.22.** Drives `term_feed` (the whole
+  untrusted path) with ~820,000 adversarial bytes: 16 targeted sequences plus 400 rounds of
+  fixed-seed pseudo-random and escape-biased noise, asserting grid invariants after each.
+  **1,297 assertions**, green under `cyrius fuzz` and `cyrius fuzz --poison`. ⛔ It was a stub that
+  fuzzed nothing until this release.
+- **`tests/puka.bcyr` — five hot-path baselines, real since 0.6.22** (it timed an empty function
+  before): `vt_feed` printable 10 ns · `vt_feed` CSI SGR 122 ns · `term_feed` full pipeline 186 ns ·
+  `grid_scroll_up` 10.24 µs · `fb_render` 80×24 all-dirty 1.694 ms. ⚠ Baselines, not thresholds —
+  nothing fails on a regression yet.
+- ⛔ **The Wayland subsystem still has no headless tests**, and that is now the most conspicuous gap:
+  the 0.6.22 wire-validation fixes (A-03/A-04) are the repairs that most deserve coverage and are
+  verified by reading only. `wire.cyr` is pure and the byte-vector tests are already scoped.
 
 ## Carry-forward / known
 

@@ -142,15 +142,39 @@ fn fb__plot(x, y, rgb): i64 {
     return 0;
 }
 
+# ⭐ CLAMP THE RECTANGLE ONCE, THEN WRITE. This called `fb__plot` per pixel, which re-ran four
+# bounds checks and recomputed the offset for every one — and a full 80x24 frame is
+# 80 * 24 * 8 * 16 = 245,760 of them, which is where the frame time went.
+# ⛔ THE SAFETY PROPERTY IS UNCHANGED, AND THAT IS THE POINT — this is not "trust the caller". The
+# clamp below is the SAME clamp `fb__plot` applies, hoisted out of the loop: x0 >= 0, y0 >= 0,
+# x1 <= fb_w, y1 <= fb_h, so every offset written is inside `fb_w * fb_h * 3` by construction. A
+# negative or zero w/h makes x1 <= x0 and the loop simply does not run.
+# ⚠ `fb__plot` REMAINS the guarded path for scattered writes (glyph blits); it is not dead code.
 fn fb__fill_rect(x, y, w, h, rgb): i64 {
-    var dy = 0;
-    while (dy < h) {
-        var dx = 0;
-        while (dx < w) {
-            fb__plot(x + dx, y + dy, rgb);
-            dx = dx + 1;
+    if (fb_buf_ptr == 0) { return 0; }
+    var x0 = x;
+    var y0 = y;
+    var x1 = x + w;
+    var y1 = y + h;
+    if (x0 < 0) { x0 = 0; }
+    if (y0 < 0) { y0 = 0; }
+    if (x1 > fb_w) { x1 = fb_w; }
+    if (y1 > fb_h) { y1 = fb_h; }
+    var rr = (rgb >> 16) & 255;
+    var gg = (rgb >> 8) & 255;
+    var bb = rgb & 255;
+    var yy = y0;
+    while (yy < y1) {
+        var off = (yy * fb_w + x0) * 3;
+        var xx = x0;
+        while (xx < x1) {
+            store8(fb_buf_ptr + off, rr);
+            store8(fb_buf_ptr + off + 1, gg);
+            store8(fb_buf_ptr + off + 2, bb);
+            off = off + 3;
+            xx = xx + 1;
         }
-        dy = dy + 1;
+        yy = yy + 1;
     }
     return 0;
 }

@@ -44,7 +44,7 @@ fn main() {
 
     test_group("pty: spawn echo, capture output in grid");
 
-#ifdef CYRIUS_TARGET_LINUX
+    #ifdef CYRIUS_TARGET_LINUX
     term_init(24, 80);
     var m = pty_open();
     if (m < 0) {
@@ -81,12 +81,12 @@ fn main() {
             assert_eq(grid_cursor_row(), 1, "cursor advanced past the echoed line");
         }
     }
-#endif
+    #endif
 
-#ifndef CYRIUS_TARGET_LINUX
+    #ifndef CYRIUS_TARGET_LINUX
     skip("pty backend is Linux-only (agnos PTY is M5)");
     assert(1, "skipped: non-linux target");
-#endif
+    #endif
 
     return assert_summary();
 }

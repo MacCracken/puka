@@ -207,6 +207,23 @@ fn main() {
     assert_eq(grid_in_alt(), 0, "47l returns to primary");
     assert_eq(grid_glyph(0, 0), 0x50, "primary preserved across the 47 swap");
 
+    test_group("utf8: an aborted sequence does not swallow the next character (0.6.22)");
+    # ⛔ END-TO-END HALF OF THE unicode.tcyr FIX. A child emitting a partial UTF-8 sequence followed
+    # by ASCII — a truncated write, an interrupted printf — used to lose the ASCII byte entirely.
+    # U+FFFD lands in cell 0 and the character that aborted the sequence lands in cell 1.
+    term_init(2, 8);
+    term_feed(0xe2);                                 # 3-byte lead, never completed
+    term_feed(0x41);                                 # 'A' aborts it
+    assert_eq(grid_glyph(0, 0), UC_REPLACE, "the bad prefix renders as U+FFFD");
+    assert_eq(grid_glyph(0, 1), 0x41, "the aborting 'A' is NOT lost");
+    assert_eq(grid_cursor_col(), 2, "cursor advanced by two cells, not one");
+
+    # And a clean sequence still places exactly one glyph.
+    term_init(2, 8);
+    term_feed(0xc3); term_feed(0xa9);                # U+00E9
+    assert_eq(grid_glyph(0, 0), 0xe9, "a clean 2-byte sequence places one glyph");
+    assert_eq(grid_cursor_col(), 1, "and advances exactly one cell");
+
     return assert_summary();
 }
 

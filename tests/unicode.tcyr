@@ -41,6 +41,32 @@ fn main() {
     assert_eq(dec("\xed\xa0\x80", 3), UC_REPLACE, "surrogate -> replacement");
     assert_eq(dec("\xf5\x80\x80\x80", 4), UC_REPLACE, "> U+10FFFF lead -> replacement");
 
+    test_group("decode: an aborting byte is re-dispatched, not eaten (0.6.22)");
+    # ⛔ THE REGRESSION THIS PINS: `E2 41` used to yield U+FFFD and SILENTLY DROP the 'A'. The byte
+    # that aborts a partial sequence was never part of it, so it must survive as the next character.
+    utf8_reset();
+    assert_eq(utf8_feed(0xe2), UTF8_MORE, "3-byte lead needs more");
+    assert_eq(utf8_feed(0x41), UC_REPLACE, "'A' aborts the sequence -> replacement");
+    assert_eq(utf8_rejected(), 1, "the aborting byte is flagged NOT consumed");
+    assert_eq(utf8_feed(0x41), 0x41, "re-feeding it yields the 'A' that used to be lost");
+    assert_eq(utf8_rejected(), 0, "the retry is in ground state and cannot reject again");
+    # A well-formed sequence must NOT set the flag — otherwise every character would double-print.
+    utf8_reset();
+    assert_eq(utf8_feed(0xc3), UTF8_MORE, "2-byte lead needs more");
+    assert_eq(utf8_feed(0xa9), 0xe9, "continuation completes U+00E9");
+    assert_eq(utf8_rejected(), 0, "a clean decode never flags a rejection");
+    # A LEAD byte aborting a sequence must also survive — it starts the next character.
+    utf8_reset();
+    assert_eq(utf8_feed(0xe4), UTF8_MORE, "3-byte lead needs more");
+    assert_eq(utf8_feed(0xc3), UC_REPLACE, "a new lead aborts the old sequence");
+    assert_eq(utf8_rejected(), 1, "the new lead is flagged NOT consumed");
+    assert_eq(utf8_feed(0xc3), UTF8_MORE, "re-fed, it opens a fresh 2-byte sequence");
+    assert_eq(utf8_feed(0xa9), 0xe9, "which completes normally");
+    # A stray continuation in GROUND state is a different case: it IS consumed.
+    utf8_reset();
+    assert_eq(utf8_feed(0x80), UC_REPLACE, "stray continuation -> replacement");
+    assert_eq(utf8_rejected(), 0, "a ground-state stray is consumed, not re-dispatched");
+
     test_group("width");
     assert_eq(char_width(0x41), 1, "'A' is 1 cell");
     assert_eq(char_width(0xe9), 1, "e-acute is 1 cell");

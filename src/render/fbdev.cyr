@@ -99,7 +99,7 @@ fn fbdev__store_pixel(dst, off, r, g, b, bpp, ro, rl, go, gl, bo, bl): i64 {
 # pixels written. The whole device edge, made testable vs an in-memory fake fb.
 # Every dst write is bounds-clamped (untrusted geometry).
 fn fbdev_blit_core(src_rgb, sw, sh, dst, dw, dh, line_len, bpp,
-                   xoff, yoff, ro, rl, go, gl, bo, bl): i64 {
+  xoff, yoff, ro, rl, go, gl, bo, bl): i64 {
     var bypp = bpp / 8;                 # bytes per pixel (2/3/4)
     var written = 0;
     var sy = 0;
@@ -120,7 +120,7 @@ fn fbdev_blit_core(src_rgb, sw, sh, dst, dw, dh, line_len, bpp,
                             var b = load8(src_rgb + sp + 2);
                             var off = rowbase + dx * bypp;
                             fbdev__store_pixel(dst, off, r, g, b, bpp,
-                                               ro, rl, go, gl, bo, bl);
+                              ro, rl, go, gl, bo, bl);
                             written = written + 1;
                         }
                     }
@@ -193,9 +193,9 @@ fn fbdev_open(): i64 {
 fn fbdev_present(): i64 {
     if (fbdev_mem == 0) { return 0 - 1; }
     return fbdev_blit_core(fb_buf(), fb_width(), fb_height(),
-                           fbdev_mem, fbdev_xres, fbdev_yres,
-                           fbdev_stride, fbdev_bpp, fbdev_xoff, fbdev_yoff,
-                           fbdev_ro, fbdev_rl, fbdev_go, fbdev_gl, fbdev_bo, fbdev_bl);
+      fbdev_mem, fbdev_xres, fbdev_yres,
+      fbdev_stride, fbdev_bpp, fbdev_xoff, fbdev_yoff,
+      fbdev_ro, fbdev_rl, fbdev_go, fbdev_gl, fbdev_bo, fbdev_bl);
 }
 
 fn fbdev_width(): i64  { return fbdev_xres; }

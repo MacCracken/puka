@@ -10,10 +10,15 @@
 #
 # The client renders its cell grid into a CPU XRGB8888 buffer (via puka's
 # pix_blit_region — bytes [B,G,R,X] == setu fmt 1) and presents the whole surface
-# each frame over setu (ATTACH + inline pixels + COMMIT). Input over setu is a
-# later bite (gated on the compositor's real key-forwarding); win_poll_events /
-# win_next_key are present-parity stubs for now. Linux-first (setu AF_UNIX);
+# each frame over setu (ATTACH + inline pixels + COMMIT). Linux-first (setu AF_UNIX);
 # agnos when the agnos transport (item 3b, native-display-protocol.md) lands.
+#
+# ⛔ CORRECTED 2026-08-31 (0.6.22 audit): this said "Input over setu is a later bite ...
+# win_poll_events / win_next_key are present-parity stubs for now". FALSE, and it had been false for
+# several releases — `win_poll_events` below handles SETU_CLOSE, SETU_CONFIGURE, SETU_INPUT_KEY (with
+# the HID-usage -> evdev translation) and SETU_INPUT_PTR_SCROLL, and `win_next_key` latches a real
+# key. A header that under-claims is worse than one that over-claims: it invites someone to
+# re-implement a seam that already works.
 #
 # ⛔ ITEM 3b LANDED AS TCP-ON-LOOPBACK AND HAS BEEN RETIRED (2026-08-03) — as the WRONG
 # PRIMITIVE for a local display protocol (nothing to route, nothing to checksum, no window to
@@ -39,6 +44,7 @@ enum WinAbi {
     WIN_EV_KEY    = 2;
     WIN_EV_CLOSE  = 4;
     WIN_EV_FRAME  = 8;
+    WIN_EV_SCROLL = 16;    # wheel: delta via win_next_scroll (setu 0.8.8 SETU_INPUT_PTR_SCROLL)
     WIN_CAP_SHM   = 0;     # win_present_begin returns a CPU pixel buffer
     WIN_CAP_GPU   = 1;
 }
@@ -85,7 +91,15 @@ fn win_open(title, tlen, cols, rows, cell_w, cell_h, gpu_ctx): i64 {
     setuwin_cell_h = cell_h;
     win_w = cols * cell_w;
     win_h = rows * cell_h;
+    # ⚠ THE SAME BACKSTOP `win_resize_apply` ALREADY CARRIED, and the asymmetry was the whole problem:
+    # the resize path validated its extent and the OPEN path — which takes cols/rows from the caller,
+    # not from the grid's clamps — did not. A wrapped `nbytes` allocates a small buffer that the
+    # present then reads `win_w * win_h * 4` bytes out of.
+    if (win_w <= 0) { syscall(1, 1, "setuwin: degenerate surface width\n", 34); return 0; }
+    if (win_h <= 0) { syscall(1, 1, "setuwin: degenerate surface height\n", 35); return 0; }
     var nbytes = win_w * win_h * 4;
+    if (nbytes <= 0) { syscall(1, 1, "setuwin: surface size overflow\n", 31); return 0; }
+    if (nbytes / 4 != win_w * win_h) { syscall(1, 1, "setuwin: surface size overflow\n", 31); return 0; }
     setuwin_buf = alloc(nbytes);
     if (setuwin_buf == 0) { syscall(1, 1, "setuwin: present-buffer alloc FAILED\n", 37); return 0; }
     memset(setuwin_buf, 0, nbytes);
@@ -122,12 +136,12 @@ fn win_present_commit(win, x, y, w, h): i64 {
 # wrong keycode is worse than emitting none: it would type a plausible character the user did not press.
 fn setuwin__hid_to_evdev(u): i64 {
     if (u >= 0x04) { if (u <= 0x1D) {                    # a..z
-        # a..m then n..z, split only to stay inside the 120-column lint.
-        var la = "\x1E\x30\x2E\x20\x12\x21\x22\x23\x17\x24\x25\x26\x32";
-        var lb = "\x31\x18\x19\x10\x13\x1F\x14\x16\x2F\x11\x2D\x15\x2C";
-        if (u <= 0x10) { return load8(la + (u - 0x04)); }
-        return load8(lb + (u - 0x11));
-    } }
+            # a..m then n..z, split only to stay inside the 120-column lint.
+            var la = "\x1E\x30\x2E\x20\x12\x21\x22\x23\x17\x24\x25\x26\x32";
+            var lb = "\x31\x18\x19\x10\x13\x1F\x14\x16\x2F\x11\x2D\x15\x2C";
+            if (u <= 0x10) { return load8(la + (u - 0x04)); }
+            return load8(lb + (u - 0x11));
+        } }
     if (u >= 0x1E) { if (u <= 0x26) { return 2 + (u - 0x1E); } }   # 1..9 -> 2..10
     if (u == 0x27) { return 11; }                                   # 0
     if (u == 0x28) { return 28; }                                   # Enter
@@ -163,6 +177,10 @@ var setuwin_key_have = 0;
 # engine re-attaches at the new extent. 0 = nothing pending.
 var setuwin_cfg_w = 0;
 var setuwin_cfg_h = 0;
+# ⭐ WHEEL (setu 0.8.8, `SETU_INPUT_PTR_SCROLL` kind 12: id, delta; + = up/away). Accumulated rather
+# than latched-one: the compositor already sums detents since its last forward, and a frame that
+# carries two messages must not silently drop the first. Drained by `win_next_scroll`.
+var setuwin_scroll_acc = 0;
 
 fn win_poll_events(win): i64 {
     if (setuwin_client == 0) { return WIN_EV_NONE; }
@@ -198,6 +216,19 @@ fn win_poll_events(win): i64 {
         setuwin_cfg_w = cw;
         setuwin_cfg_h = ch;
         return WIN_EV_RESIZE;
+    }
+    # ⭐ THE WHEEL. Available since setu 0.8.8 and, until now, discarded: this dispatcher tests kinds
+    # by explicit equality, so kind 12 fell through to WIN_EV_NONE — safely ignored, never misread as
+    # a button (which is exactly why setu spent a new kind on it instead of X11's buttons 4/5).
+    # ⚠ SIGN. setu forwards + = wheel-up/away-from-the-user; puka's viewport offset counts lines
+    # BACK into history, so up maps to a positive `grid_scroll_view` delta with no inversion.
+    # ⚠ Only useful with agnos >= 1.56.49 / bhumi >= 1.4.3 — below those the kernel's HID drain
+    # discarded the wheel byte, so nothing upstream can produce a delta to forward.
+    if (setu_msg_kind(m) == SETU_INPUT_PTR_SCROLL) {
+        var d = setu_msg_arg(m, 1);
+        if (d == 0) { return WIN_EV_NONE; }
+        setuwin_scroll_acc = setuwin_scroll_acc + d;
+        return WIN_EV_SCROLL;
     }
     if (setu_msg_kind(m) != SETU_INPUT_KEY) { return WIN_EV_NONE; }
     var code = setuwin__hid_to_evdev(setu_msg_arg(m, 1));
@@ -263,4 +294,12 @@ fn win_next_key(win, out24): i64 {
     store64(out24 + 16, 1);
     return 1;
 }
+# Drain the accumulated wheel delta (lines; + = back into history). Returns 0 when none is pending,
+# which is also what the wayland backend returns — the wheel is not plumbed there yet.
+fn win_next_scroll(win): i64 {
+    var d = setuwin_scroll_acc;
+    setuwin_scroll_acc = 0;
+    return d;
+}
+
 fn win_close(win): i64 { dh_client_close(setuwin_client); return 0; }

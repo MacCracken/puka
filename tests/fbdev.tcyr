@@ -79,7 +79,7 @@ fn main() {
     assert_eq(load8(&dst + 0), 0x00, "device (0,0) untouched");
 
     test_group("fbdev device smoke (skip-clean)");
-#ifdef CYRIUS_TARGET_LINUX
+    #ifdef CYRIUS_TARGET_LINUX
     if (fbdev_open() < 0) {
         skip("/dev/fb0 unavailable");
         assert(1, "skipped: no framebuffer device");
@@ -87,11 +87,11 @@ fn main() {
         assert_gt(fbdev_width(), 0, "real fb reports a width");
         fbdev_close();
     }
-#endif
-#ifndef CYRIUS_TARGET_LINUX
+    #endif
+    #ifndef CYRIUS_TARGET_LINUX
     skip("fbdev is Linux-only");
     assert(1, "skipped: non-linux target");
-#endif
+    #endif
 
     return assert_summary();
 }

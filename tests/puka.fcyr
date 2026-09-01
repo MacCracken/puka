@@ -1,15 +1,119 @@
-# puka fuzz harness
+# puka fuzz harness — the parser + terminal against adversarial bytes.
+#
+# ⛔ THIS REPLACED A STUB (0.6.22). `fuzz_main` was `if (len == 0) { return 0; } return 0;` — it
+# printed "fuzz: ok" and fuzzed NOTHING, so `cyrius fuzz` was a green gate over an empty harness for
+# the module CLAUDE.md names as "the highest-priority audit target ... the untrusted-input boundary".
+# A harness that cannot fail is worse than no harness: it is a claim of coverage that does not exist.
+#
+# The target is `term_feed`, not `vt_feed`, on purpose — the whole untrusted path is parser -> UTF-8
+# decoder -> grid mutation, and the interesting defects live at the seams (a CSI parameter becoming a
+# grid index, a partial UTF-8 sequence spanning an escape, an alt-screen swap mid-sequence).
+#
+# ⚠ DETERMINISTIC BY CONSTRUCTION. The PRNG below is a fixed-seed xorshift, so a failure reproduces
+# exactly. Run under `cyrius fuzz --poison` to make out-of-bounds reads and use-after-free observable.
 
+include "src/parser.cyr"
+include "src/grid.cyr"
+include "src/unicode.cyr"
+include "src/terminal.cyr"
+
+var fz_state = 0;
+
+# xorshift64 — fixed seed, no clock, no entropy source: same corpus every run.
+fn fz_rand(): i64 {
+    var x = fz_state;
+    x = x ^ (x << 13);
+    x = x ^ ((x >> 7) & 0x1FFFFFFFFFFFFFF);
+    x = x ^ (x << 17);
+    fz_state = x;
+    if (x < 0) { x = 0 - x; }
+    return x;
+}
+
+# THE TARGET. Every byte of `data` goes through the full untrusted path.
 fn fuzz_main(data, len) {
     if (len == 0) { return 0; }
+    var i = 0;
+    while (i < len) { term_feed(load8(data + i)); i = i + 1; }
+    return 0;
+}
+
+# Feed a literal, then assert the engine is still self-consistent. The grid is the
+# single source of truth, so its invariants are the thing a malformed stream must not break.
+fn fz_case(s) {
+    term_init(24, 80);
+    fuzz_main(s, strlen(s));
+    assert_gte(grid_cursor_row(), 0, "cursor row never negative");
+    assert_lt(grid_cursor_row(), grid_get_rows(), "cursor row inside the grid");
+    assert_gte(grid_cursor_col(), 0, "cursor col never negative");
+    assert_lt(grid_cursor_col(), grid_get_cols(), "cursor col inside the grid");
+    assert_lte(grid_scroll_top_get(), grid_scroll_bot_get(), "scroll region stays ordered");
+    assert_lt(grid_scroll_bot_get(), grid_get_rows(), "scroll bottom inside the grid");
     return 0;
 }
 
 fn main() {
     alloc_init();
-    fuzz_main("test", 4);
+    fz_state = 0x2545F4914F6CDD1D;      # fixed seed
+
+    # ---- 1. targeted adversarial sequences ----
+    # Each of these is a shape that turns an attacker-controlled number into an index.
+    fz_case("\x1b[999999999;999999999H");          # CUP far past the grid
+    fz_case("\x1b[65535A\x1b[65535B\x1b[65535C\x1b[65535D");  # cursor verbs at the param clamp
+    fz_case("\x1b[65535@\x1b[65535P\x1b[65535X");  # ICH / DCH / ECH at the clamp
+    fz_case("\x1b[65535S\x1b[65535T\x1b[65535L\x1b[65535M");  # SU / SD / IL / DL
+    fz_case("\x1b[0;0r\x1b[99;1r\x1b[1;99r");      # degenerate + inverted scroll regions
+    fz_case("\x1b[38;5;99999m\x1b[48;2;99999;99999;99999m");  # colour indices past the palette
+    fz_case("\x1b[?1049h\x1b[?1049h\x1b[?1049l\x1b[?1049l");  # alt-screen thrash (double enter/exit)
+    fz_case("\x1b[?47h\x1b[?1047h\x1b[?1049l");    # the three alt-screen modes interleaved
+    fz_case("\x1b[1;2;3;4;5;6;7;8;9;10;11;12;13;14;15;16;17;18;19;20m");  # param overflow (>16)
+    fz_case("\x1b[<<<<<<<<<<m\x1b[::::::::::m");   # private markers / sub-params mid-param
+    fz_case("\x1b\x1b\x1b\x1b[\x1b[\x1b[A");       # ESC storms aborting sequences
+    fz_case("\x1bP\x1bX\x1b^\x1b_\x1b\\");         # DCS / SOS / PM / APC, then ST
+    fz_case("\xe2\x1b[A\xe2\x41\xf0\x9f");         # truncated UTF-8 spanning an escape
+    fz_case("\xc0\x80\xed\xa0\x80\xf5\x80\x80\x80"); # overlong / surrogate / out-of-range
+    fz_case("\x1b]0;");                            # OSC opened and never terminated
+    fz_case("\x1b[6n\x1b[c\x1b[>c");               # DA / DSR (deferred verbs must not fault)
+
+    # OSC longer than VT_STR_CAP (512) — the string buffer's overflow edge.
+    term_init(24, 80);
+    term_feed(0x1b); term_feed(0x5d);
+    var o = 0;
+    while (o < 4096) { term_feed(0x41); o = o + 1; }
+    term_feed(0x07);
+    assert_lte(vt_string_len(), VT_STR_CAP, "OSC string never exceeds its capacity");
+
+    # ---- 2. random byte streams through the full path ----
+    # Pure noise: every byte value, every state transition, no structure.
+    var round = 0;
+    while (round < 200) {
+        term_init(24, 80);
+        var n = 0;
+        while (n < 2048) { term_feed(fz_rand() & 255); n = n + 1; }
+        assert_gte(grid_cursor_row(), 0, "random stream: cursor row non-negative");
+        assert_lt(grid_cursor_row(), grid_get_rows(), "random stream: cursor row in range");
+        assert_lt(grid_cursor_col(), grid_get_cols(), "random stream: cursor col in range");
+        round = round + 1;
+    }
+
+    # ---- 3. structured noise: escape-heavy streams (far more control paths) ----
+    # Pure random rarely produces a valid CSI; biasing toward ESC/[/digits/finals
+    # drives the state machine instead of the print path.
+    var pick = "\x1b[]();?0123456789;ABCDHJKLMPSTXcdfhlmnr \x07\x18\x1a\x0a\x0d\x08\x09";
+    var plen = strlen(pick);
+    var round2 = 0;
+    while (round2 < 200) {
+        term_init(24, 80);
+        var n2 = 0;
+        while (n2 < 2048) { term_feed(load8(pick + fz_rand() % plen)); n2 = n2 + 1; }
+        assert_lt(grid_cursor_row(), grid_get_rows(), "escape noise: cursor row in range");
+        assert_lt(grid_cursor_col(), grid_get_cols(), "escape noise: cursor col in range");
+        assert_lte(grid_scroll_top_get(), grid_scroll_bot_get(), "escape noise: region ordered");
+        round2 = round2 + 1;
+    }
+
     println("fuzz: ok");
-    return 0;
+    return assert_summary();
 }
 
 fn _entry(): i64 { var rc = main(); syscall(SYS_EXIT, rc); return 0; }

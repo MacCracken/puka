@@ -22,7 +22,7 @@ fn pix_blit_region(src_rgb, sw, py0, py1, dst, dst_stride_px): i64 {
         while (x < sw) {
             var sp = (srow + x) * 3;
             store32(dst + (drow + x) * 4,
-                    (load8(src_rgb + sp) << 16) | (load8(src_rgb + sp + 1) << 8) | load8(src_rgb + sp + 2));
+              (load8(src_rgb + sp) << 16) | (load8(src_rgb + sp + 1) << 8) | load8(src_rgb + sp + 2));
             x = x + 1;
         }
         y = y + 1;

@@ -1,21 +1,86 @@
-# puka benchmarks
-# Stdlib auto-included via cyrius.cyml
+# puka benchmarks — the hot paths, measured.
+# Stdlib auto-included via cyrius.cyml.
 #
 # Pattern: bench_new -> bench_batch_start -> tight loop -> bench_batch_stop -> bench_report.
 # For sub-1us ops use batch_size >= 1000 to amortize clock_gettime overhead
 # (~240 ns per start/stop pair on x86_64 Linux). See lib/bench.cyr header for
 # the full overhead-vs-batching guidance.
+#
+# ⛔ THESE REPLACED A `noop` STUB (0.6.22). The P(-1) gate asks for BASELINE BENCHMARKS, and a
+# harness that timed an empty function satisfied the runner while measuring nothing about puka: it
+# could not have detected a parser rewritten to be ten times slower. The four below are the paths a
+# terminal actually spends its time in, ordered by how often they run.
+# ⚠ These are BASELINES, not thresholds — nothing fails on a regression yet. Their job is to make a
+# regression visible in the run output and to give a later gate a number to compare against.
 
-fn bench_noop(): i64 { return 0; }
+include "src/parser.cyr"
+include "src/grid.cyr"
+include "src/unicode.cyr"
+include "src/terminal.cyr"
+include "lib/kashi_font_data.cyr"
+include "src/render/fb.cyr"
+
+# One pass of the printable hot path: the byte that 99% of a terminal's input is.
+fn b__feed_print(): i64 { return vt_feed(0x41); }
 
 fn main(): i64 {
     alloc_init();
-    var b = bench_new("noop");
-    bench_batch_start(b);
+
+    # ---- 1. the parser, printable bytes: the innermost loop in the whole program ----
+    term_init(24, 80);
+    var b1 = bench_new("vt_feed printable");
+    bench_batch_start(b1);
     var i = 0;
-    while (i < 1000000) { bench_noop(); i = i + 1; }
-    bench_batch_stop(b, 1000000);
-    bench_report(b);
+    while (i < 1000000) { b__feed_print(); i = i + 1; }
+    bench_batch_stop(b1, 1000000);
+    bench_report(b1);
+
+    # ---- 2. the parser, a full CSI sequence (8 bytes: ESC [ 1 ; 3 1 m) ----
+    # The control path: every colour change a shell prompt makes runs this.
+    var b2 = bench_new("vt_feed CSI SGR seq");
+    bench_batch_start(b2);
+    var j = 0;
+    while (j < 200000) {
+        vt_feed(0x1b); vt_feed(0x5b); vt_feed(0x31); vt_feed(0x3b);
+        vt_feed(0x33); vt_feed(0x31); vt_feed(0x6d);
+        j = j + 1;
+    }
+    bench_batch_stop(b2, 200000);
+    bench_report(b2);
+
+    # ---- 3. term_feed: the whole pipeline, parse -> utf8 -> grid write ----
+    # What `pty_pump` calls once per byte the child produces.
+    term_init(24, 80);
+    var b3 = bench_new("term_feed printable (full pipeline)");
+    bench_batch_start(b3);
+    var k = 0;
+    while (k < 500000) { term_feed(0x41); k = k + 1; }
+    bench_batch_stop(b3, 500000);
+    bench_report(b3);
+
+    # ---- 4. grid_scroll_up: a full-width row copy + a scrollback ring push ----
+    # Runs once per output line — the cost that dominates `cat` of a large file.
+    term_init(24, 80);
+    var b4 = bench_new("grid_scroll_up 1 line (+scrollback)");
+    bench_batch_start(b4);
+    var m = 0;
+    while (m < 20000) { grid_scroll_up(1); m = m + 1; }
+    bench_batch_stop(b4, 20000);
+    bench_report(b4);
+
+    # ---- 5. fb_render: one full 80x24 frame, every row dirty ----
+    # The present path. Measured all-dirty (the worst case); the damage bitset means a real
+    # keystroke repaints one row, so this is an upper bound, not a per-frame cost.
+    term_init(24, 80);
+    if (fb_init(8, 16) == 0) {
+        var b5 = bench_new("fb_render 80x24 all-dirty frame");
+        bench_batch_start(b5);
+        var q = 0;
+        while (q < 2000) { grid_mark_all_dirty(); fb_render(); q = q + 1; }
+        bench_batch_stop(b5, 2000);
+        bench_report(b5);
+    }
+
     return 0;
 }
 

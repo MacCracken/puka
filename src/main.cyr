@@ -30,13 +30,18 @@ fn puka__say(s, n): i64 { return syscall(1, 1, s, n); }
 fn puka__say_num(v): i64 {
     if (v < 0) { puka__say("-", 1); v = 0 - v; }
     if (v == 0) { return puka__say("0", 1); }
-    var d = alloc(24);
+    # ⚠ STACK, NOT `alloc` — these were two `alloc(24)` calls, so every number printed leaked 48 B
+    # for the life of the process. Not a cold path: the resize branch calls this SIX times per
+    # compositor configure, and a window drag configures continuously. Same rule the `puka_szpx`
+    # comment below states and this function was breaking. A function-local `var d[24]` is 24 BYTES
+    # (genesis CLAUDE.md) — enough for any i64 in decimal.
+    var d[24];
     var n = 0;
-    while (v > 0) { store8(d + n, 48 + v % 10); v = v / 10; n = n + 1; }
-    var out = alloc(24);
+    while (v > 0) { store8(&d + n, 48 + v % 10); v = v / 10; n = n + 1; }
+    var out[24];
     var i = 0;
-    while (i < n) { store8(out + i, load8(d + n - 1 - i)); i = i + 1; }
-    return puka__say(out, n);
+    while (i < n) { store8(&out + i, load8(&d + n - 1 - i)); i = i + 1; }
+    return puka__say(&out, n);
 }
 
 # First-occurrence latch for the "a line reached the shell" marker. ⚠ puka's own fd 1 is the CONSOLE
@@ -48,6 +53,13 @@ var puka_line_marked = 0;
 # the child exits — a positive value bounds the loop for harnesses that must not hang.
 var puka_pres_fail = 0;   # bounded count of reported present failures
 var puka_szpx = 0;      # alloc(16) scratch for win_size_px; see puka_terminal
+# ⛔ THE SAME RULE `puka_szpx` EXISTS FOR, APPLIED TO THE KEY PATH. The event loop allocated its key
+# scratch (`alloc(32)` twice) INSIDE the loop body, so every keystroke leaked 64 B permanently —
+# `alloc` has no free. A day in a shell is tens of thousands of keys. Module-global scratch, minted
+# once in `puka_terminal`, is the idiom this file already chose for exactly this reason 130 lines
+# below; these two call sites simply predated it.
+var puka_kev = 0;       # alloc(32) scratch: [evdev keycode, mods, state] from win_next_key
+var puka_kbytes = 0;    # alloc(32) scratch: the encoded child bytes from input_from_keycode
 var PUKA_CELL_W = 8;
 var PUKA_CELL_H = 16;
 var PUKA_ROWS   = 24;
@@ -184,6 +196,18 @@ fn puka_terminal(rows, cols, frames): i64 {
         puka__say("puka: size-scratch alloc FAILED\n", 32);
         pty_close(); win_close(0); return 0 - 1;
     }
+    # Key scratch, minted once for the same reason — and CHECKED, which the in-loop versions were not:
+    # a failed `alloc` returned 0 and `win_next_key(0, 0)` would have stored through a null pointer.
+    puka_kev = alloc(32);
+    puka_kbytes = alloc(32);
+    if (puka_kev == 0) {
+        puka__say("puka: key-scratch alloc FAILED\n", 31);
+        pty_close(); win_close(0); return 0 - 1;
+    }
+    if (puka_kbytes == 0) {
+        puka__say("puka: key-scratch alloc FAILED\n", 31);
+        pty_close(); win_close(0); return 0 - 1;
+    }
 
     var f = 0;
     var live = 1;
@@ -282,23 +306,23 @@ fn puka_terminal(rows, cols, frames): i64 {
                 var ncols = nw / PUKA_CELL_W;
                 var nrows = nh / PUKA_CELL_H;
                 if (ncols > 0) { if (nrows > 0) {
-                    # `term_resize` -> `grid_resize` clamps to GRID_MAX_* and marks every row dirty,
-                    # so the next `fb_render` repaints the whole frame; `fb_resize` then refits the
-                    # pixel buffer to the grid's new extent.
-                    term_resize(nrows, ncols);
-                    if (fb_resize() < 0) { puka__say("puka: fb refit FAILED after resize\n", 35); }
-                    # ⚠ ACCEPTED AND IGNORED ON AGNOS, deliberately — there is no TIOCSWINSZ on the
-                    # `#97` channel band (src/pty.cyr "NO WINDOW SIZE"). The GRID reflows, which is
-                    # what the report was about; the child shell is NOT told, so its own wrapping is
-                    # unchanged until a resize-aware pty protocol exists. Called anyway so the seam
-                    # is real on the host and this line does not have to be found later.
-                    pty_set_winsize(0, nrows, ncols);
-                    puka__say("puka: resized by the compositor -- grid ", 40);
-                    puka__say_num(grid_get_cols()); puka__say("x", 1);
-                    puka__say_num(grid_get_rows()); puka__say(" cells, ", 8);
-                    puka__say_num(fb_width()); puka__say("x", 1);
-                    puka__say_num(fb_height()); puka__say(" px\n", 4);
-                } }
+                        # `term_resize` -> `grid_resize` clamps to GRID_MAX_* and marks every row dirty,
+                        # so the next `fb_render` repaints the whole frame; `fb_resize` then refits the
+                        # pixel buffer to the grid's new extent.
+                        term_resize(nrows, ncols);
+                        if (fb_resize() < 0) { puka__say("puka: fb refit FAILED after resize\n", 35); }
+                        # ⚠ ACCEPTED AND IGNORED ON AGNOS, deliberately — there is no TIOCSWINSZ on the
+                        # `#97` channel band (src/pty.cyr "NO WINDOW SIZE"). The GRID reflows, which is
+                        # what the report was about; the child shell is NOT told, so its own wrapping is
+                        # unchanged until a resize-aware pty protocol exists. Called anyway so the seam
+                        # is real on the host and this line does not have to be found later.
+                        pty_set_winsize(0, nrows, ncols);
+                        puka__say("puka: resized by the compositor -- grid ", 40);
+                        puka__say_num(grid_get_cols()); puka__say("x", 1);
+                        puka__say_num(grid_get_rows()); puka__say(" cells, ", 8);
+                        puka__say_num(fb_width()); puka__say("x", 1);
+                        puka__say_num(fb_height()); puka__say(" px\n", 4);
+                    } }
             }
         }
         # ⚠ LEFT AS EQUALITY, DELIBERATELY, and it is mask-fragile: on the wayland path a frame that
@@ -306,9 +330,21 @@ fn puka_terminal(rows, cols, frames): i64 {
         # a latent host-build defect, not an agnos one (the setu backend returns single events), and
         # fixing it changes behaviour on a path this change does not exercise. Recorded, not silently
         # altered — see the note above for why the CLOSE test above does use a bit test.
+        # ⭐ THE WHEEL SCROLLS THE SCROLLBACK. `grid_scroll_view` and the whole viewport ring have
+        # existed since the scrollback bite and NOTHING in this loop moved them — `programs/puka_term.cyr`
+        # wired PageUp/PageDown on the Wayland path, and this terminal, the one that runs on agnos, had
+        # no way to reach history at all. setu 0.8.8's kind 12 is what makes the wheel available.
+        # ⚠ Bit-tested, like CLOSE and RESIZE — see the note above for why equality is the fragile form.
+        if ((wev & WIN_EV_SCROLL) != 0) {
+            var sd = win_next_scroll(0);
+            if (sd != 0) { grid_scroll_view(sd); }
+        }
         if (wev == WIN_EV_KEY) {
-            var kev = alloc(32);
-            if (win_next_key(0, kev) == 1) {
+            if (win_next_key(0, puka_kev) == 1) {
+                # ⭐ TYPING SNAPS TO THE LIVE BOTTOM. `grid_view_reset` was written for exactly this
+                # ("on user input", grid.cyr) and had no caller on this path; without it a user who
+                # scrolled up would type into a screen that never came back to the prompt.
+                if (grid_view_off_get() != 0) { grid_view_reset(); }
                 # ⭐ ONE LINE PER KEY, ON PURPOSE — this is a COUNT, not a first-occurrence latch.
                 # `puka-terminal-test.py` counts these against the number it typed, so a run that loses
                 # keystrokes says so instead of looking like a line-discipline failure. The two have
@@ -318,9 +354,8 @@ fn puka_terminal(rows, cols, frames): i64 {
                 # Measured: 1 run in 3 lost several keys INCLUDING Enter, which presents as "the shell
                 # never answered" while every byte that did arrive was handled correctly.
                 puka__say("puka: key received\n", 19);
-                var kb = alloc(32);
-                var kn = input_from_keycode(load64(kev), load64(kev + 8), kb);
-                if (kn > 0) { puka_input_deliver(kb, kn); }
+                var kn = input_from_keycode(load64(puka_kev), load64(puka_kev + 8), puka_kbytes);
+                if (kn > 0) { puka_input_deliver(puka_kbytes, kn); }
             }
         }
 

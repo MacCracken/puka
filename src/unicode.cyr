@@ -26,6 +26,10 @@ enum Utf8Const {
 var utf8_cp = 0;     # codepoint accumulator
 var utf8_need = 0;   # remaining continuation bytes expected
 var utf8_min = 0;    # minimum legal codepoint for this length (overlong guard)
+# ⭐ "THE BYTE I JUST REFUSED WAS NOT MINE." Set when a sequence is aborted by a byte that is not a
+# continuation — that byte belongs to whatever comes NEXT, and the caller must feed it again.
+# See `utf8_feed`'s truncation arm and `term_feed`'s re-dispatch.
+var utf8_reject = 0;
 
 fn utf8_reset(): i64 {
     utf8_cp = 0;
@@ -34,10 +38,15 @@ fn utf8_reset(): i64 {
     return 0;
 }
 
+# 1 if the byte passed to the LAST utf8_feed aborted a partial sequence and was therefore not
+# consumed. Valid until the next utf8_feed call (the same read-before-next idiom as the parser).
+fn utf8_rejected(): i64 { return utf8_reject; }
+
 # Feed one byte. Returns a codepoint (0..0x10FFFF), UC_REPLACE on a decode
 # error, or UTF8_MORE if more continuation bytes are required.
 fn utf8_feed(b): i64 {
     b = b & 255;
+    utf8_reject = 0;
 
     if (utf8_need == 0) {
         # expecting a lead (or single) byte
@@ -55,8 +64,13 @@ fn utf8_feed(b): i64 {
     }
 
     # expecting a continuation byte (0x80-0xBF)
-    if (b < 0x80) { utf8_reset(); return UC_REPLACE; }     # truncated sequence (offending byte dropped)
-    if (b > 0xbf) { utf8_reset(); return UC_REPLACE; }
+    # ⛔ THE ABORTING BYTE IS NOT CONSUMED, AND IT USED TO BE — a real character was lost every time.
+    # `E2 41` ("truncated 3-byte sequence, then 'A'") yielded U+FFFD and silently ATE the 'A'. Unicode
+    # 15 §3.9's maximal-subpart guidance, and every other terminal, emit U+FFFD for the bad prefix and
+    # then process the byte normally, because that byte starts the next character. `utf8_reject` says
+    # so and `term_feed` feeds it again; a caller that ignores the flag behaves exactly as before.
+    if (b < 0x80) { utf8_reset(); utf8_reject = 1; return UC_REPLACE; }
+    if (b > 0xbf) { utf8_reset(); utf8_reject = 1; return UC_REPLACE; }
     utf8_cp = (utf8_cp << 6) | (b & 0x3f);
     utf8_need = utf8_need - 1;
     if (utf8_need > 0) { return UTF8_MORE; }
@@ -156,6 +170,13 @@ fn uc__wide(cp): i64 {
 # Display width of a codepoint in cells: 0 (combining/zero-width),
 # 2 (East Asian wide / emoji), or 1 (everything else).
 fn char_width(cp): i64 {
+    # ⭐ ASCII FIRST, AND IT IS THE OVERWHELMING MAJORITY OF WHAT A TERMINAL PRINTS. Without this,
+    # every plain 'A' walked ~15 range checks in `uc__zero_width` and ~15 more in `uc__wide` — thirty
+    # calls to `uc__in` — to reach the answer 1. The early-out is PROVABLE, not a heuristic: the
+    # lowest zero-width entry is U+0300 and the lowest wide entry is U+1100, so nothing in
+    # 0x20..0x7E can be either. (NUL is zero-width and is correctly excluded by the lower bound.)
+    # Measured on `term_feed printable`: 300ns -> see CHANGELOG 0.6.22.
+    if (cp >= 0x20) { if (cp < 0x7f) { return 1; } }
     if (uc__zero_width(cp) == 1) { return 0; }
     if (uc__wide(cp) == 1) { return 2; }
     return 1;

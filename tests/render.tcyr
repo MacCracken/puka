@@ -188,6 +188,25 @@ fn main() {
     fb_render();                                      # must not corrupt with the tighter stride
     assert_gt(count_color(0, 0, 0xC0C0C0), 0, "glyph renders after shrink");
 
+    test_group("fill: an out-of-bounds rect is clamped, not written (0.6.22)");
+    # ⛔ THE PROPERTY THIS PINS: fb__fill_rect stopped calling fb__plot per pixel and now clamps the
+    # rectangle once. That is only safe if the clamp is exactly as strict — these are the edges.
+    term_init(2, 4);
+    assert_eq(fb_init(8, 16), 0, "fb up at 32x32");
+    fb__fill_rect(0, 0, fb_width(), fb_height(), 0x000000);      # known ground
+    fb__fill_rect(0 - 5, 0 - 5, 20, 20, 0xFF0000);               # straddles the top-left corner
+    assert_eq(px_rgb(0, 0), 0xFF0000, "the in-bounds part of a negative-origin rect is painted");
+    assert_eq(px_rgb(14, 14), 0xFF0000, "up to its true in-bounds edge (x0+w = 15)");
+    assert_eq(px_rgb(15, 15), 0x000000, "and not one pixel past it");
+    fb__fill_rect(0 - 100, 0 - 100, 40, 40, 0x0000FF);           # ENTIRELY off-screen: [-100,-60)
+    assert_eq(px_rgb(0, 0), 0xFF0000, "a rect whose whole extent is negative writes nothing");
+    fb__fill_rect(0, 0, fb_width() + 1000, fb_height() + 1000, 0x00FF00);   # overruns both axes
+    assert_eq(px_rgb(fb_width() - 1, fb_height() - 1), 0x00FF00, "the last in-bounds pixel is painted");
+    fb__fill_rect(fb_width(), 0, 50, 50, 0x0000FF);              # entirely past the right edge
+    assert_eq(px_rgb(fb_width() - 1, 0), 0x00FF00, "a fully out-of-bounds rect writes nothing");
+    fb__fill_rect(0, 0, 0 - 5, 0 - 5, 0x0000FF);                 # negative extent
+    assert_eq(px_rgb(0, 0), 0x00FF00, "a negative-extent rect writes nothing");
+
     return assert_summary();
 }
 

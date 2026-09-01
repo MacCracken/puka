@@ -440,8 +440,16 @@ fn term_esc(final): i64 {
 fn term_feed(b): i64 {
     var ev = vt_feed(b);
     if (ev == VTE_PRINT) {
-        var cp = utf8_feed(vt_event_char());
+        var raw = vt_event_char();
+        var cp = utf8_feed(raw);
         if (cp != UTF8_MORE) { term_print(cp); }
+        # ⭐ RE-DISPATCH A BYTE THAT ABORTED A PARTIAL SEQUENCE. It was never part of that sequence,
+        # so eating it dropped a character the child really sent. Bounded to ONE retry by
+        # construction: the decoder is now in the ground state, so this call cannot reject again.
+        if (utf8_rejected() == 1) {
+            var cp2 = utf8_feed(raw);
+            if (cp2 != UTF8_MORE) { term_print(cp2); }
+        }
         return 0;
     }
     if (ev == VTE_EXECUTE) { return term_c0(vt_event_char()); }

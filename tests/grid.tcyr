@@ -215,6 +215,41 @@ fn main() {
     assert_eq(grid_sb_count_get(), 0, "alt screen captures no scrollback");
     grid_alt_screen(0);
 
+    test_group("bounds: the raw-store write paths refuse an out-of-range row (0.6.22)");
+    # ⛔ WHY THESE EXIST: insert/delete/copy_row stride the backing store directly rather than going
+    # through `grid_set_cell`, so they carried NO row guard — safe only because every caller happens
+    # to pass the cursor row, an invariant written down nowhere. A no-op is the contract.
+    grid_init(4, 8);
+    grid_put_cell(0, 0, 0x5A);                      # a canary in row 0
+    grid_insert_cells(0 - 1, 0, 4);                 # negative row
+    grid_insert_cells(GRID_MAX_ROWS, 0, 4);         # past the backing store
+    grid_insert_cells(GRID_MAX_ROWS + 500, 0, 4);
+    grid_delete_cells(0 - 1, 0, 4);
+    grid_delete_cells(GRID_MAX_ROWS, 0, 4);
+    assert_eq(grid_glyph(0, 0), 0x5A, "out-of-range insert/delete left the grid untouched");
+
+    test_group("bounds: the viewport accessors guard like their non-viewport twins (0.6.22)");
+    # `grid_glyph`/`grid_fg`/`grid_attr`/`grid_bg` all range-check; the grid_v* pair did not.
+    assert_eq(grid_vglyph(0 - 1, 0), 0x20, "negative row -> blank");
+    assert_eq(grid_vglyph(GRID_MAX_ROWS, 0), 0x20, "row past the store -> blank");
+    assert_eq(grid_vglyph(0, 0 - 1), 0x20, "negative col -> blank");
+    assert_eq(grid_vglyph(0, GRID_MAX_COLS), 0x20, "col past the store -> blank");
+    assert_eq(grid_vfg(GRID_MAX_ROWS, 0), 0, "out-of-range fg -> default");
+    assert_eq(grid_vbg(0, GRID_MAX_COLS), 0, "out-of-range bg -> default");
+    assert_eq(grid_vattr(0 - 1, 0), 0, "out-of-range attr -> none");
+
+    test_group("bounds: an adversarial CSI param cannot walk the grid (0.6.22)");
+    # The parser clamps a parameter at 65535; these are the verbs that turn one into an index.
+    grid_init(4, 8);
+    grid_put_cell(1, 1, 0x51);
+    grid_insert_cells(1, 1, 65535);                 # ICH with the clamp value
+    grid_delete_cells(1, 1, 65535);                 # DCH likewise
+    grid_erase_cells(1, 0, 65535);
+    grid_scroll_up(65535);
+    grid_scroll_down(65535);
+    assert_eq(grid_get_rows(), 4, "grid dimensions survive an adversarial param");
+    assert_eq(grid_get_cols(), 8, "column count survives too");
+
     return assert_summary();
 }
 
