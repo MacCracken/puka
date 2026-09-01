@@ -2,6 +2,78 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.21] - 2026-08-31 — the stack catches up, and it skipped a compiler bug on the way
+
+### Changed — toolchain pin **6.5.28 → 6.5.36**
+
+⭐ **puka was never exposed to the one critical defect in that range, because it sat below it.**
+cyrius 6.5.36 fixes *"enum constants ≥ 2^62 were silently corrupted"* — **shipped in `.31`–`.35`**.
+puka's pin was `.28`, so the whole broken window is behind us and no build ever emitted a corrupted
+constant. Recorded because "we jumped eight patch versions" otherwise invites exactly that question.
+
+⚠ **One BREAKING stdlib removal in the range, verified benign here**: yukti dropped the unprefixed
+`str_starts_with_cstr/2`. **Zero callers in `src/` or `tests/`** (grep-verified); `lib/str.cyr` keeps
+the real `str_starts_with`.
+
+⚠ The pin/`cycc` drift warning is gone — the manifest now matches the installed toolchain. It was
+`warning: cyrius.cyml pins 6.5.28 but cycc is 6.5.36` on every build before this.
+
+⛔ **`sys_ioctl` landing in 6.5.36 does NOT unblock mabda, and the note in `cyrius.cyml` stands.**
+That addition wraps ioctl for the ELF/Mach-O peers; the **agnos** peer still has no `SYS_IOCTL`
+(0 occurrences in the freshly vendored `lib/syscalls_x86_64_agnos.cyr`, versus `SYS_IOCTL = 16` in
+`lib/syscalls_x86_64_linux.cyr`), and `dist/mabda.cyr` still names it **45 times**. Declaring mabda
+would still fail the `--agnos` build before a line of puka compiles. Checked, not assumed — a new
+`sys_ioctl` in the changelog is precisely the thing that reads like the blocker was cleared.
+
+### Changed — dependency refresh to current tags
+
+- **dhancha 0.9.12 → 0.9.26** (14 tags). All **13** `dh_*` entry points puka calls —
+  `dh_client_connect/_fd/_close`, `dh_widget_new/_add_child/_set_bg/_set_flex/_set_layout`,
+  `dh_canvas_new/_blit_rgb24`, `dh_surface_wrap`, `dh_layout_apply`, `dh_draw_widget` — are
+  **arity-identical** in 0.9.26; signatures were diffed against the call sites, not assumed from the
+  changelog. The range is additive (LIST/GRID/MENU/SHEET, stable widget keys); puka consumes none of it.
+- **setu 0.8.7 → 0.8.8** — additive only: `SETU_INPUT_PTR_SCROLL` (kind 12), `SETU_KIND_MAX` 11 → 12.
+- **kashi 1.0.6 — unchanged, already latest.** Still the freestanding `src/font_data.cyr` core; the
+  measured +50% cost of the library face recorded in `cyrius.cyml` is unchanged and still declined.
+- Transitive, via dhancha: **sadish 0.5.2 → 0.5.3**, **rupa → 0.1.6**, **rekha 0.3.5** (unchanged).
+- stdlib snapshot re-vendored from 6.5.36: `fmt`, `io`, `sakshi`, and the four `syscalls_*` peers.
+
+⭐ **The target set is not a guess — it is dhancha 0.9.26's own manifest.** That release pins
+cyrius 6.5.36 / setu 0.8.8 / sadish 0.5.3 / rupa 0.1.6 / rekha 0.3.5 / kashi 1.0.6, which is exactly
+the set adopted here. The stack is internally consistent rather than independently latest.
+
+⚠ **`SETU_INPUT_PTR_SCROLL` is available and puka does NOT consume it** — wheel input still does
+nothing. Stated because "setu 0.8.8" plus "terminal with scrollback" reads like scroll now works.
+It is **safely ignored, not misread**: `win_next_key` dispatches on explicit equality
+(`== SETU_CLOSE`, `== SETU_CONFIGURE`, `!= SETU_INPUT_KEY → WIN_EV_NONE`), so kind 12 falls through
+to `WIN_EV_NONE`. Wiring it to `grid_scroll_view` is a feature, not a dep bump.
+
+### Changed — `dist/puka.cyr` regenerated
+
+⚠ **The engine bundle was stale before this release, and not because of it**: `dist/` was last built
+at `6012281`, `src/` changed later at `da4d4c1`, so `cyrius distlib --check` was already failing on a
+clean tree. Regenerated — and the diff is **exactly one line**, the `# Version:` stamp (`0.6.17` →
+`0.6.21`). Every engine module is **byte-identical**; the three files that had moved (`main.cyr`,
+`pty.cyr`, `window_setu.cyr`) are all in the app half, none in `[lib] modules`. `distlib --check` is
+now current and `tests/engine_bundle.tcyr` (11) passes against the new bundle.
+
+### Verification
+
+`cyrius test` **566 passed, 0 failed** · `cyrius fuzz` PASS (the parser's untrusted boundary) ·
+`cyrius vet` 14 deps, **0 untrusted, 0 missing** · `cyrius distlib --check` current ·
+cross-target builds green: **`--agnos`** and **`--aarch64`**, the two most likely to break on a
+toolchain move. Every vendored `lib/` artifact **hash-matches** its upstream `dist/` bundle
+(dhancha, setu, rupa, sadish, rekha, kashi) — the lock is not merely self-consistent, it agrees
+with the sources on disk.
+
+⚠ **`cyrius audit` still reports `fmt: FAIL`, and this release does NOT fix it.** Pre-existing: 11
+`src/`/`tests/` files plus the generated bundle need reformatting, and the *committed* `dist/puka.cyr`
+was already fmt-dirty before regeneration. No `src/` or `tests/` file was touched here, so
+reformatting them would bundle an unrelated whole-tree diff into a dependency bump.
+
+⚠ **No agnos or Wayland runtime run.** This is a build/test/hash-level verification on the Linux dev
+host. The `--agnos` result above is that it **compiles**, nothing more.
+
 ## [0.6.20] - 2026-08-22 — the kernel floor is 1.56.46, because below it nothing you run prints
 
 ### Changed — documented kernel floor 1.56.40 -> **1.56.46**

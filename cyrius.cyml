@@ -8,7 +8,7 @@ language = "cyrius"
 # band wrappers — `sys_chan_mint` / `sys_chan_send` / `sys_chan_recv` / `sys_chan_close` and the
 # `CH_E_*` result codes — which landed in cyrius 6.5.8. On the old 6.5.5 pin the agnos arm failed with
 # `undefined variable 'CH_E_PEERGONE'`, which reads like a puka bug and is a toolchain floor.
-cyrius = "6.5.28"
+cyrius = "6.5.36"
 
 [build]
 entry = "src/main.cyr"
@@ -71,7 +71,7 @@ modules = ["src/font_data.cyr"]
 # declared dependency on code that is not built, costing a target.
 #
 # ⭐ RESTORE IT — GUARDED, AND ON A CURRENT TAG — when the GPU platform is actually wired into an
-# entry point. The 3.2.11 pin was already two majors stale (mabda is 4.0.8), so restoring it blindly
+# entry point. The 3.2.11 pin was already two majors stale (mabda is 4.1.0 as of 2026-08-31), so restoring it blindly
 # would have been wrong anyway. Consume only the @public gpu_* API when it returns.
 
 # setu — the AGNOS native display-protocol + its reference CLIENT transport. The
@@ -94,7 +94,7 @@ modules = ["src/font_data.cyr"]
 git     = "https://github.com/MacCracken/setu.git"
 # ⚠ `path` added 2026-08-12 — setu 0.8.5 centralises the rendezvous ($SETU_SOCKET).
 path    = "../setu"
-tag     = "0.8.7"
+tag     = "0.8.8"
 modules = ["dist/setu.cyr"]
 
 # ⭐⭐ dhancha — the client-side widget toolkit, added 2026-08-16 so puka stops being the last app that
@@ -113,6 +113,6 @@ modules = ["dist/setu.cyr"]
 [deps.dhancha]
 git     = "https://github.com/MacCracken/dhancha.git"
 path    = "../dhancha"
-tag    = "0.9.12"
+tag    = "0.9.26"
 modules = ["dist/dhancha.cyr"]
 ---

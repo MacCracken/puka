@@ -5,12 +5,20 @@
 
 ## Version
 
-**0.6.7** (2026-08-02) — see [`../../CHANGELOG.md`](../../CHANGELOG.md). Release narrative belongs there,
-not here; this block was four releases stale (it described 0.6.3, cut 2026-06-19) until 2026-08-02.
+**0.6.21** (2026-08-31) — see [`../../CHANGELOG.md`](../../CHANGELOG.md). Release narrative belongs
+there, not here.
 
-Since 0.6.3: **0.6.4** made puka the compositor's first resident (the setu `win_*` backend over the TCP
-transport) · **0.6.5** GPU-visible client buffers (`shm_create_gpu` #86) · **0.6.6** setu 0.7.0 dep
-refresh · **0.6.7** the whole-stack toolchain catch-up.
+⛔ **SCOPE OF THIS REFRESH, STATED SO IT IS NOT MISREAD AS A FULL AUDIT.** 0.6.21 was a version +
+dependency bump, and only the three blocks that bump invalidated — **Version**, **Toolchain**,
+**Dependencies** — were re-derived from the tree on 2026-08-31. The **Source**, **Tests**,
+**Carry-forward**, **Dep gaps**, **Consumers** and **Next** sections below still carry the staleness
+they had at 0.6.7 (they describe the tree as of 2026-08-02, fourteen releases back) and were **not**
+verified here. Trust them at that date, not this one.
+
+Since 0.6.7, in brief (the CHANGELOG is authoritative): the **setu/dhancha window + UI edge**
+(`win_*` over dhancha's client layer, `src/ui.cyr`), **`dist/puka.cyr` as an embeddable engine**
+(0.6.17, `[lib] modules`), the **line discipline** (`src/line_discipline.cyr`), fullscreen/terminal
+repairs, and the documented **agnos kernel floor 1.56.46** (0.6.20).
 
 ⛔ **The setu TCP transport is RETIRED (2026-08-03) and puka has NO standing agnos desktop claim on the
 replacement.** It is retired as the WRONG PRIMITIVE for a local display protocol — nothing to route,
@@ -34,10 +42,21 @@ transport. What is retracted is the pre-`net_src_for` rigged-smoke lineage, not 
 
 ## Toolchain
 
-- **Cyrius pin**: `6.5.5` (in `cyrius.cyml [package].cyrius`)
-- ⚠ **`[deps.mabda]` deliberately held at 3.2.11** while 4.0.8 is on disk — a MAJOR jump, and puka's
-  mabda path is hardware-verified at the old pin. A decision, not drift.
-- ⚠ The pin is documentation, not enforcement: `cyrius build` uses the **installed** `cycc` and only warns.
+- **Cyrius pin**: `6.5.36` (in `cyrius.cyml [package].cyrius`) — matches dhancha 0.9.26's own pin.
+- ⛔ **`[deps.mabda]` is NOT DECLARED AT ALL** — it was **removed**, not held back, and this line said
+  otherwise for fourteen releases. It blocks the whole `--agnos` target: `dist/mabda.cyr` names
+  `SYS_IOCTL` **45 times** and the agnos syscall peer has **no `SYS_IOCTL`** (0 occurrences in
+  `lib/syscalls_x86_64_agnos.cyr`; the Linux peer has `SYS_IOCTL = 16`), so declaring it fails
+  `--agnos` before a line of puka compiles — cyrius prepends every declared dep module whether or not
+  the include graph reaches it. ⚠ **6.5.36 adding `sys_ioctl` did not change this** (re-checked
+  2026-08-31): that wrapper is for the ELF/Mach-O peers. Restore mabda — guarded, on a current tag
+  (**4.1.0** on disk) — when `src/platform/gpu/gpu.cyr` is actually wired into an entry point.
+  The full reasoning is in `cyrius.cyml`.
+- ⚠ **Kernel floor `agnos >= 1.56.46`** (0.6.20). Below it the terminal opens and every *builtin*
+  renders while **every program the shell launches is silent** — a kernel `chan_auth` defect, not a
+  puka bug, and indistinguishable from one.
+- ⚠ The pin is documentation, not enforcement: `cyrius build` uses the **installed** `cycc` and only
+  warns. At 0.6.21 the two agree, so the drift warning is silent.
 
 ## Source
 
@@ -84,11 +103,33 @@ marked at every write chokepoint and consumed by the renderer
 
 Direct (declared in `cyrius.cyml`):
 
-- stdlib — string, fmt, alloc, io, vec, str, syscalls, assert, bench
-- **kashi** — pinned **git dep** (`git`/`tag = "1.0.2"`), **freestanding** `src/font_data.cyr` core only (zero stdlib) — the same core the agnos kernel consumes. Resolves identically on a devbox and in CI (no sibling checkout). Bitmap console glyphs: built-in CP437 VGA 8×16 / CGA 8×8 / VGA 9×16. v1.0.2, API frozen.
-- **mabda** — the GPU foundation crate, now a **build dep** (git, tag **3.2.11**); puka uses its **native AMD-GFX9 backend only** (sovereign — the `wgpu` FFI backend is forbidden). Wired in M6 bite 7 via the `pgpu_*` seam (context → render target → readback → `wl_shm`, HW-verified on this Cezanne box). Consuming the amalgam needs the extended `[deps] stdlib` superset (`args/hashmap/tagged/fnptr/mmap/dynlib/sakshi`).
+| dep | pin (0.6.21) | modules | note |
+|---|---|---|---|
+| **kashi** | `1.0.6` | `src/font_data.cyr` | **freestanding** core only (zero stdlib) — the same core the agnos kernel consumes. Built-in CP437 VGA 8×16 / CGA 8×8 / VGA 9×16. 1.x API frozen. **Already latest at 0.6.21 — unchanged.** |
+| **setu** | `0.8.8` | `dist/setu.cyr` | the AGNOS display protocol + reference client. `present` / `poll_input` go here directly. |
+| **dhancha** | `0.9.26` | `dist/dhancha.cyr` | the widget toolkit. CONNECT / FD / CLOSE route through it; `src/ui.cyr` builds the canvas widget. |
+| **sadish** | `0.5.3` | *(transitive, via dhancha)* | software rasteriser. |
+| **rupa** | `0.1.6` | *(transitive, via dhancha)* | theme/design tokens. |
+| **rekha** | `0.3.5` | *(transitive, via dhancha)* | vector glyph path. **Commit-pinned in `cyrius.lock`** — the one dep resolved by commit rather than tag. |
 
-Planned (own-the-stack, not yet wired): `rekha`+`sadish` (vector glyphs, post-v1.0), `sakshi` (logging). kashi's PSF/BDF/PCF loader library face is available but not pulled in (built-in fonts suffice).
+- stdlib — the base set plus the superset a resolved amalgam needs: string, fmt, alloc, io, vec, str,
+  syscalls, assert, bench, args, hashmap, tagged, fnptr, mmap, dynlib, sakshi, result, net, chrono.
+- ⭐ **The dep set is dhancha 0.9.26's own manifest, not an independent "latest" sweep.** That release
+  pins cyrius 6.5.36 / setu 0.8.8 / sadish 0.5.3 / rupa 0.1.6 / rekha 0.3.5 / kashi 1.0.6 — adopted
+  wholesale, so the stack is internally consistent instead of each dep independently newest.
+- ⚠ **`path` beats `tag` on a devbox.** Every dep above carries both; `cyrius deps` resolves through
+  the sibling checkout when one exists, so a stale `tag` with a current sibling silently vendors code
+  the manifest does not name. At 0.6.21 every vendored `lib/` artifact was **hash-checked** against
+  its upstream `dist/` bundle and all six match — but the check is the reason to trust it, not the
+  `tag` line.
+- ⚠ **`SETU_INPUT_PTR_SCROLL` (setu 0.8.8, kind 12) is available and NOT consumed** — wheel input does
+  nothing. `win_next_key` dispatches on explicit equality, so kind 12 falls to `WIN_EV_NONE`: safely
+  ignored, not misread.
+
+Planned (own-the-stack, not yet wired): `rekha`+`sadish` **directly** (vector glyphs, post-v1.0 — they
+are on disk today only as dhancha's transitives), `sakshi` (logging). kashi's PSF/BDF/PCF loader
+library face is available but not pulled in (built-in fonts suffice; the library face measured **+50%**
+over the core, and `CYRIUS_DCE=1` reclaims none of it).
 
 ## Dep gaps / blockers
 

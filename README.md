@@ -73,10 +73,19 @@ direction).
 
 ## Dependencies
 
-Two git deps, both first-party + sovereign:
-[`kashi`](https://github.com/MacCracken/kashi) (1.0.2 — bitmap console glyphs) and
-[`mabda`](https://github.com/MacCracken/mabda) (3.2.11 — GPU foundation, native AMD
-GFX9 backend). Cyrius stdlib otherwise. See `state.md` for the dep-gap status.
+Three git deps, all first-party + sovereign:
+[`kashi`](https://github.com/MacCracken/kashi) (1.0.6 — bitmap console glyphs),
+[`setu`](https://github.com/MacCracken/setu) (0.8.8 — the AGNOS display protocol +
+its reference client) and [`dhancha`](https://github.com/MacCracken/dhancha)
+(0.9.26 — the widget toolkit; `sadish` / `rupa` / `rekha` arrive through it).
+Cyrius stdlib otherwise.
+
+> **⚠ `mabda` is NOT a declared dependency** — it was removed, not merely held
+> back, and this section listed it for fourteen releases. `dist/mabda.cyr` calls
+> `SYS_IOCTL`, which the agnos syscall peer does not have, so declaring it fails
+> the `--agnos` build outright. The `pgpu_*` GPU seam it backs
+> (`src/platform/gpu/gpu.cyr`) is real code that no entry point includes yet.
+> See `cyrius.cyml` for the full reasoning and `state.md` for dep-gap status.
 
 > **⚠ Do not write to `/dev/fb0`** — on a dev box that is the live Hyprland
 > desktop framebuffer. puka is a *compositor client* (it draws into a `wl_shm`
