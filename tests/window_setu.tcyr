@@ -1,0 +1,92 @@
+# window_setu.tcyr — the setu window backend's event poll, against a REAL AF_UNIX peer.
+#
+# `win_poll_events` is where the compositor's messages enter puka on the setu backend, and until
+# 0.6.25 nothing tested it. These tests drive it over a genuine SOCK_SEQPACKET connection —
+# `setu_listen` + `setu_client_connect` + `setu_accept` in one process, the shape setu's own
+# `unix_transport_test` uses — because "the compositor is gone" is a fact only a real peer closing
+# its end can produce.
+#
+# Linux-only and skip-clean: agnos has no AF_UNIX (clients are placed on a channel end), and a
+# sandbox that refuses the bind prints SKIP rather than faking a result.
+#
+# ⚠ WHITE-BOX: the tests set `setuwin_client` directly instead of calling `win_open`, which dials
+# `$SETU_SOCKET` or the default path and could reach a compositor that is really running.
+
+include "src/platform/setu/window_setu.cyr"
+
+var WST_PATH = "/tmp/puka-window-setu-test.sock";
+
+# Print a SKIP line for a check this environment cannot run.
+fn skip(reason) {
+    syscall(1, 1, "SKIP window_setu: ", 18);
+    syscall(1, 1, reason, strlen(reason));
+    syscall(1, 1, "\n", 1);
+    return 0;
+}
+
+# Run every scenario against one listening socket; exit status is the failure count.
+fn main() {
+    alloc_init();
+
+    #ifdef CYRIUS_TARGET_LINUX
+    var sfd = setu_listen(WST_PATH);
+    if (sfd < 0) {
+        skip("AF_UNIX listen refused (sandbox)");
+        assert(1, "skipped: no AF_UNIX listener");
+        return assert_summary();
+    }
+
+    test_group("window_setu — a silent compositor is no event");
+    var c1 = setu_client_connect(WST_PATH);
+    var p1 = setu_accept(sfd);
+    assert(c1 != 0, "client connected");
+    assert(p1 >= 0, "compositor side accepted");
+    setuwin_client = c1;
+    assert_eq(win_poll_events(0), WIN_EV_NONE, "live and silent -> WIN_EV_NONE (EAGAIN is not gone)");
+
+    # ⛔ `win_poll_events` runs once per FRAME and `alloc` has no free, so anything it allocates is a
+    # leak for the life of the terminal. The poll above was the warm-up: setu's reassembly buffer is
+    # allocated once, lazily, on a client's first poll.
+    test_group("window_setu — polling allocates nothing per frame");
+    var u0 = alloc_used();
+    var i = 0;
+    while (i < 100) { win_poll_events(0); i = i + 1; }
+    assert_eq(alloc_used() - u0, 0, "100 idle polls cost the heap 0 bytes");
+
+    test_group("window_setu — SETU_CLOSE is WIN_EV_CLOSE");
+    assert(setu_send(p1, setu_close(1)) > 0, "compositor sent SETU_CLOSE");
+    assert_eq(win_poll_events(0), WIN_EV_CLOSE, "SETU_CLOSE -> WIN_EV_CLOSE");
+    setu_client_close(c1);
+    sys_close(p1);
+
+    # ⭐ setu 0.8.11: `setu_client_poll_input` returns -6 once the compositor's end is gone (EOF or a
+    # recv error) and nothing is buffered. Before it, Linux read that as idle, so a compositor that
+    # died without sending SETU_CLOSE left puka running forever.
+    test_group("window_setu — the compositor going away is WIN_EV_CLOSE");
+    var c2 = setu_client_connect(WST_PATH);
+    var p2 = setu_accept(sfd);
+    assert(c2 != 0, "second client connected");
+    assert(p2 >= 0, "second client accepted");
+    setuwin_client = c2;
+    setuwin_gone = 0;                      # a new connection starts live, as `win_open` does
+    assert(setu_send(p2, setu_configure(1, 800, 600, 0)) > 0, "compositor sent CONFIGURE");
+    sys_close(p2);
+    assert_eq(win_poll_events(0), WIN_EV_RESIZE, "a frame sent before the close is delivered first");
+    assert_eq(win_poll_events(0), WIN_EV_CLOSE, "then the closed connection -> WIN_EV_CLOSE");
+    assert_eq(win_poll_events(0), WIN_EV_CLOSE, "and it stays closed");
+    setu_client_close(c2);
+
+    sys_close(sfd);
+    sys_unlinkat(SETU_AT_FDCWD, WST_PATH, 0);
+    #endif
+
+    #ifndef CYRIUS_TARGET_LINUX
+    skip("the setu backend's AF_UNIX transport is Linux-only; agnos places clients on a channel");
+    assert(1, "skipped: non-linux target");
+    #endif
+
+    return assert_summary();
+}
+
+fn _entry(): i64 { var rc = main(); syscall(SYS_EXIT, rc); return 0; }
+_entry();

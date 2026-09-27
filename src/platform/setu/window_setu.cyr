@@ -87,6 +87,7 @@ fn win_open(title, tlen, cols, rows, cell_w, cell_h, gpu_ctx): i64 {
     # that.) The floor is setu >= 0.8.0 on agnos.
     if (c == 0) { syscall(1, 1, "setuwin: setu connect refused\n", 30); return 0; }
     setuwin_client = c;
+    setuwin_gone = 0;
     setuwin_cell_w = cell_w;
     setuwin_cell_h = cell_h;
     win_w = cols * cell_w;
@@ -167,8 +168,7 @@ fn setuwin__hid_to_evdev(u): i64 {
     return 0;                                                       # unmapped — caller drops it
 }
 
-# Poll the compositor for one inbound message. Returns WIN_EV_KEY when a key was latched,
-# else WIN_EV_NONE. One message per call: `setu_client_poll_input` hands out one frame at a time.
+# The key `win_poll_events` latched for `win_next_key` (have = 1 while one is waiting).
 var setuwin_key_code = 0;
 var setuwin_key_mods = 0;
 var setuwin_key_have = 0;
@@ -181,11 +181,41 @@ var setuwin_cfg_h = 0;
 # than latched-one: the compositor already sums detents since its last forward, and a frame that
 # carries two messages must not silently drop the first. Drained by `win_next_scroll`.
 var setuwin_scroll_acc = 0;
+# 1 once setu has reported the connection gone. Final: setu documents -6 as "stop on it", so later
+# polls answer WIN_EV_CLOSE without touching the dead fd again. `win_open` clears it.
+var setuwin_gone = 0;
+# ⛔ ALLOCATED ONCE. This function runs every frame, `setu_msg_new` is an `alloc`, and `alloc` has no
+# free: allocating the message per call leaked 80 B a frame for the life of the terminal (measured:
+# 8,000 B over 100 idle polls). Reuse is setu's intended shape — `setu_decode` commits only a fully
+# validated frame and zeroes the unused arg slots "so a reused msg_out has no stale tail". The same
+# rule as `puka_szpx` in src/main.cyr and the stack buffer in `pty_pump`.
+var setuwin_msg = 0;
 
+# Poll the compositor for one inbound message. Returns WIN_EV_CLOSE (SETU_CLOSE, or the connection
+# gone), WIN_EV_RESIZE (a usable SETU_CONFIGURE), WIN_EV_SCROLL (wheel), WIN_EV_KEY (a key latched
+# for `win_next_key`), else WIN_EV_NONE. One message per call: `setu_client_poll_input` hands out one
+# frame at a time.
 fn win_poll_events(win): i64 {
     if (setuwin_client == 0) { return WIN_EV_NONE; }
-    var m = setu_msg_new();
-    if (setu_client_poll_input(setuwin_client, m) != 1) { return WIN_EV_NONE; }
+    if (setuwin_gone == 1) { return WIN_EV_CLOSE; }
+    if (setuwin_msg == 0) {
+        setuwin_msg = setu_msg_new();
+        if (setuwin_msg == 0) { return WIN_EV_NONE; }   # no message to decode into; poll nothing
+    }
+    var m = setuwin_msg;
+    var pr = setu_client_poll_input(setuwin_client, m);
+    # ⛔ THE COMPOSITOR IS GONE (setu 0.8.11: -6 on EOF or a recv error, once nothing is buffered, on
+    # both targets). Until 0.8.11 the Linux arm read that as idle, and this function answered
+    # WIN_EV_NONE for every result but 1 anyway, so a compositor that died without sending
+    # SETU_CLOSE left puka polling a dead socket forever. The wayland backend already maps a dead
+    # connection to WIN_EV_CLOSE (src/platform/window.cyr, `wl_pump() < 0`); this is the same
+    # contract. -6 is setu's only negative return, and every error it reports is final.
+    if (pr < 0) {
+        setuwin_gone = 1;
+        syscall(1, 1, "setuwin: compositor connection lost\n", 36);
+        return WIN_EV_CLOSE;
+    }
+    if (pr != 1) { return WIN_EV_NONE; }
     # ⛔⛔ THE COMPOSITOR CLOSED OUR WINDOW. Report it as `WIN_EV_CLOSE` — the platform layer already
     # has that event because the wayland backend raises it (src/platform/window.cyr:18, :101), so the
     # engine above needs no new vocabulary, only this wire.

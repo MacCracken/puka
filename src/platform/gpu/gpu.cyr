@@ -32,33 +32,48 @@ enum PgpuAbi {
 # (fullscreen-triangle VS + solid-red FS — the verified bring-up shaders).
 # Returns 1 on success, 0 if there is no usable AMD GPU (caller → CPU fallback).
 fn pgpu_init(): i64 {
-    var res = gpu_context_new_native();
-    if (is_err_result(res) == 1) { return 0; }
-    pgpu_ctx = payload(res);
+    # ⚠ mabda's F64_* colour constants are 0 until `color_init` runs, and `pgpu_render` clears with
+    # them, so a caller that forgot it got a silently black clear. Idempotent; the seam owns it now.
+    color_init();
+    # ⛔ cyrius 6.6 VALUE-FORM Result: the tag and the payload come back as a PAIR, so bind both.
+    # This read `var res = …; is_err_result(res); payload(res)` — `payload` was deleted in 6.6.0 and
+    # a one-variable bind of a pair-returning call is a compile error, so the seam stopped compiling
+    # at the 6.6 pin and nothing noticed (no entry point includes it).
+    var tag, ctx = gpu_context_new_native();
+    if (is_err_result(tag) == 1) { return 0; }
+    pgpu_ctx = ctx;
     var fd = native_ctx_fd(pgpu_ctx);
 
+    # ⛔ EVERY FAILURE BELOW UNWINDS. These returned a bare 0 with `pgpu_ctx` already set, so a
+    # failed init leaked the context AND left `pgpu_ready()` answering 1 for a GPU with no
+    # pipeline. `pgpu_release` tears down whatever was built and zeroes `pgpu_ctx`.
     var vbo[16];
-    if (native_bo_create_gtt(fd, PGPU_SHADER_BYTES, &vbo) != 0) { return 0; }
+    if (native_bo_create_gtt(fd, PGPU_SHADER_BYTES, &vbo) != 0) { return pgpu__fail(); }
     pgpu_vs_h = load64(&vbo); pgpu_vs_addr = load64(&vbo + 8);
     memset(pgpu_vs_addr, 0, PGPU_SHADER_BYTES);
     native_gfx9_shader_fullscreen_triangle_vs(pgpu_vs_addr, 0);
     pgpu_vs_va = PGPU_VS_VA;
-    if (native_gem_va_map(fd, pgpu_vs_h, pgpu_vs_va, PGPU_SHADER_BYTES, _NATIVE_PERM_SHADER) != 0) { return 0; }
+    var vrc = native_gem_va_map(fd, pgpu_vs_h, pgpu_vs_va, PGPU_SHADER_BYTES, _NATIVE_PERM_SHADER);
+    if (vrc != 0) { return pgpu__fail(); }
 
     var fbo[16];
-    if (native_bo_create_gtt(fd, PGPU_SHADER_BYTES, &fbo) != 0) { return 0; }
+    if (native_bo_create_gtt(fd, PGPU_SHADER_BYTES, &fbo) != 0) { return pgpu__fail(); }
     pgpu_fs_h = load64(&fbo); pgpu_fs_addr = load64(&fbo + 8);
     memset(pgpu_fs_addr, 0, PGPU_SHADER_BYTES);
     native_gfx9_shader_solid_red(pgpu_fs_addr, 0);
     pgpu_fs_va = PGPU_FS_VA;
-    if (native_gem_va_map(fd, pgpu_fs_h, pgpu_fs_va, PGPU_SHADER_BYTES, _NATIVE_PERM_SHADER) != 0) { return 0; }
+    var frc = native_gem_va_map(fd, pgpu_fs_h, pgpu_fs_va, PGPU_SHADER_BYTES, _NATIVE_PERM_SHADER);
+    if (frc != 0) { return pgpu__fail(); }
 
     var vmod[16]; native_buf_pair_write(&vmod, pgpu_vs_h, pgpu_vs_va);
     var fmod[16]; native_buf_pair_write(&fmod, pgpu_fs_h, pgpu_fs_va);
     pgpu_pipe = gpu_render_pipeline_create(pgpu_ctx, &vmod, &fmod, 0);
-    if (pgpu_pipe == 0) { return 0; }
+    if (pgpu_pipe == 0) { return pgpu__fail(); }
     return 1;
 }
+
+# Unwind a partial `pgpu_init` and report failure (0).
+fn pgpu__fail(): i64 { pgpu_release(); return 0; }
 
 fn pgpu_ready(): i64 { if (pgpu_ctx != 0) { return 1; } return 0; }
 

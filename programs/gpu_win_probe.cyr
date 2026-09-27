@@ -18,6 +18,9 @@ include "src/platform/wayland/wire.cyr"
 include "src/platform/wayland/client.cyr"
 include "src/platform/wayland/shm.cyr"
 include "src/platform/window.cyr"
+# mabda needs sakshi and mmap, which puka does not declare; see programs/gpu_probe.cyr.
+include "lib/sakshi.cyr"
+include "lib/mmap.cyr"
 include "lib/mabda.cyr"
 include "src/platform/gpu/gpu.cyr"
 

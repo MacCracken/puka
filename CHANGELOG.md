@@ -4,6 +4,135 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.25] - 2026-09-27 — puka exits when its compositor dies, the GPU seam compiles again, three unused stdlib leaves go
+
+The three follow-ups 0.6.24 recorded and left alone, plus a per-frame leak that was sitting in the
+function the first of them touched. Each change was made and verified separately.
+
+### Fixed — puka exits when the setu compositor goes away, not only when it says goodbye
+
+setu 0.8.11 made `setu_client_poll_input` return -6 on Linux once the compositor's end is gone (EOF
+or a recv error, with nothing buffered). On agnos, `PEERGONE` already mapped to -6. `win_poll_events`
+(`src/platform/setu/window_setu.cyr`) answered `WIN_EV_NONE` for every result but 1. So a compositor
+that crashed, or closed without sending `SETU_CLOSE`, left puka polling a dead socket forever, holding
+its PTY child. On agnos it would also have kept its shm slot.
+
+- **-6 now maps to `WIN_EV_CLOSE`**, the event `src/main.cyr` already turns into `pty_close` +
+  `win_close` + exit. The backend prints `setuwin: compositor connection lost` once, so the log tells
+  a crash from a `SETU_CLOSE`.
+- **The wayland backend already did this.** `wl_pump() < 0` has always meant `WIN_EV_CLOSE`
+  (`src/platform/window.cyr`); this is the same contract on the other backend.
+- **The gone state is sticky.** setu documents -6 as final ("stop on it"), so later polls answer
+  `WIN_EV_CLOSE` without touching the dead fd. `win_open` clears it.
+- **No error on agnos is transient here.** Every `CH_E_*` code except `WOULDBLOCK` (already mapped
+  to idle) means the peer or the fd is gone. A record is at most 64 B against a 512 B reassembly
+  buffer, so a nearly full buffer cannot produce a length error.
+
+### Fixed — `win_poll_events` leaked 80 B every frame
+
+It called `setu_msg_new()`, which is an `alloc`, once per poll, and `src/main.cyr` polls once per frame.
+`alloc` has no free, so the leak lasted as long as the terminal ran. The 0.6.22 audit fixed this
+class of leak on the key path (`src/main.cyr`) and in `pty_pump`, but missed it here.
+
+- **Measured:** 8,000 B over 100 idle polls.
+- **The fix:** the message is now allocated once, lazily, and reused. That is setu's intended shape:
+  `setu_decode` commits only a fully validated frame and zeroes the unused arg slots "so a reused
+  msg_out has no stale tail".
+
+### Fixed — the GPU seam compiles on cyrius 6.6 again
+
+`src/platform/gpu/gpu.cyr` read `gpu_context_new_native()`'s `Result` through `payload()`, which
+cyrius 6.6.0 deleted. It also bound the pair-returning call to a single variable, which 6.6 refuses.
+It fails to compile at both 0.6.23 and 0.6.24 (checked); 0.6.23 was the first release on a 6.6
+pin. `programs/gpu_probe.cyr` and `programs/gpu_win_probe.cyr` fail with it. Nothing noticed, because
+no entry point includes the seam.
+
+- **Ported to the value form:** `var tag, ctx = gpu_context_new_native();`, with the error tested on
+  the tag. Every other mabda call the seam makes (20 functions) keeps its signature in mabda 4.1.4.
+- **A failed `pgpu_init` now unwinds.** Its failure paths returned a bare 0 with `pgpu_ctx` already
+  set. That leaked the context and left `pgpu_ready()` answering 1 for a GPU with no pipeline. They
+  now go through `pgpu_release()`, which zeroes `pgpu_ctx`.
+- **`pgpu_init` calls `color_init()`.** mabda's `F64_*` constants are 0 until it runs, and
+  `pgpu_render` clears with them, so a caller that forgot it got a black clear with no error. Both
+  probes did call it; the seam no longer depends on that. It is idempotent.
+- ⚠ **The probes compile against the toolchain's mabda.** puka does not declare mabda, so
+  `include "lib/mabda.cyr"` finds no project copy and falls back to the pinned toolchain's stdlib
+  snapshot: mabda 4.1.4 at cyrius 6.6.6. The version they build against moves with the cyrius pin.
+  `gpu_probe`'s header and banner said 3.2.11 and now say this.
+- ⚠ **Build-verified only.** Both probes build with no undefined functions. Neither was run: they
+  submit work to the GPU that also drives the desktop.
+
+### Removed — `mmap`, `dynlib` and `sakshi` from `[deps] stdlib`
+
+They were declared for mabda's bundle. mabda has not been a dependency since 0.6.8, and nothing in
+`src/`, `programs/` or `tests/` referenced any of them.
+
+- **`lib/`:** the three vendored files are removed. A clean `cyrius deps` no longer produces them, and
+  `lib/` plus `cyrius.lock` match a clean resolve byte for byte: 38 files, all six git deps
+  commit-pinned.
+- **Embedders:** `dist/puka.deps`, the list of stdlib leaves consumers of `dist/puka.cyr` must declare,
+  goes from 19 to 16. `tests/engine_bundle.tcyr`, which consumes the bundle, passes.
+- **The GPU probes** need two of the three: mabda calls `sakshi_*` for logging and `cyr_mmap` /
+  `cyr_munmap`. They now include `lib/sakshi.cyr` and `lib/mmap.cyr` themselves, resolved the way
+  mabda is. So the requirement lives with the code that has it, not in every build's manifest.
+  `dynlib` is not needed at all.
+- **`sakshi` is still the planned logging crate** (CLAUDE.md, *Own the stack*). It comes back when
+  puka logs through it.
+
+| build (bytes) | 0.6.24 | 0.6.25 | Δ |
+|---|---|---|---|
+| Linux, `CYRIUS_DCE=1` (CI / release) | 1,577,544 | 1,501,408 | −76,136 (−4.8%) |
+| Linux, plain | 2,073,160 | 1,964,256 | −108,904 (−5.3%) |
+| `--agnos` | 2,055,200 | 1,946,392 | −108,808 (−5.3%) |
+| `--agnos` tests | 861,320 | 752,456 | −108,864 (−12.6%) |
+| `--aarch64` | 2,490,736 | 2,353,248 | −137,488 (−5.5%) |
+
+DCE does not remove all of an undeclared module's weight; it recovers 76 KB even on the DCE build.
+⚠ The `--agnos` binary is still 14.7% larger than at 0.6.23 (1,696,376 B). The draw stack dhancha
+pulls in is most of that.
+
+### Added — `tests/window_setu.tcyr`
+
+The setu window backend had no tests. This file adds 12 assertions, driving `win_poll_events` over a
+real `SOCK_SEQPACKET` connection in one process (`setu_listen` + `setu_client_connect` +
+`setu_accept`, the shape setu's own transport test uses). It checks:
+
+- a silent compositor is no event;
+- 100 idle polls allocate nothing;
+- `SETU_CLOSE` gives `WIN_EV_CLOSE`;
+- a `CONFIGURE` sent before the peer closes is delivered first, then `WIN_EV_CLOSE`, which persists.
+
+It is Linux-only and skip-clean, like `pty.tcyr`.
+
+- **Negative control:** against the unfixed backend it fails 3 assertions: the 8,000 B leak, and the
+  two polls that should close.
+- **Mutation:** treating idle (0) as gone fails 2 assertions, including the idle check.
+
+### Verification
+
+- **Tests:** `cyrius test` 601 passed, 0 failed across 16 files (589 + 12, no SKIP).
+- **Fuzz:** `cyrius fuzz` 1,297 green, also under `--poison`.
+- **Builds:** Linux with and without DCE, `--agnos` entry and tests, `--aarch64`, and every program in
+  `programs/`, including both GPU probes (which fail at 0.6.23 and 0.6.24). No undefined functions.
+- **Static checks:** `cyrius lint` 0 warnings across `src/`, `tests/` and `programs/`. `fmt --check`
+  is clean, `dist/` included.
+- **Dependency checks:** `vet` reports 14 deps, 0 untrusted, 0 missing. `distlib --check` reports
+  current, and `deps --verify` 38/0.
+- **Bench:** alternating runs of 0.6.24 and 0.6.25 under the same load match on four of five
+  benchmarks. `vt_feed` CSI SGR is consistently about 3 ns slower (127 vs 123–124 ns). That code is
+  unchanged, so this is most likely code placement shifting with the removed modules.
+- ⚠ **`cyrius audit` still exits 1 on its docs step, and its count is inflated.** It reports 427
+  undocumented public functions; per file, `cyrdoc --check` finds **194** (0.6.24: 195 — this release
+  documented `win_poll_events` and added none). The audit hands one directory list to its fmt, lint
+  and docs walks in turn, and each walk appends every subdirectory it finds to that same list. By the
+  docs walk, a file two levels down is counted 3 times and three levels down 6 times. That model
+  reproduces both reported figures exactly (195 → 433, 194 → 427). ⇒ The "433" quoted for 0.6.24 was
+  this inflated figure, and the true count then was 195. This is a cyrius bug (`cbt/commands.cyr` +
+  `lib/audit_walk.cyr`); the lint walk re-visits subdirectories too, which is invisible only while
+  lint is clean.
+- ⚠ **Not run:** the GPU probes, and anything on agnos or under a live compositor. The setu backend
+  was exercised through a real socket, not a real compositor.
+
 ## [0.6.24] - 2026-09-27 — toolchain 6.6.6, current dependencies, and a manifest that is only configuration
 
 No change under `src/`. The toolchain and all three direct dependencies move to their latest

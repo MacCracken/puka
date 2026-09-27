@@ -2,8 +2,11 @@
 # AMD GFX9 render path end-to-end (GPU render → CPU readback) on this box.
 #
 # A faithful mirror of mabda's own `programs/native_render_e2e.cyr` (the
-# HW-verified template), but built from PUKA's tree against the resolved
-# `lib/mabda.cyr` (3.2.11) amalgam. It clears an offscreen 256x256 RGBA8 render
+# HW-verified template), but built from PUKA's tree. mabda is NOT a declared
+# dependency (docs/architecture/001-dependencies.md): `include "lib/mabda.cyr"`
+# finds no project copy and falls back to the pinned toolchain's own stdlib
+# snapshot, so the mabda this compiles against moves with the cyrius pin (4.1.4
+# at cyrius 6.6.6; the bite-7 run was 3.2.11). It clears an offscreen 256x256 RGBA8 render
 # target to red via the fullscreen-triangle VS + solid-red FS, then reads
 # pixel(0,0) back through the GTT mapping and checks it is (FF,00,00,FF).
 #
@@ -16,6 +19,11 @@
 # Run  :  ./build/gpu_probe        (dispatches PM4 on the AMD render node)
 # Exit :  0 = pixel(0,0) red verified; 1..11 = stage failures (see below)
 
+# mabda's bundle calls into sakshi (its logging) and mmap (`cyr_mmap` / `cyr_munmap`). puka no longer
+# declares either — nothing in puka's own code uses them — so the programs that include mabda bring
+# them in, and resolve them the way they resolve mabda: from the pinned toolchain's stdlib.
+include "lib/sakshi.cyr"
+include "lib/mmap.cyr"
 include "lib/mabda.cyr"
 
 fn gp__emit(s): i64 { syscall(1, 1, s, strlen(s)); return 0; }
@@ -43,13 +51,13 @@ fn gp__mono_ns(): i64 {
 fn main(): i64 {
     alloc_init();
     color_init();
-    gp__emit("puka gpu_probe — mabda native AMD render path (3.2.11)\n");
-    gp__emit("------------------------------------------------------\n");
+    gp__emit("puka gpu_probe — mabda native AMD render path\n");
+    gp__emit("---------------------------------------------\n");
 
     # ---- 1. native GPU context (opens /dev/dri/renderD*, allocs ctx/IB/fence) ----
-    var ctx_res = gpu_context_new_native();
-    if (is_err_result(ctx_res) == 1) { gp__emit("FAIL: gpu_context_new_native (no AMD render node?)\n"); return 1; }
-    var ctx = payload(ctx_res);
+    # cyrius 6.6 value-form Result: bind the tag AND the payload (`payload()` was deleted in 6.6.0).
+    var ctx_tag, ctx = gpu_context_new_native();
+    if (is_err_result(ctx_tag) == 1) { gp__emit("FAIL: gpu_context_new_native (no AMD render node?)\n"); return 1; }
     var fd = native_ctx_fd(ctx);
     gp__emit("PASS: native ctx (fd="); gp__emit_i64(fd); gp__emit(")\n");
 

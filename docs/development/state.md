@@ -5,11 +5,19 @@
 
 ## Version
 
-**0.6.24** (2026-09-27) — see [`../../CHANGELOG.md`](../../CHANGELOG.md). Release narrative belongs
+**0.6.25** (2026-09-27) — see [`../../CHANGELOG.md`](../../CHANGELOG.md). Release narrative belongs
 there, not here.
 
-0.6.24 is a toolchain and dependency release with no change under `src/`: cyrius 6.6.6, kashi
-1.0.10, setu 0.8.11, dhancha 0.10.4. `cyrius.cyml` is now configuration only. Its reasoning moved to
+0.6.25 made three changes and fixed one leak.
+
+- **Compositor loss:** puka exits when the setu compositor goes away (setu's -6 maps to
+  `WIN_EV_CLOSE`).
+- **Poll leak:** `win_poll_events` no longer leaks 80 B per frame.
+- **GPU seam:** it compiles on cyrius 6.6 again.
+- **stdlib:** `mmap`, `dynlib` and `sakshi` are no longer declared.
+
+0.6.24 before it was the cyrius 6.6.6 and dependency release. It also cut `cyrius.cyml` to
+configuration; the reasoning is in
 [`../architecture/001-dependencies.md`](../architecture/001-dependencies.md) and
 [ADR 0004](../adr/0004-kashi-freestanding-core-over-library-face.md).
 
@@ -67,10 +75,10 @@ transport. What is retracted is the pre-`net_src_for` rigged-smoke lineage, not 
   agnos syscall peer still has no `SYS_IOCTL` (re-checked at 6.6.6; mabda 4.1.4's bundle names it 49
   times). Reasoning and restore conditions:
   [`../architecture/001-dependencies.md`](../architecture/001-dependencies.md).
-- ⚠ **`src/platform/gpu/gpu.cyr` does not compile on cyrius 6.6.** It binds a two-value `Result` to
-  one variable and reads it through `payload()`, which 6.6.0 deleted. So `programs/gpu_probe.cyr` and
-  `programs/gpu_win_probe.cyr` fail too. Nothing that is built includes the seam (same failure at
-  0.6.23 on 6.6.2); port it before mabda comes back.
+- **`src/platform/gpu/gpu.cyr` is ported to cyrius 6.6's value-form `Result`** (0.6.25). It and both
+  GPU probes build again; they failed at 0.6.23 and 0.6.24. ⚠ Build-verified only: neither probe has
+  been run on the GPU since the port. They compile against the mabda 4.1.4 the 6.6.6 toolchain
+  ships, not the 3.2.11 bite 7 was verified with.
 - ⚠ **Kernel floor `agnos >= 1.56.46`** (0.6.20). Below it the terminal opens and every *builtin*
   renders while **every program the shell launches is silent** — a kernel `chan_auth` defect, not a
   puka bug, and indistinguishable from one.
@@ -106,10 +114,10 @@ marked at every write chokepoint and consumed by the renderer
 
 ## Tests
 
-**589 assertions, all green** (`cyrius test`), across 15 `.tcyr` files. Re-counted 2026-09-27, and
-identical on 0.6.23 and 0.6.24. This block previously claimed 604 across 17. The 604 summed the
-runner's closing `15 passed, 0 failed` line, which counts files, into the assertions; before that
-it claimed 477.
+**601 assertions, all green** (`cyrius test`), across 16 `.tcyr` files (0.6.25: 589 + the 12 in
+`window_setu.tcyr`). Re-counted 2026-09-27. At 0.6.24 this block corrected an earlier claim of 604
+across 17: the 604 summed the runner's closing `N passed, 0 failed` line, which counts files, into
+the assertions.
 
 - Engine core: `parser.tcyr` (70), `grid.tcyr` (102 — resize, per-row damage, multi-word bitset rows
   ≥ 64, scrollback ring/viewport, **and the 0.6.22 row/viewport bounds guards**), `unicode.tcyr` (43
@@ -122,6 +130,10 @@ it claimed 477.
 - I/O edge: `input.tcyr` (67 — byte-exact, `vt_feed` round-trips, paste), `evdev.tcyr` (49),
   `line_discipline.tcyr` (49), `pty.tcyr` (2) + `input_pty.tcyr` (2, real PTY echo — both
   skip-clean), `puka.tcyr` (2 smoke).
+- Window edge: `window_setu.tcyr` (12, 0.6.25). It drives the setu backend's `win_poll_events` over
+  a real AF_UNIX `SOCK_SEQPACKET` pair: idle is no event, polling allocates nothing, `SETU_CLOSE` and
+  a dropped connection are both `WIN_EV_CLOSE`. Linux-only, skip-clean. The first test of either
+  window backend.
 - **`tests/puka.fcyr` — the fuzz harness, real since 0.6.22.** Drives `term_feed` (the whole
   untrusted path) with ~820,000 adversarial bytes: 16 targeted sequences plus 400 rounds of
   fixed-seed pseudo-random and escape-biased noise, asserting grid invariants after each.
@@ -159,25 +171,22 @@ Why each is declared the way it is, and why mabda is not:
 
 - Every tag above is the latest published tag as of 2026-09-27, except rupa, which follows dhancha.
 - stdlib: string, fmt, alloc, io, vec, str, syscalls, assert, bench, args, hashmap, tagged, fnptr,
-  mmap, dynlib, sakshi, result, net, chrono. ⚠ **`mmap`, `dynlib` and `sakshi` are unreferenced.**
-  Nothing in `src/`, `programs/` or `tests/` names a symbol from them (checked 2026-09-27); they were
-  added for mabda's bundle. They still land in `dist/puka.deps`, so pruning them is a change to what
-  bundle consumers declare and needs its own release.
+  result, net, chrono. `mmap`, `dynlib` and `sakshi` were removed at 0.6.25. They had been declared
+  for mabda's bundle and nothing in puka referenced them. `dist/puka.deps` now lists 16 leaves (was
+  19). The two GPU probes include `lib/sakshi.cyr` and `lib/mmap.cyr` themselves, because mabda needs
+  them.
 - ⚠ **The `path` lines are commented out**, so `cyrius deps` resolves the tags. Uncomment one only to
   build against an unpushed sibling. At 0.6.23 live `path` lines had vendored dhancha 0.9.29 / setu
   0.8.9 / kashi 1.0.10 while the manifest named 0.9.26 / 0.8.8 / 1.0.6 and CI built the tags.
-- ⚠ **setu 0.8.11's `setu_client_poll_input` returns -6 on Linux when the compositor is gone, and puka
-  does not consume it.** `win_poll_events` treats every result but 1 as no event, so a compositor that
-  dies without sending `SETU_CLOSE` leaves puka running. Wiring -6 to `WIN_EV_CLOSE` is a feature, not
-  a dep bump. (`SETU_INPUT_PTR_SCROLL`, listed here as unconsumed until 0.6.22, drives the scrollback
-  since 0.6.22.)
-- The draw stack dhancha pulls in grew with this refresh (`lib/sadish.cyr` 75 KB → 472 KB,
-  `lib/rekha.cyr` 39 KB → 551 KB). DCE removes most of it (+6% on the Linux release binary), but the
-  `--agnos` build is not DCE'd and grew 21%.
+- **setu 0.8.11's -6 from `setu_client_poll_input` (the compositor gone) is consumed since 0.6.25.**
+  `win_poll_events` maps it to `WIN_EV_CLOSE`, so puka exits instead of polling a dead socket.
+- The draw stack dhancha pulls in grew at 0.6.24 (`lib/sadish.cyr` 75 KB → 472 KB, `lib/rekha.cyr`
+  39 KB → 551 KB). DCE removes most of it. The `--agnos` build is not DCE'd: 1,946,392 B at 0.6.25,
+  +14.7% over 0.6.23 even after the stdlib prune took back 109 KB.
 
 Planned (own-the-stack, not yet wired): `rekha`+`sadish` **directly** (vector glyphs, post-v1.0 — they
-are on disk today only as dhancha's transitives), `sakshi` (logging). kashi's PSF/BDF/PCF library
-face is available but not pulled in (ADR 0004).
+are on disk today only as dhancha's transitives), `sakshi` (logging — declared again when puka logs
+through it). kashi's PSF/BDF/PCF library face is available but not pulled in (ADR 0004).
 
 ## Dep gaps / blockers
 

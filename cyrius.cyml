@@ -26,7 +26,7 @@ modules = [
 # Why each dependency is declared the way it is, and why mabda is not: docs/architecture/001-dependencies.md
 # `path` lines stay commented in a commit; uncomment one only to build against an unpushed sibling.
 [deps]
-stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "args", "hashmap", "tagged", "fnptr", "mmap", "dynlib", "sakshi", "result", "net", "chrono"]
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "args", "hashmap", "tagged", "fnptr", "result", "net", "chrono"]
 
 [deps.kashi]
 git = "https://github.com/MacCracken/kashi.git"

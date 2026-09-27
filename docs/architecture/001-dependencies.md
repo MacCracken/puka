@@ -23,14 +23,26 @@ puka compiles. The stdlib's `sys_ioctl` wrapper (cyrius 6.5.36) covers the ELF a
 only and does not change this.
 
 Nothing that is built needs it: the one consumer, `src/platform/gpu/gpu.cyr` (the `pgpu_*` seam), is
-not included by any entry point. The two GPU probes include `lib/mabda.cyr` themselves rather than
-declaring the dependency.
+not included by any entry point. The two GPU probes (`programs/gpu_probe.cyr`,
+`programs/gpu_win_probe.cyr`) include `lib/mabda.cyr` themselves, along with `lib/sakshi.cyr` and
+`lib/mmap.cyr`, which mabda calls and puka does not declare. See the next section for where those
+includes resolve.
 
 Declare it again when an entry point includes the GPU seam: on a current tag, consuming only
 mabda's `@public` `gpu_*` API, and only once `--agnos` stays green with it declared (an agnos
-`SYS_IOCTL`, or a way to keep the bundle out of the agnos build). The seam also has to be ported to
-cyrius 6.6's value-form `Result` first; `gpu.cyr` still reads one through `payload()`, which cyrius
-6.6.0 deleted, so it does not compile today.
+`SYS_IOCTL`, or a way to keep the bundle out of the agnos build). mabda's `dist/mabda.deps` then
+decides which stdlib leaves come back into `[deps] stdlib`; at 4.1.4 it lists `mmap`, `dynlib`,
+`sakshi`, `thread`, `thread_local` and `sankoch` beyond puka's own set.
+
+## An undeclared `lib/` include resolves from the toolchain
+
+When `include "lib/X.cyr"` finds no `lib/X.cyr` in the project, cycc opens
+`~/.cyrius/versions/<its own version>/lib/X.cyr` instead (the fallback in cyrius
+`src/frontend/lex.cyr`). A program can therefore reach a stdlib module, or a bundle the toolchain
+ships, that the manifest never declares. It gets it at the toolchain's version, not at a tag puka
+chose, and without a `cyrius.lock` hash. The GPU probes rely on this for mabda (4.1.4 at cyrius
+6.6.6), sakshi and mmap. It is acceptable for developer probes that CI does not build; anything an
+entry point includes should be declared instead.
 
 ## Toolchain floor: cyrius 6.5.8
 
