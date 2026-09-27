@@ -29,7 +29,7 @@ The single source of truth for live status is
 puka is a Wayland client — run it inside a Wayland session (Hyprland/wlroots):
 
 ```sh
-cyrius deps                                          # resolve deps (kashi, mabda)
+cyrius deps                                          # resolve deps (kashi, setu, dhancha)
 cyrius build programs/puka_term.cyr build/puka_term  # the daily-driver terminal
 WAYLAND_DISPLAY=wayland-1 ./build/puka_term          # opens a window hosting $SHELL
 ```
@@ -74,18 +74,21 @@ direction).
 ## Dependencies
 
 Three git deps, all first-party + sovereign:
-[`kashi`](https://github.com/MacCracken/kashi) (1.0.6 — bitmap console glyphs),
-[`setu`](https://github.com/MacCracken/setu) (0.8.8 — the AGNOS display protocol +
-its reference client) and [`dhancha`](https://github.com/MacCracken/dhancha)
-(0.9.26 — the widget toolkit; `sadish` / `rupa` / `rekha` arrive through it).
-Cyrius stdlib otherwise.
+[`kashi`](https://github.com/MacCracken/kashi) (bitmap console glyphs),
+[`setu`](https://github.com/MacCracken/setu) (the AGNOS display protocol + its
+reference client) and [`dhancha`](https://github.com/MacCracken/dhancha) (the widget
+toolkit; `sadish` / `rupa` / `rekha` arrive through it). Cyrius stdlib otherwise.
+Current pins are in [`state.md`](docs/development/state.md); why each is declared
+the way it is, in
+[`docs/architecture/001-dependencies.md`](docs/architecture/001-dependencies.md).
 
 > **⚠ `mabda` is NOT a declared dependency** — it was removed, not merely held
 > back, and this section listed it for fourteen releases. `dist/mabda.cyr` calls
 > `SYS_IOCTL`, which the agnos syscall peer does not have, so declaring it fails
 > the `--agnos` build outright. The `pgpu_*` GPU seam it backs
 > (`src/platform/gpu/gpu.cyr`) is real code that no entry point includes yet.
-> See `cyrius.cyml` for the full reasoning and `state.md` for dep-gap status.
+> See [`docs/architecture/001-dependencies.md`](docs/architecture/001-dependencies.md)
+> for the full reasoning and `state.md` for dep-gap status.
 
 > **⚠ Do not write to `/dev/fb0`** — on a dev box that is the live Hyprland
 > desktop framebuffer. puka is a *compositor client* (it draws into a `wl_shm`

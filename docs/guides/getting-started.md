@@ -8,7 +8,7 @@ shell. This guide gets you building, running, and contributing. Live status live
 ## Build + run
 
 ```sh
-cyrius deps                                          # resolve deps (kashi, mabda)
+cyrius deps                                          # resolve deps (kashi, setu, dhancha)
 cyrius build programs/puka_term.cyr build/puka_term  # the daily-driver terminal
 WAYLAND_DISPLAY=wayland-1 ./build/puka_term          # opens a window hosting $SHELL
 ```

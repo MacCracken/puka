@@ -4,20 +4,14 @@ version = "${file:VERSION}"
 description = "puka — sovereign Cyrius-native terminal emulator (Ghostty-class: VT/escape parser, cell grid, scrollback, font raster). Hawaiian: opening/doorway into the machine. Foundation for a future worktree coding-agent command center."
 license = "GPL-3.0-only"
 language = "cyrius"
-# ⛔ 6.5.8 IS A FLOOR, NOT A PREFERENCE. The agnos PTY backend (src/pty.cyr) needs the `#97` channel
-# band wrappers — `sys_chan_mint` / `sys_chan_send` / `sys_chan_recv` / `sys_chan_close` and the
-# `CH_E_*` result codes — which landed in cyrius 6.5.8. On the old 6.5.5 pin the agnos arm failed with
-# `undefined variable 'CH_E_PEERGONE'`, which reads like a puka bug and is a toolchain floor.
-cyrius = "6.6.2"
+cyrius = "6.6.6"
 
 [build]
 entry = "src/main.cyr"
 test = "src/test.cyr"
 output = "puka"
 
-# `cyrius distlib` -> dist/puka.cyr: the terminal ENGINE, for programs that embed a terminal rather
-# than run one. Excludes the app half (main, pty, platform, input, line_discipline) on purpose.
-# Order is main.cyr's include order. Consumers must also declare [deps.kashi] — fb.cyr blits its glyphs.
+# `cyrius distlib` -> dist/puka.cyr, the embeddable terminal engine. Order is src/main.cyr's include order.
 [lib]
 modules = [
     "src/parser.cyr",
@@ -29,90 +23,26 @@ modules = [
     "src/render/fb.cyr",
 ]
 
+# Why each dependency is declared the way it is, and why mabda is not: docs/architecture/001-dependencies.md
+# `path` lines stay commented in a commit; uncomment one only to build against an unpushed sibling.
 [deps]
-# Base set + the extras mabda's amalgam needs (args/hashmap/tagged/fnptr/mmap/
-# dynlib/sakshi) so `dist/mabda.cyr` resolves its stdlib globals (MAP_SHARED,
-# O_RDWR, the Result/fnptr types, the GTT mmap helpers, sakshi logging).
 stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "args", "hashmap", "tagged", "fnptr", "mmap", "dynlib", "sakshi", "result", "net", "chrono"]
 
-# kashi — AGNOS console-font subsystem. M3 sources bitmap glyphs from its
-# FREESTANDING font-data core only (zero stdlib: store8/load8 + arithmetic).
-# Pinned git dep on the v1.0.2 tag (kashi's 1.x API is frozen; 1.0.2 tracks the
-# 6.2.22 language), so `cyrius deps` resolves it identically on a devbox and in CI
-# — no sibling checkout required. The full library face (PSF/BDF/PCF loaders) is
-# deliberately NOT pulled in; the built-in CP437 fonts (VGA 8x16 / CGA 8x8 /
-# VGA 9x16) cover the renderer's needs.
 [deps.kashi]
-git     = "https://github.com/MacCracken/kashi.git"
-# ⚠ `path` — kashi is VENDORED (lib/kashi_font_data.cyr); every other dep in this stack carries both.
-path    = "../kashi"
-tag     = "1.0.6"
-# ⛔⛔ THE FREESTANDING CORE IS A MEASURED CHOICE, NOT A SHORTCUT (recorded 2026-08-17, kashi 1.0.6).
-# kashi's ADR 0001 says stdlib-linked consumers should take the LIBRARY FACE, and this project links
-# the full stdlib — so `src/font_data.cyr` looks like the wrong surface. Two reasons it is not:
-#   1. Until kashi 1.0.6 the library face was UNCONSUMABLE. `src/lib.cyr` opens with
-#      `include "src/font_data.cyr"`, a kashi-root-relative path that cannot resolve once vendored
-#      into this repo's `lib/` — `error: cannot open include file: src/font_data.cyr`. kashi 1.0.6
-#      adds `dist/kashi.cyr`, which fixes that, so the choice is now real.
-#   2. It is still the core. MEASURED on dhancha: core 364,640 B vs full face 548,000 B —
-#      **+183,360 (+50%)** for PSF/BDF/PCF import and a runtime font registry nothing here calls, and
-#      `CYRIUS_DCE=1` reclaims NONE of it. This project uses `kashi_font_init` + `kashi_glyph_row`.
-# ⇒ Switch to `modules = ["dist/kashi.cyr"]` only when this project needs runtime font LOADING.
+git = "https://github.com/MacCracken/kashi.git"
+# path = "../kashi"
+tag = "1.0.10"
+# The freestanding core, not the library face: docs/adr/0004-kashi-freestanding-core-over-library-face.md
 modules = ["src/font_data.cyr"]
 
-# ⛔ mabda IS NOT DECLARED HERE, DELIBERATELY — it BLOCKS the whole agnos target for zero benefit.
-# `dist/mabda.cyr` calls `syscall(SYS_IOCTL, …)` for its DRM path, and `SYS_IOCTL` does not exist in
-# agnos's syscall peer (agnos has no ioctl), so declaring mabda fails the `--agnos` build with
-# `undefined variable 'SYS_IOCTL'` — before a single line of puka is compiled. cyrius prepends EVERY
-# declared dep module whether or not the entry's include graph reaches it.
-#
-# ⚠ AND NOTHING IN THE BUILD GRAPH USED IT. `src/main.cyr` includes parser/grid/unicode/terminal only;
-# the sole consumer is `src/platform/gpu/gpu.cyr`, which no entry point includes yet. It was a
-# declared dependency on code that is not built, costing a target.
-#
-# ⭐ RESTORE IT — GUARDED, AND ON A CURRENT TAG — when the GPU platform is actually wired into an
-# entry point. The 3.2.11 pin was already two majors stale (mabda is 4.1.0 as of 2026-08-31), so restoring it blindly
-# would have been wrong anyway. Consume only the @public gpu_* API when it returns.
-
-# setu — the AGNOS native display-protocol + its reference CLIENT transport. The
-# sovereign replacement for the Wayland windowing backend: puka's win_* seam
-# (src/platform/setu/window_setu.cyr) fills the identical contract over setu's
-# persistent client (setu_client_*), so the terminal engine runs unchanged and
-# puka becomes the compositor's first resident app. Pinned to the 0.3.0 tag (the
-# CROSS-PLATFORM TCP transport — item 3b; puka ↔ aethersafha proven e2e over TCP
-# loopback:7700 on Linux). Consume the dist.
-# ⛔ RETIRED 2026-08-03 — TCP-on-loopback is the WRONG PRIMITIVE for local display IPC, and that,
-# not a failure, is why it is gone. Scope: "and the same wire now runs on agnos" was NOT YET TRUE
-# when written — before `net_src_for` (agnos 1.56.34) the handshake could not complete on an
-# ordinary boot, and the one passing test of that era ran under the `AETHERSAFHA_SETU_SELFTEST`
-# kernel hook (`net_ip = 0x7F000001`); hook and smoke are deleted. After `net_src_for` it DID
-# connect and present un-rigged (2026-08-02, `aethersafha-clients-test.py`, "connected: 2,
-# presented: 2", one client being `/bin/puka` — QEMU `-smp 1`, never on iron). Replacement is the
-# agnos socket (`anu`), agnos `docs/development/planning/ipc.md` §9/§10. The Linux e2e stands
-# independently; Linux is a different target.
 [deps.setu]
-git     = "https://github.com/MacCracken/setu.git"
-# ⚠ `path` added 2026-08-12 — setu 0.8.5 centralises the rendezvous ($SETU_SOCKET).
-path    = "../setu"
-tag     = "0.8.8"
+git = "https://github.com/MacCracken/setu.git"
+# path = "../setu"
+tag = "0.8.11"
 modules = ["dist/setu.cyr"]
 
-# ⭐⭐ dhancha — the client-side widget toolkit, added 2026-08-16 so puka stops being the last app that
-# reaches the compositor around the shared layer instead of through it.
-# ⛔ WHY IT WAS NOT HERE BEFORE, and it was not puka's fault: dhancha's dist bundle did not SHIP its
-# client layer until 0.9.4 (`src/dh_client.cyr` / `setu_client.cyr` / `setu_input.cyr` were missing from
-# `modules`), so `dh_client_connect` was undefined downstream and hand-rolling setu was the only option
-# any consumer had. Fixed in dhancha 0.9.4; this is the consumer half.
-# ⚠ SCOPE, STATED HONESTLY: puka routes CONNECT / FD / CLOSE through dhancha. `present` and `poll_input`
-# stay on setu directly, because dhancha's `dh_client_present` renders a WIDGET SURFACE and
-# `dh_client_next_event` returns a `DhEvent` — puka presents a raw XRGB terminal buffer and maps HID to
-# evdev itself. Those are different models and swapping them is a port, not a rename. The seam that
-# matters — where the transport is decided — is now shared.
-# ⛔ dhancha is the "spiritual extraction of puka's windowing code", so the eventual reunion is puka
-# adopting the widget tree. That is a project; this is the dependency it needs first.
 [deps.dhancha]
-git     = "https://github.com/MacCracken/dhancha.git"
-path    = "../dhancha"
-tag    = "0.9.26"
+git = "https://github.com/MacCracken/dhancha.git"
+# path = "../dhancha"
+tag = "0.10.4"
 modules = ["dist/dhancha.cyr"]
----

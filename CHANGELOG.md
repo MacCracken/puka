@@ -2,6 +2,144 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+## [0.6.24] - 2026-09-27 — toolchain 6.6.6, current dependencies, and a manifest that is only configuration
+
+No change under `src/`. The toolchain and all three direct dependencies move to their latest
+releases. `cyrius.cyml` is cut back to configuration, and the lock now pins every git dependency by
+commit.
+
+### Changed — toolchain `6.6.2` → `6.6.6`
+
+The 6.6.3–6.6.6 changelog was read for consumer-visible changes. The stdlib functions and constants
+puka uses were diffed between the two tags.
+
+- No stdlib name puka uses was removed or renamed, and none changed arity.
+- The `#97` channel wrappers and `CH_E_*` codes `src/pty.cyr` uses are unchanged. `SYS_IOCTL` is
+  still absent from the agnos syscall peer, so the reason mabda is not declared still holds.
+- None of the silent miscompiles fixed in the range involves a construct puka uses. 6.6.3 also
+  fixed `CYRIUS_DCE=1` binaries that could crash before `main`; the release build uses that flag.
+- `cyrius.lock` gains the `cyrius 6.6.6` trailer (a 6.6.4 lock feature). The stdlib is re-vendored
+  from the 6.6.6 snapshot, and `lib/alloc_cx.cyr` (new in 6.6.6) comes with it.
+- **`lib/hashmap_fast.cyr` removed.** It had sat in `lib/` since the scaffold. Nothing includes it,
+  and a clean `cyrius deps` does not vendor it; the lock listed it only because the file was there.
+
+### Changed — dependencies to their latest tags
+
+| dep | 0.6.23 manifest | 0.6.23 actually vendored | 0.6.24 |
+|---|---|---|---|
+| kashi | 1.0.6 | 1.0.10 | **1.0.10** |
+| setu | 0.8.8 | 0.8.9 | **0.8.11** |
+| dhancha | 0.9.26 | 0.9.29 | **0.10.4** |
+| sadish (via dhancha) | — | 0.5.4 | **0.11.2** |
+| rupa (via dhancha) | — | 0.1.7 | 0.1.7 (dhancha's pin; 0.1.8 exists) |
+| rekha (via dhancha) | — | 0.3.6 | **0.9.0** |
+
+⚠ **The middle column is a defect this release fixes.** At 0.6.23 the manifest named one set of tags
+and `lib/` held another. Live `path = "../sibling"` lines vendored whatever the sibling checkouts
+held, while CI, which has no siblings, built the tags. The dev box and CI were building different
+dependencies. The `path` lines are now commented out, so every dependency resolves from its tag.
+`cyrius.lock` pins all six git dependencies by commit (it pinned one). `lib/` and the lock are
+byte-identical to a clean `cyrius deps` run in a scratch copy with no siblings and an empty `lib/`.
+
+- **No call site changes.** The 16 `dh_*` functions puka calls keep their signatures (0.9.29 →
+  0.10.4), as do the 5 `setu_*` functions (0.8.9 → 0.8.11). The `SETU_*` constants puka reads are
+  unchanged.
+- **setu resolves at puka's 0.8.11**, not the 0.8.9 dhancha 0.10.4 declares. puka calls setu
+  directly and declares it itself.
+- **dhancha 0.10.4 draws text by UTF-8 character** instead of by byte. puka draws no dhancha text
+  (the grid is a canvas widget), so nothing changes on screen.
+- **setu 0.8.11 changes present failures.** `setu_client_present` no longer falls back to inline
+  pixels: a failed present returns -45 or -46 with nothing sent, and puka only propagates the code. A
+  resize now keeps the old buffer until the new one is attached.
+- ⚠ **setu 0.8.11 also makes `setu_client_poll_input` return -6 on Linux** when the compositor is
+  gone. `win_poll_events` treats every result but 1 as no event, so a compositor that dies without
+  sending `SETU_CLOSE` still leaves puka running, exactly as before. Mapping -6 to `WIN_EV_CLOSE` is
+  a separate change.
+
+### Changed — `cyrius.cyml` is configuration only
+
+118 lines down to 48. The manifest had accumulated dependency history, measured sizes and dated notes.
+The durable parts moved:
+
+- **Why each dependency is declared as it is** now lives in
+  [`docs/architecture/001-dependencies.md`](docs/architecture/001-dependencies.md) (new). It covers
+  why every declared dep is compiled into every target, why mabda is absent, the cyrius 6.5.8 floor,
+  what goes through dhancha and what calls setu directly, what `dist/puka.cyr` consumers must
+  declare, and why the `path` lines stay commented.
+- **Why kashi is consumed as its freestanding core** is now
+  [ADR 0004](docs/adr/0004-kashi-freestanding-core-over-library-face.md) (new). It keeps the measured
+  +50% cost of the library face.
+- **The history** was already in this changelog (0.6.4, 0.6.8, 0.6.13, 0.6.21).
+
+Two comment lines remain, pointing at those documents, plus the commented `path` lines.
+
+### Fixed — docs
+
+- The 0.6.23 entry and the `[Unreleased]` heading had been appended below 0.1.0. Both are back at the
+  top.
+- README and `getting-started.md` said `cyrius deps` resolves "(kashi, mabda)". mabda has not been a
+  dependency since 0.6.8.
+- README's dependency section named the 0.6.21 pins and sent readers to `cyrius.cyml` for the mabda
+  reasoning.
+- `state.md` claimed 604 tests across 17 files. The suite is **589 assertions across 15 files**,
+  identical before and after this release. The 604 was 589 plus the runner's closing
+  `15 passed, 0 failed` line, which counts files.
+
+### Verification
+
+For the baseline, 0.6.23 was rebuilt exactly. Its `lib/` was reproduced hash for hash, and its plain
+build is byte-identical to the committed `puka`.
+
+- **Tests:** `cyrius test` 589 passed, 0 failed, the same 589 as 0.6.23.
+- **Fuzz:** `cyrius fuzz` 1,297 green, also under `--poison`.
+- **Bench:** `cyrius bench` within run-to-run noise of 0.6.23 over three runs each.
+- **Builds:** Linux with and without DCE, `--agnos` entry and tests, and `--aarch64` all build with no
+  undefined functions.
+- **Static checks:** `cyrius lint` 0 warnings across `src/`, `tests/` and `programs/`. `fmt --check`
+  is clean, `dist/` included.
+- **Dependency checks:** `vet` reports 14 deps, 0 untrusted, 0 missing. `distlib --check` reports
+  current, and `deps --verify` 41/0.
+- **`programs/`:** everything builds except `gpu_probe` and `gpu_win_probe`, which fail the same way on
+  0.6.23 (see *Known* below).
+- ⚠ **`cyrius audit` exits 1** on its docs step: 433 undocumented public functions. It exits 1
+  identically on 0.6.23 under 6.6.2. Its fmt, lint, tests and bench steps pass.
+
+| build (bytes) | 0.6.23 | 0.6.24 | Δ |
+|---|---|---|---|
+| Linux, `CYRIUS_DCE=1` (CI / release) | 1,484,832 | 1,577,544 | +92,712 (+6%) |
+| Linux, plain | 1,710,112 | 2,073,160 | +363,048 (+21%) |
+| `--agnos` | 1,696,376 | 2,055,200 | +358,824 (+21%) |
+| `--agnos` tests | 502,504 | 861,320 | +358,816 (+71%) |
+| `--aarch64` | 2,025,336 | 2,490,736 | +465,400 (+23%) |
+
+Nearly all of the growth is the draw stack dhancha pulls in. `lib/sadish.cyr` went from 75,450 to
+471,512 B and `lib/rekha.cyr` from 38,661 to 551,402 B. DCE removes most of it. ⚠ The `--agnos` build
+is not DCE'd, and that is the binary that has to spawn on iron. 0.6.13 recorded the `spawn_path #43`
+size question as never measured on iron; it is now 21% larger.
+
+⚠ **No agnos or live-compositor run.** Every result above comes from the Linux dev host; for
+`--agnos`, the result is that it compiles.
+
+### Known, not changed
+
+- `src/platform/gpu/gpu.cyr` and the two GPU probes do not compile on cyrius 6.6. The seam reads a
+  `Result` through `payload()`, which 6.6.0 deleted, and binds a two-value return to one variable.
+  Nothing that is built includes it, and it fails identically at 0.6.23. Port it when the GPU path is
+  wired.
+- `mmap`, `dynlib` and `sakshi` are declared stdlib leaves that nothing in `src/`, `programs/` or
+  `tests/` references; they were added for mabda's bundle. They are still listed in
+  `dist/puka.deps`, and pruning them changes what bundle consumers are told to declare, so it is a
+  separate change.
+
+## [0.6.23] - 2026-09-11
+
+### Changed
+
+- **Toolchain `6.5.36` → `6.6.2`.** No source change; the value form needed none.
+  Build, tests, and any bench/fuzz/distlib target the repo ships re-verified at the new pin.
+
 ## [0.6.22] - 2026-08-31 — the first audit, and two gates that were green over nothing
 
 P(-1) hardening sweep. All of `src/` (5,788 lines) read line-by-line; findings filed in
@@ -1128,12 +1266,3 @@ Linux host; no PTY / rendering yet (those are M2 / M3).
 - Design docs: `CLAUDE.md`, `docs/development/roadmap.md` (M1–M7 + v1.0 criteria + phase-2 command center), `docs/architecture/overview.md`, ADR-0001 (sovereign reimplementation, no libghostty), ADR-0002 (app-first, engine extracted later), `docs/development/state.md`, README. Root docs the scaffolder skipped: `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`.
 
 **192 assertions green across 5 test files.**
-
-## [Unreleased]
-
-## [0.6.23] - 2026-09-11
-
-### Changed
-
-- **Toolchain `6.5.36` → `6.6.2`.** No source change; the value form needed none.
-  Build, tests, and any bench/fuzz/distlib target the repo ships re-verified at the new pin.

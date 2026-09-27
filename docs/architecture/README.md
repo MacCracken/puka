@@ -6,4 +6,6 @@ Not decisions (those live in [`../adr/`](../adr/)) and not guides (those live in
 
 ## Items
 
-_Empty. Add a numbered entry (`001-kebab-case-title.md`) the first time the code has a non-obvious invariant a reader can't derive. Do not write entries for decisions — those are ADRs._
+- [001 — Dependencies: what each one is for, and what the graph constrains](001-dependencies.md) — every declared dep is compiled into every target; why mabda is not declared; the cyrius 6.5.8 floor; what goes through dhancha and what calls setu directly; what `dist/puka.cyr` consumers must declare; why `path` lines stay commented; no comments inside manifest arrays.
+
+Add the next entry as `002-kebab-case-title.md`. Do not write entries for decisions — those are ADRs.

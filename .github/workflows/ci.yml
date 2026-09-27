@@ -33,8 +33,8 @@ jobs:
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
       - name: Resolve dependencies
-        # Resolves stdlib + the kashi git dep (pinned tag in cyrius.cyml) —
-        # cyrius clones it, so no sibling checkout is needed in CI.
+        # Resolves stdlib + the git deps (tags in cyrius.cyml, commits pinned in
+        # cyrius.lock) — cyrius clones them, so no sibling checkout is needed in CI.
         run: cyrius deps
 
       - name: Lint (hard gate — any warning fails)
