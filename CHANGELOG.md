@@ -4,6 +4,98 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-06 — cyrius 6.7.18, and every dependency at its latest tag
+
+The toolchain moves nine releases, and each dependency moves to its latest tag. `src/` is unchanged, and
+puka's output is identical on both the plain and the release build. The one source change is a write
+length in `programs/` that a new lint rule found.
+
+### Changed — toolchain `6.7.9` → `6.7.18`
+
+- **The migration notes were sorted before they were read.** They run to about 6,700 lines. They were
+  split into 822 blocks, and the ones that can reach what puka uses were read in full. Those that need
+  structs, generics, closures, vectors or typed pointers were not, because puka has none of those.
+- **The near-misses have no site in puka or in `lib/dhancha.cyr`:** multi-value fall-off (MV-17), `ret2`,
+  the f64 operator change (RC-4), `const`, and a value builtin as a statement (FA2-1). All 22 enums
+  separate their members (FE-16). The 5 globals declared twice are `#ifdef` arms, so none reaches the new
+  redeclaration rules (FE-13, FE-14, FX-6). dhancha's `fncall` sites take a variable callee, which the
+  known-callee changes leave alone. The scanner was checked against a control file first.
+- **Behaviour was measured.** The oracle from 0.7.0 gives **0 of 207 hashes changed**, now on the plain
+  and on the `CYRIUS_DCE=1` build, because 6.7.14's DCE removes more from the release binary. `cyrius
+  test` output is identical, ignoring file order.
+- **`lib/` is re-vendored** from the 6.7.18 snapshot: 40 files. `lib/slice.cyr` is new.
+
+### Changed — dependencies to their latest tags
+
+| dep | 0.7.0 | 0.7.1 | that tag's cyrius pin |
+|---|---|---|---|
+| kashi | 1.2.0 | **1.3.0** | 6.7.18 |
+| setu | 0.9.0 | **0.9.1** | 6.7.18 |
+| dhancha | 0.10.4 | 0.10.4 | ⚠ 6.6.6 |
+| sadish | 0.12.0 | **0.12.1** | 6.7.18 |
+| rupa | 0.2.0 | **0.2.1** | 6.7.18 |
+| rekha | 1.1.0 | **1.1.2** | 6.7.18 |
+
+- **rekha is the one real code change** (+586 / −129 lines): its P(-1) audit fixes three out-of-bounds
+  reads reachable from a font, and refuses more malformed fonts. puka never calls rekha and opens no
+  font, so this does not reach it. It is most of the size growth below.
+- **The others barely move.** kashi 1.3.0 adds one clamp to the file puka takes, setu 0.9.1 corrects two
+  write lengths, sadish changes its version probe, and rupa changes nothing.
+- **dhancha's calls still resolve.** dhancha did not move while its dependencies did, so what it calls
+  was compared as well as what puka calls: 18 `sd_*`, 3 `rekha_*`, 23 `rupa_*`, 16 `setu_*` and 2
+  `kashi_*`, plus puka's 5 `setu_*` and 4 `kashi_*`. No signature changed, and nothing went private.
+- **`cyrius.lock` was deleted and regenerated** to drop the old tags' rows.
+
+### Fixed — `programs/puka_setu_term.cyr` dropped the newline from an error message
+
+Its `pty_open failed` message is 32 bytes and the write said 31. cyrlint's write-length rule (cyrius
+6.7.11) found it, and found no other wrong length. CI linted only `src/`, so it would not have failed the
+build.
+
+### Changed — CI lints `programs/` and `tests/`
+
+The lint step walked the 22 `.cyr` files in `src/`. It now covers all 51 source files in `src/`,
+`programs/` and `tests/`, including `.tcyr`, `.fcyr` and `.bcyr`, and all of them are clean. Putting the
+bug above back fails the step, and so does a bad write in a file of each test extension.
+
+### Changed — the engine bundle
+
+`dist/puka.deps` goes from `io alloc string` to `syscalls alloc string io`, because cyrius 6.7.11's owner
+rule records `syscalls` first. The bundle's code does not change, and the requires block moves with it.
+
+### Sizes
+
+| build (bytes) | 0.7.0 on 6.7.9 | 0.7.1 on 6.7.18 | Δ |
+|---|---|---|---|
+| Linux, `CYRIUS_DCE=1` (CI / release) | 1,420,336 | 1,428,672 | +8,336 (+0.6%) |
+| Linux, plain | 1,920,048 | 1,940,672 | +20,624 (+1.1%) |
+| `--agnos` | 1,914,960 | 1,939,792 | +24,832 (+1.3%) |
+| `--agnos` tests | 725,128 | 745,864 | +20,736 (+2.9%) |
+| `--aarch64` | 2,071,464 | 2,137,152 | +65,688 (+3.2%) |
+
+The toolchain alone leaves the DCE build unchanged and adds 8,304 B to `--agnos`. The rest is the
+dependencies, rekha above all.
+
+### Verification
+
+- **CI, replayed:** every `run:` block of `ci.yml` executed as written, from a clean copy, on a fresh
+  toolchain install in a throwaway `HOME`, once for each listing order of the toolchain's `lib/`.
+- **Mutants:** a plain `cyrius distlib` fails both bundle steps. A wrong write length fails the lint step
+  in `src/`, in `programs/`, and in a `.tcyr`, a `.fcyr` and a `.bcyr` file.
+- **Tests:** 601 passed, 0 failed across 16 files, no SKIP.
+- **Fuzz:** `cyrius fuzz` 1,297 green, also under `--poison`.
+- **Builds:** Linux with and without DCE, `--agnos` entry and tests, `--aarch64`, and all 11 programs in
+  `programs/`, including both GPU probes. No diagnostics.
+- **Static checks:** `cyrius lint` 0 warnings across `src/`, `tests/` and `programs/`. `fmt --check` is
+  clean.
+- **Dependency checks:** `vet` reports 14 deps, 0 untrusted, 0 missing. `deps --verify` 40/0,
+  `deps --locked` clean, `distlib --check --no-default-features` current.
+- **Bench:** median of three interleaved runs, 0.7.0 then 0.7.1. `vt_feed` printable 11 → 10 ns, CSI SGR
+  125 → 125 ns, `term_feed` 197 → 196 ns, `grid_scroll_up` 10.86 → 10.76 µs, `fb_render` 1.84 → 1.87 ms.
+  All within noise.
+- ⚠ **`cyrius audit` still exits 1 on its docs step,** at the same inflated 428.
+- ⚠ **Not run:** the GPU probes, and anything on agnos or under a live compositor.
+
 ## [0.7.0] - 2026-11-06 — cyrius 6.7.9, the language minor, and behaviour does not move
 
 The pin moves onto cyrius's 6.7 line, where the language can change what code means without failing the

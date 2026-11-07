@@ -56,7 +56,7 @@ jobs:
       - name: Lint (hard gate — any warning fails)
         run: |
           fail=0
-          for f in $(find src -name '*.cyr' | sort); do
+          for f in $(find src programs tests \( -name '*.cyr' -o -name '*.tcyr' -o -name '*.fcyr' -o -name '*.bcyr' \) | sort); do
             out=$(cyrius lint "$f" 2>&1 || true)
             echo "$out"
             if echo "$out" | grep -qE '^[[:space:]]*warn '; then

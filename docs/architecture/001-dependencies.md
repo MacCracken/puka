@@ -46,7 +46,7 @@ When `include "lib/X.cyr"` finds no `lib/X.cyr` in the project, cycc opens
 `src/frontend/lex.cyr`). A program can therefore reach a stdlib module, or a bundle the toolchain
 ships, that the manifest never declares. It gets it at the toolchain's version, not at a tag puka
 chose, and without a `cyrius.lock` hash. The GPU probes rely on this for mabda (4.2.0 at cyrius
-6.7.9), sakshi and mmap. It is acceptable for developer probes that CI does not build; anything an
+6.7.18), sakshi and mmap. It is acceptable for developer probes that CI does not build; anything an
 entry point includes should be declared instead.
 
 ## Toolchain floor: cyrius 6.5.8
@@ -107,7 +107,7 @@ the engine calls, so nothing comes up undefined and nothing is recorded.
 Those deps belong to the app half, so they are `optional` under the `app` feature, which is on by
 default. Every build resolves them exactly as before; the feature split left `lib/`, `cyrius.lock`
 and both binaries byte-identical. `--no-default-features` leaves the verify with kashi alone, which is
-the engine's real dependency set, and it proves `io`, `alloc` and `string`.
+the engine's real dependency set, and it proves `syscalls`, `alloc`, `string` and `io`.
 
 A plain `--check` reads the bundle as stale, and that is expected. cyrius 6.7.9 and 6.7.18 hide the
 leaves the same way (checked 2026-11-06), so this stays until cyrius changes the verify.
