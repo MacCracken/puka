@@ -75,14 +75,27 @@ leaves remain)` and wrote no requires block. That was false: the engine calls `a
   was already true: the engine needs kashi, and the rest is the app half.
 - **Builds are untouched.** With the feature split, `lib/` and `cyrius.lock` are unchanged, and the
   Linux and agnos binaries are byte-identical to those built before it.
-- **`dist/puka.deps` goes from 16 leaves to 4:** `syscalls`, `alloc`, `string`, `io`. Most of the drop
+- **`dist/puka.deps` goes from 16 leaves to 4:** `syscalls`, `alloc`, `string`, `io`. The drop
   is 6.6.18, which stopped copying `[deps] stdlib` into the sidecar. The bundle gains the matching
   requires block, so `include "dist/puka.cyr"` compiles alone.
 - **Proved with a consumer.** A scratch project declaring `stdlib = []`, kashi and puka resolved those
   leaves from the sidecar, built and ran on Linux, and built for agnos.
-- **CI gains a step,** `cyrius distlib --check --no-default-features`, because a plain `cyrius distlib`
-  would undo this silently. ⚠ A plain `--check` reads the bundle as stale, and that is expected. The
-  reasoning is in [`docs/architecture/001-dependencies.md`](docs/architecture/001-dependencies.md).
+- **CI gains a step that builds `programs/engine_reach.cyr` with `--no-deps`** for Linux and agnos and
+  runs it, because a plain `cyrius distlib` would undo this silently. The program is a consumer: kashi
+  and the bundle are all that is in scope, and it reaches every stdlib call the engine makes. Measured:
+  a bundle with no requires block, or one missing `io`, fails on both targets, and without `--no-deps`
+  the block-less bundle builds. ⚠ A plain `distlib --check` reads the bundle as stale, and that is
+  expected. The reasoning is in
+  [`docs/architecture/001-dependencies.md`](docs/architecture/001-dependencies.md).
+- ⚠ **The first version of that step ran `distlib --check` and failed on GitHub.** It reported
+  `sidecar: 3 leaf(s)` and `STALE` on a bundle this machine reported current. distlib gives a symbol to
+  the first leaf defining it in directory listing order, and `O_WRONLY` is in both `syscalls` and `io`,
+  so the leaves follow the filesystem. Reordering a throwaway toolchain's `lib/` reproduced that output
+  exactly. A local replay could not have caught it: a clean install on this machine also passed. The
+  bundle was never wrong: both lists compile and run, because `lib/io.cyr` includes the others.
+- ⚠ **The new step does not catch a bundle that has drifted from `src/`.** No CI step did before this
+  release either. cyrius 6.7.7 sorts that listing, so `--check` can join it at a pin of 6.7.7 or later;
+  the roadmap carries that.
 - ⚠ **The underlying behaviour is cyrius's** and is not filed there yet. Any bundle with a named dep
   that has a requires block can get a short sidecar the same way.
 
@@ -110,16 +123,16 @@ back 82,480 B and 82,464 B.
 
 ### Verification
 
-- **CI, replayed step by step:** the new bundle step, lint, DCE build, ELF check, `--agnos` entry and
-  tests, and `cyrius test`.
+- **CI, replayed:** every `run:` block of `ci.yml` executed as written, from a clone, on a fresh toolchain
+  install in a throwaway `HOME`, once for each listing order of the toolchain's `lib/`.
 - **Tests:** 601 passed, 0 failed across 16 files, no SKIP.
 - **Fuzz:** `cyrius fuzz` 1,297 green, also under `--poison`.
-- **Builds:** Linux with and without DCE, `--agnos` entry and tests, `--aarch64`, and all 10 programs
+- **Builds:** Linux with and without DCE, `--agnos` entry and tests, `--aarch64`, and all 11 programs
   in `programs/`, including both GPU probes. No undefined functions, no `duplicate fn` warnings.
 - **Static checks:** `cyrius lint` 0 warnings across `src/`, `tests/` and `programs/`. `fmt --check` is
   clean, `dist/` included.
 - **Dependency checks:** `vet` reports 14 deps, 0 untrusted, 0 missing. `deps --verify` 39/0.
-  `distlib --check --no-default-features` reports current. `lib/` and `cyrius.lock` are byte-identical
+  `lib/` and `cyrius.lock` are byte-identical
   to a `cyrius deps` run in a scratch copy with neither present.
 - **Bench:** median of three runs of each release on the same day, 0.6.25 then 0.6.26. `vt_feed`
   printable 10 → 11 ns (its resolution is 1 ns), CSI SGR 130 → 125 ns, `term_feed` 198 → 197 ns,

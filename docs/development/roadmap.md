@@ -221,3 +221,10 @@ engine + the `aethersafha` windowing crate. Name/scaffold TBD when puka v1.0 lan
 - puka does not declare mabda (`docs/architecture/001-dependencies.md`): it reaches `lib/mabda.cyr` from
   the toolchain, so "resolves mabda >= 4.2.0" means the pinned toolchain's `lib/mabda.cyr` header reads
   `# Version: 4.2.0` or later (cyrius 6.7.6's tree still folds 4.1.7 as of this note).
+
+## Found at 0.6.26 — for the next cyrius pin move
+
+- **(cyrius ≥ 6.7.7)** `cyrius distlib` stops depending on the filesystem's listing order. Add
+  `cyrius distlib --check --no-default-features` to CI then, beside the `engine_reach` build: nothing
+  gates `dist/puka.cyr` against `src/` until it is there. `docs/architecture/001-dependencies.md` has
+  the reason.

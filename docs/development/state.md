@@ -13,7 +13,8 @@ there, not here.
 - **Toolchain:** cyrius 6.6.6 → 6.6.20.
 - **Dependencies:** each on its tag pinned to 6.6.20, except dhancha, which has no such tag.
 - **Engine bundle:** `dist/` now regenerates with `cyrius distlib --no-default-features`. A plain run
-  writes a false empty sidecar. `dist/puka.deps` goes from 16 leaves to 4.
+  writes a false empty sidecar. `dist/puka.deps` goes from 16 leaves to 4, and CI gates the bundle by
+  building `programs/engine_reach.cyr` with `--no-deps`.
 
 0.6.25 before it made three changes and fixed one leak.
 
@@ -213,6 +214,10 @@ through it). kashi's PSF/BDF/PCF library face is available but not pulled in (AD
 - **`cyrius distlib` hides a bundle's stdlib leaves behind a named dep's requires block** *(found
   2026-11-06, cyrius 6.6.20, still so at 6.7.18)* — worked around with `--no-default-features`, and not
   filed in cyrius yet.
+- **`cyrius distlib --check` depends on the filesystem below cyrius 6.7.7** *(found 2026-11-06)* — it
+  reads a bundle as STALE on a GitHub runner that is current on the dev box, so CI builds
+  `programs/engine_reach.cyr` instead. Fixed in cyrius at 6.7.7. Until puka pins that, nothing gates
+  `dist/puka.cyr` against `src/`; the roadmap carries the step.
 - **mabda native RT `va_map` 64 KiB-align bug** *(found 2026-06-19)* — `native_rt_create_2d_rgba8`'s `va_map` returns `EINVAL` unless the BO byte-size is 64 KiB-aligned (256²/512²/1024²/2048² pass; `1260×682×4` = 3360 KiB does not — the GTT BO alloc itself is fine, only the VA map fails). Worked around in `pgpu_target` (pad the alloc to a 256-px multiple per axis, read back the visible sub-rect). The clean fix is mabda-side: round the GTT/`va_map` size up to 64 KiB. Reported to the maintainer.
 - **mabda no instanced-vertex path** *(recon 2026-06-19)* — and none is roadmapped (3.2.x closes at 3.2.13; 3.3 = asset-loading). So bite 8 renders the grid via a **single full-screen pass** (texture sampling shipped 3.2.2–3.2.3 + the SPIR-V→GFX9 compiler is complete at 3.2.11, both HW-verified on Cezanne) reading the grid as a storage buffer + the kashi atlas as a texture — NOT instanced quads.
 - **mabda dmabuf-export** — mabda has the PRIME `HANDLE_TO_FD` ioctl internally but no public accessor to hand a Wayland client a dmabuf fd (+ fourcc/stride/modifier). Zero-copy GPU present (bite 9 / cut #3) needs a `gpu_render_target_export_dmabuf` in mabda (Phase D, unscheduled). The `wl_shm` GPU→CPU readback memcpy (cut #2, **shipped in bite 7**) needs no mabda change. mabda's native backend is **AMD-GFX9-only** (verified on this Cezanne box) — non-AMD sessions use the `wl_shm` CPU fallback.

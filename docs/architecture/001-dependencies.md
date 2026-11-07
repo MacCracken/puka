@@ -103,9 +103,26 @@ default. Every build resolves them exactly as before; the feature split left `li
 and both binaries byte-identical. `--no-default-features` leaves the verify with kashi alone, which is
 the engine's real dependency set, and it proves `syscalls`, `alloc`, `string` and `io`.
 
-CI runs `cyrius distlib --check --no-default-features`, so a plain regeneration fails there rather
-than shipping. A plain `--check` reads the bundle as stale, and that is expected. cyrius 6.7.18 hides
-the leaves the same way (checked 2026-11-06), so this stays until cyrius changes the verify.
+A plain `--check` reads the bundle as stale, and that is expected. cyrius 6.7.18 hides the leaves the
+same way (checked 2026-11-06), so this stays until cyrius changes the verify.
+
+### CI builds a consumer, because `distlib --check` depends on the filesystem
+
+Below cyrius 6.7.7, `--check` cannot be a gate, with or without the flag. distlib gives a symbol to
+the first leaf that defines it in directory listing order, and `O_WRONLY`, which `fb_dump_ppm` uses, is
+defined by both `syscalls` and `io`. So the sidecar follows the filesystem: `syscalls alloc string io`
+on the dev box, `io alloc string` on a GitHub runner, and `--check` compares bytes. Both bundles
+compile, because `lib/io.cyr` includes the others, so the committed bundle can carry either list.
+
+CI instead builds `programs/engine_reach.cyr` with `--no-deps` for Linux and agnos and runs it on
+Linux. It is a consumer: kashi and the bundle are all that is in scope, and it reaches every stdlib
+call the engine makes. A bundle with no requires block, or one missing `io`, fails on both targets.
+Without `--no-deps` the manifest's leaves are prepended and the same bundle builds, so that flag is
+what makes this a gate.
+
+cyrius 6.7.7 sorts the listing, so `cyrius distlib --check --no-default-features` can be added back at
+a pin of 6.7.7 or later. It would also catch a bundle that has drifted from `src/`, which this gate
+does not.
 
 ## kashi is consumed as its freestanding core
 
