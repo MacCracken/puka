@@ -5,12 +5,14 @@
 
 ## Version
 
-**0.7.1** (2026-11-06) — see [`../../CHANGELOG.md`](../../CHANGELOG.md). Release narrative belongs
+**0.7.2** (2026-11-07) — see [`../../CHANGELOG.md`](../../CHANGELOG.md). Release narrative belongs
 there, not here.
 
-0.7.1 moves to cyrius 6.7.18 and takes every dependency to its latest tag, and behaviour did not move.
-`src/` is unchanged. One write length is fixed in `programs/`, which a new lint rule found. dhancha is
-still on 6.6.6.
+0.7.2 moves dhancha to 0.11.1, its first tag on puka's cyrius pin, and drops the three overrides that
+stood in for it. Behaviour did not move, and `src/` is unchanged.
+
+0.7.1 before it moved to cyrius 6.7.18 and took every other dependency to its latest tag. A new lint
+rule found one wrong write length in `programs/`, and CI's lint step now covers `programs/` and `tests/`.
 
 0.7.0 before it moved onto cyrius's 6.7 language line. It was a toolchain release: none of M7's items
 has started.
@@ -53,7 +55,7 @@ an out-of-bounds read and an information disclosure). Two P(-1) gates — `cyriu
 `cyrius bench` — were passing over **empty harnesses** and now measure something.
 
 ⛔ **SCOPE, STATED SO IT IS NOT MISREAD.** **Version**, **Toolchain**, **Dependencies** and **Tests**
-were re-derived from the tree on 2026-11-06. The **Source**, **Carry-forward**, **Dep gaps**,
+were re-derived from the tree on 2026-11-07. The **Source**, **Carry-forward**, **Dep gaps**,
 **Consumers** and **Next** sections below still carry the staleness they had at 0.6.7 (they describe
 the tree as of 2026-08-02) and were **not** re-verified — the audit read the code, not these
 paragraphs. Trust them at that date, not this one.
@@ -89,8 +91,8 @@ transport. What is retracted is the pre-`net_src_for` rigged-smoke lineage, not 
 
 ## Toolchain
 
-- **Cyrius pin**: `6.7.18` (in `cyrius.cyml [package].cyrius`), the same pin kashi 1.3.0, setu 0.9.1,
-  sadish 0.12.1, rupa 0.2.1 and rekha 1.1.2 carry. dhancha 0.10.4 is still on 6.6.6. Floor: 6.7.7 for
+- **Cyrius pin**: `6.7.18` (in `cyrius.cyml [package].cyrius`), the same pin every dependency's tag
+  carries. Floor: 6.7.7 for
   the `distlib --check` gate in CI; 6.5.8 for the agnos channel band (see the architecture note).
 - The `cyrius` wrapper re-executes the pinned toolchain when `~/.cyrius/versions/<pin>` is installed
   (observed 2026-09-27: with 6.6.6 current, a 6.6.2 pin ran 6.6.2's `cycc`).
@@ -141,7 +143,7 @@ marked at every write chokepoint and consumed by the renderer
 ## Tests
 
 **601 assertions, all green** (`cyrius test`), across 16 `.tcyr` files (0.6.25: 589 + the 12 in
-`window_setu.tcyr`). Re-counted 2026-11-06. The runner's closing line reads `17 passed`: it counts
+`window_setu.tcyr`). Re-counted 2026-11-07. The runner's closing line reads `17 passed`: it counts
 files, and since cyrius 6.6.17 it also runs the `[build] test` entry, `src/test.cyr`, which asserts
 nothing. At 0.6.24 this block corrected an earlier claim of 604 across 17: the 604 summed that closing
 line into the assertions.
@@ -170,10 +172,10 @@ line into the assertions.
   nothing until 0.6.22. ⚠ `cyrius fuzz --bounds` passes and checks nothing here: `src/` has no typed
   arrays, `*T` subscripts or slices for it to guard.
 - **`tests/puka.bcyr` — five hot-path baselines, real since 0.6.22** (it timed an empty function
-  before). Median of three interleaved runs on 2026-11-06 (0.7.1, cyrius 6.7.18): `vt_feed` printable
-  10 ns · `vt_feed` CSI SGR 125 ns · `term_feed` full pipeline 196 ns · `grid_scroll_up` 10.76 µs ·
-  `fb_render` 80×24 all-dirty 1.87 ms. 0.7.0 on 6.7.9, alternating with those runs, gives 11 ns,
-  125 ns, 197 ns, 10.86 µs and 1.84 ms. ⚠ Baselines, not thresholds — nothing fails on a regression yet.
+  before). Median of three interleaved runs on 2026-11-07 (0.7.2, cyrius 6.7.18): `vt_feed` printable
+  10 ns · `vt_feed` CSI SGR 124 ns · `term_feed` full pipeline 195 ns · `grid_scroll_up` 10.79 µs ·
+  `fb_render` 80×24 all-dirty 1.82 ms. 0.7.1, alternating with those runs, gives 10 ns, 122 ns,
+  192 ns, 10.75 µs and 1.87 ms. ⚠ Baselines, not thresholds — nothing fails on a regression yet.
 - ⛔ **The Wayland subsystem still has no headless tests**, and that is now the most conspicuous gap:
   the 0.6.22 wire-validation fixes (A-03/A-04) are the repairs that most deserve coverage and are
   verified by reading only. `wire.cyr` is pure and the byte-vector tests are already scoped.
@@ -190,19 +192,18 @@ Declared in `cyrius.cyml` and resolved from their git tags; `cyrius.lock` pins e
 Why each is declared the way it is, and why mabda is not:
 [`../architecture/001-dependencies.md`](../architecture/001-dependencies.md).
 
-| dep | pin (0.7.1) | modules | note |
+| dep | pin (0.7.2) | modules | note |
 |---|---|---|---|
 | **kashi** | `1.3.0` | `src/font_data.cyr` | the **freestanding** core only, the same core the agnos kernel and dhancha consume. Built-in CP437 VGA 8×16 / CGA 8×8 / VGA 9×16. [ADR 0004](../adr/0004-kashi-freestanding-core-over-library-face.md). |
-| **setu** | `0.9.1` | `dist/setu.cyr` | the AGNOS display protocol + reference client. `present` / `poll_input` go here directly. puka's pin overrides the 0.8.9 dhancha declares. |
-| **dhancha** | `0.10.4` | `dist/dhancha.cyr` | the widget toolkit. CONNECT / FD / CLOSE route through it; `src/ui.cyr` builds the canvas widget. ⚠ Still pinned to cyrius 6.6.6: it has no tag on the 6.7 line, so its bundle is audited here at each pin move. |
-| **sadish** | `0.12.1` | `dist/sadish.cyr` | software rasteriser. puka calls none of it and declares it to override dhancha's 0.11.2. |
-| **rupa** | `0.2.1` | `dist/rupa.cyr` | theme/design tokens. puka calls none of it and declares it to override dhancha's 0.1.7. |
-| **rekha** | `1.1.2` | `dist/rekha.cyr` | vector glyph path. puka calls none of it and declares it to override dhancha's 0.9.0. |
+| **setu** | `0.9.1` | `dist/setu.cyr` | the AGNOS display protocol + reference client. `present` / `poll_input` go here directly. The same tag dhancha declares. |
+| **dhancha** | `0.11.1` | `dist/dhancha.cyr` | the widget toolkit. CONNECT / FD / CLOSE route through it; `src/ui.cyr` builds the canvas widget. |
+| **sadish** | `0.12.1` | *(transitive, via dhancha)* | software rasteriser. |
+| **rupa** | `0.2.1` | *(transitive, via dhancha)* | theme/design tokens. |
+| **rekha** | `1.1.2` | *(transitive, via dhancha)* | vector glyph path. |
 
-- Every tag above is that dep's latest, checked 2026-11-06. All but dhancha's are pinned to cyrius
-  6.7.18.
-- **The app half is optional.** setu, dhancha, sadish, rupa and rekha sit under the default-on `app`
-  feature, so every build resolves them. `--no-default-features` exists for `cyrius distlib` alone:
+- Every tag above is that dep's latest, checked 2026-11-07, and all are pinned to cyrius 6.7.18.
+- **The app half is optional.** setu and dhancha, which brings sadish, rupa and rekha, sit under the
+  default-on `app` feature, so every build resolves them. `--no-default-features` exists for `cyrius distlib` alone:
   [`../architecture/001-dependencies.md`](../architecture/001-dependencies.md) says why.
 - ⚠ **A tag bump leaves the old tag's row in `cyrius.lock`.** Since cyrius 6.6.20 that row stays and
   fails closed. To drop it, delete `cyrius.lock` and run `cyrius deps`, which re-pins every dep.
@@ -216,18 +217,15 @@ Why each is declared the way it is, and why mabda is not:
 - **setu 0.8.11's -6 from `setu_client_poll_input` (the compositor gone) is consumed since 0.6.25.**
   `win_poll_events` maps it to `WIN_EV_CLOSE`, so puka exits instead of polling a dead socket.
 - The draw stack dhancha pulls in grew at 0.6.24 (`lib/sadish.cyr` 75 KB → 472 KB, `lib/rekha.cyr`
-  39 KB → 551 KB). DCE removes most of it. The `--agnos` build is not DCE'd: 1,939,792 B at 0.7.1,
-  +14.3% over 0.6.23.
+  39 KB → 551 KB). DCE removes most of it. The `--agnos` build is not DCE'd: 1,934,656 B at 0.7.2,
+  +14.0% over 0.6.23.
 
 Planned (own-the-stack, not yet wired): `rekha`+`sadish` **directly** (vector glyphs, post-v1.0 — they
-are declared today only to override dhancha's tags), `sakshi` (logging — declared again when puka logs
+are on disk today only as dhancha's transitives), `sakshi` (logging — declared again when puka logs
 through it). kashi's PSF/BDF/PCF library face is available but not pulled in (ADR 0004).
 
 ## Dep gaps / blockers
 
-- **dhancha has no tag on the cyrius 6.7 line** *(2026-11-06)* — 0.10.4 stays on 6.6.6 and compiles
-  unchanged on puka's pin. Until it moves, puka overrides its sadish, rupa and rekha tags, and each pin
-  move has to audit `lib/dhancha.cyr` for changes of meaning here. Then both stop.
 - **The agnos terminal has no window size** *(cyrius issue `2026-11-04-agnos-chan-winsz-ops-peer`,
   open)* — agnos `pty_set_winsize` is `return 0`, so a program in puka sees only the console's grid.
   agnos 1.57.17 has the ops, and cyrius 6.7.18 has no wrapper for them yet. Take them when cyrius adds

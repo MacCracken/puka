@@ -33,7 +33,7 @@ stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "b
 # "`dist/puka.cyr` needs kashi" in docs/architecture/001-dependencies.md for what a plain run breaks.
 [features]
 default = ["app"]
-app = ["setu", "dhancha", "sadish", "rupa", "rekha"]
+app = ["setu", "dhancha"]
 
 [deps.kashi]
 git = "https://github.com/MacCracken/kashi.git"
@@ -53,28 +53,5 @@ modules = ["dist/setu.cyr"]
 optional = true
 git = "https://github.com/MacCracken/dhancha.git"
 # path = "../dhancha"
-tag = "0.10.4"
+tag = "0.11.1"
 modules = ["dist/dhancha.cyr"]
-
-# puka calls none of the next three. dhancha 0.10.4 declares them, and puka's tags override its tags:
-# dhancha has no tag on puka's cyrius pin, and each of these does. Drop all three when dhancha catches up.
-[deps.sadish]
-optional = true
-git = "https://github.com/MacCracken/sadish.git"
-# path = "../sadish"
-tag = "0.12.1"
-modules = ["dist/sadish.cyr"]
-
-[deps.rupa]
-optional = true
-git = "https://github.com/MacCracken/rupa.git"
-# path = "../rupa"
-tag = "0.2.1"
-modules = ["dist/rupa.cyr"]
-
-[deps.rekha]
-optional = true
-git = "https://github.com/MacCracken/rekha.git"
-# path = "../rekha"
-tag = "1.1.2"
-modules = ["dist/rekha.cyr"]

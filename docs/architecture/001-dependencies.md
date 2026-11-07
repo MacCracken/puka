@@ -70,20 +70,16 @@ if the pin is ever lowered.
   as a canvas widget, drawn by `dh_draw_widget`.
 
 Because puka calls setu directly it declares setu itself, and puka's `[deps.setu]` tag is the one
-that resolves: it overrides the setu tag dhancha declares. kashi works the same way.
+that resolves: it overrides the setu tag dhancha declares. kashi works the same way. From dhancha
+0.10.5 kashi cannot go below 1.1.0, because dhancha's CP437 map calls it.
 
-puka calls none of sadish, rupa and rekha. It declares them only to override dhancha's tags: dhancha
-0.10.4 is still pinned to cyrius 6.6.6, and each of the three has a tag on puka's pin. Their moves
-carry no API change, so this is about staying on the pin, not about anything puka's code needs. Drop
-the three declarations once dhancha has a tag on puka's pin, and they arrive through dhancha again.
+sadish, rupa and rekha are not declared by puka; they arrive through dhancha at the tags dhancha
+declares, and puka calls none of them.
 
-## dhancha is compiled by a toolchain it was never checked on
-
-Every other dependency has a tag on puka's pin, and that repo checked its own source against the
-migration notes. dhancha 0.10.4 has not, and from the 6.7 line that matters: a toolchain can change
-what code means without failing the build. Until dhancha catches up, each cyrius pin move has to
-check `lib/dhancha.cyr` for those changes here. The 0.7.0 audit did that, and found no site:
-[`../audit/2026-11-06-audit.md`](../audit/2026-11-06-audit.md).
+If dhancha falls behind puka's pin again, two things follow, as they did from 0.6.26 to 0.7.1. Declaring
+the three here overrides dhancha's tags and keeps them on the pin. And `lib/dhancha.cyr` is then compiled
+by a toolchain its repo never checked it on, so that pin move has to check it here for changes of
+meaning, as [`../audit/2026-11-06-audit.md`](../audit/2026-11-06-audit.md) did.
 
 ## `dist/puka.cyr` needs kashi
 
@@ -104,8 +100,8 @@ every named dep's modules and the bundle, and records a leaf only when a symbol 
 The bundles of setu, sadish and rupa open with requires blocks of their own, which define everything
 the engine calls, so nothing comes up undefined and nothing is recorded.
 
-Those deps belong to the app half, so they are `optional` under the `app` feature, which is on by
-default. Every build resolves them exactly as before; the feature split left `lib/`, `cyrius.lock`
+Those deps belong to the app half, so setu and dhancha, which brings the rest, are `optional` under the
+`app` feature, which is on by default. Every build resolves them exactly as before; the feature split left `lib/`, `cyrius.lock`
 and both binaries byte-identical. `--no-default-features` leaves the verify with kashi alone, which is
 the engine's real dependency set, and it proves `syscalls`, `alloc`, `string` and `io`.
 

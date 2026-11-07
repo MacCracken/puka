@@ -4,6 +4,70 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-11-07 — dhancha 0.11.1, and the overrides it makes unnecessary
+
+dhancha finally has a tag on puka's cyrius pin, so every dependency is now on 6.7.18, and the three
+declarations that stood in for it go. `src/` is unchanged and puka's output is identical.
+
+### Changed — dhancha `0.10.4` → `0.11.1`
+
+- **It declares the tags puka already pins:** sadish 0.12.1, rupa 0.2.1, rekha 1.1.2, kashi 1.3.0 and
+  setu 0.9.1. `cyrius deps` no longer has any tag of dhancha's to set aside.
+- **One code change since 0.10.4:** dhancha's own CP437 table is gone, and its text path calls kashi's
+  `kashi_cp437_from_unicode`. That changes how U+2026, U+FFFD and U+2302 draw. puka draws no dhancha text
+  (the grid is a canvas widget), so this does not reach it, and it is where the size drop below comes
+  from. It also makes kashi 1.1.0 a floor.
+- **No call site changes.** The 16 `dh_*` functions and 3 constants puka names keep their signatures and
+  values.
+- **`dist/dhancha.deps` is gone, and that is right for dhancha.** Its consumers declare its five deps,
+  whose bundles carry the stdlib leaves, unlike a consumer of `dist/puka.cyr`, which declares only kashi.
+  puka declares its own leaves, and `lib/dhancha.cyr` is the only file in `lib/` that moved.
+- **`cyrius.lock` was deleted and regenerated** to drop the old tag's row.
+
+### Removed — the sadish, rupa and rekha overrides
+
+puka declared them from 0.6.26 only to keep them on its pin while dhancha was behind. They arrive
+through dhancha again, and the `app` feature names setu and dhancha.
+
+- **Measured, not assumed:** `lib/`, `cyrius.lock` and the Linux and agnos binaries are byte-identical
+  with and without the three declarations.
+- **The per-pin audit of `lib/dhancha.cyr` stops too.** dhancha now checks itself against each pin.
+  `docs/architecture/001-dependencies.md` keeps what to do if it falls behind again.
+
+### Sizes
+
+| build (bytes) | 0.7.1 | 0.7.2 | Δ |
+|---|---|---|---|
+| Linux, `CYRIUS_DCE=1` (CI / release) | 1,428,672 | 1,423,536 | −5,136 (−0.4%) |
+| Linux, plain | 1,940,672 | 1,935,536 | −5,136 (−0.3%) |
+| `--agnos` | 1,939,792 | 1,934,656 | −5,136 (−0.3%) |
+| `--agnos` tests | 745,864 | 744,824 | −1,040 (−0.1%) |
+| `--aarch64` | 2,137,152 | 2,136,120 | −1,032 (−0.05%) |
+
+### Verification
+
+- **CI, replayed:** every `run:` block of `ci.yml` executed as written, from a clean copy, on a fresh
+  toolchain install in a throwaway `HOME`, once for each listing order of the toolchain's `lib/`, with
+  all six dependencies resolved from GitHub.
+- **Behaviour:** the oracle gives 0 of 207 hashes changed on the plain and the `CYRIUS_DCE=1` build,
+  including the buffer out of dhancha's widget path. `cyrius test` output is identical, ignoring file
+  order.
+- **Mutants:** a plain `cyrius distlib` fails both bundle steps, and a wrong write length fails the lint
+  step.
+- **Tests:** 601 passed, 0 failed across 16 files, no SKIP.
+- **Fuzz:** `cyrius fuzz` 1,297 green, also under `--poison`.
+- **Builds:** Linux with and without DCE, `--agnos` entry and tests, `--aarch64`, and all 11 programs in
+  `programs/`, including both GPU probes. No diagnostics.
+- **Static checks:** `cyrius lint` 0 warnings across `src/`, `tests/` and `programs/`. `fmt --check` is
+  clean.
+- **Dependency checks:** `vet` reports 14 deps, 0 untrusted, 0 missing. `deps --verify` 40/0,
+  `deps --locked` clean, `distlib --check --no-default-features` current.
+- **Bench:** median of three interleaved runs, 0.7.1 then 0.7.2. `vt_feed` printable 10 → 10 ns, CSI SGR
+  122 → 124 ns, `term_feed` 192 → 195 ns, `grid_scroll_up` 10.75 → 10.79 µs, `fb_render` 1.87 → 1.82 ms.
+  All within noise.
+- ⚠ **`cyrius audit` still exits 1 on its docs step,** at the same inflated 428.
+- ⚠ **Not run:** the GPU probes, and anything on agnos or under a live compositor.
+
 ## [0.7.1] - 2026-11-06 — cyrius 6.7.18, and every dependency at its latest tag
 
 The toolchain moves nine releases, and each dependency moves to its latest tag. `src/` is unchanged, and
