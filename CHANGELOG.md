@@ -4,6 +4,129 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.26] - 2026-11-06 — cyrius 6.6.20, each dependency on its tag for that pin, and a true engine sidecar
+
+No change under `src/`. The toolchain moves 14 releases and the dependencies move to the tags pinned
+to it. Moving them made `cyrius distlib` delete `dist/puka.deps`, and fixing that changes how `dist/`
+is regenerated.
+
+### Changed — toolchain `6.6.6` → `6.6.20`
+
+cyrius's migration notes for 6.6.7–6.6.20 were checked item by item against puka.
+
+- **Redefined fns (6.6.20).** Every call now binds to a fn's last definition. The 31 fn names defined
+  more than once in `src/` are `#ifdef` arms, or backends and entry points no build includes together.
+  No build of `src/main.cyr`, `programs/` or `tests/` prints a `duplicate fn` warning.
+- **Other new refusals.** Nothing in puka uses the names reserved at 6.6.20, declares a `struct`
+  (6.6.16 copies large ones by value), or calls the f64 builtins of 6.6.13. Lint is clean and every
+  file is `fmt` clean under 6.6.20.
+- **`lib/` is re-vendored** from the 6.6.20 snapshot: 39 files. `lib/poison.cyr` is new, included by
+  `lib/alloc.cyr` only for poison builds.
+- **`cyrius test` reports 17 files, not 16.** Since 6.6.17 it also runs the `[build] test` entry,
+  `src/test.cyr`, which asserts nothing. The assertion count is still 601.
+- **`cyrius fuzz --poison` covers `alloc()` since 6.6.18** and could have gone red here. It stays
+  green. To prove the green means something, a scratch copy of the harness wrote one byte past a
+  16-byte `alloc`: the poison run failed with `redzone overwrite` and plain `cyrius fuzz` passed. The
+  roadmap item recording this is closed.
+
+### Changed — dependencies to their 6.6.20 tags
+
+| dep | 0.6.25 | 0.6.26 | that tag's cyrius pin |
+|---|---|---|---|
+| kashi | 1.0.10 | **1.1.1** | 6.6.20 |
+| setu | 0.8.11 | **0.8.14** | 6.6.20 |
+| dhancha | 0.10.4 | 0.10.4 | ⚠ 6.6.6 |
+| sadish | 0.11.2 | **0.11.3** | 6.6.20 |
+| rupa | 0.1.7 | **0.1.9** | 6.6.20 |
+| rekha | 0.9.0 | **1.0.0** | 6.6.20 |
+
+These are not the latest tags, which have moved to cyrius 6.7.x. They are the tags built for this pin.
+
+- ⚠ **dhancha has no tag on 6.6.20.** 0.10.4 stays, and it compiles on 6.6.20 unchanged.
+- **puka now declares sadish, rupa and rekha** only to override the tags dhancha declares (0.11.2,
+  0.1.7, 0.9.0), the way it already overrides dhancha's setu. It calls none of them. The three
+  declarations go once dhancha has a tag on puka's pin.
+- **No call site changes.** The 5 `setu_*` and 4 `kashi_*` functions puka calls keep their signatures,
+  and the `SETU_*` constants it reads are unchanged. The `dh_*` calls are against the same dhancha.
+- **The draw stack's code does not move.** Compared with comments stripped, rekha is identical, rupa
+  gains a requires block, and sadish gains a requires block and a version probe.
+- **kashi 1.1.1 is where the size goes.** Its glyph buffers reserved 8× the bytes they use, which cost
+  88,576 B in every binary. puka does not read past the buffers: it never calls `kashi_glyph_ptr`.
+- **setu 0.8.12 and 0.8.13 harden paths puka does not call directly:** a read deadline, and buffer files
+  opened with `O_NOFOLLOW` and refused unless regular. `setu_client_present` keeps its signature. ⚠ This
+  was not run against a live compositor.
+- **`cyrius.lock` was deleted and regenerated.** Since 6.6.20 a tag bump keeps the old tag's commit row
+  and fails closed, and deleting the lock is the documented way to drop those rows. It again pins all
+  six git dependencies by commit, one row each.
+
+### Fixed — the bump would have deleted `dist/puka.deps`
+
+With the new dependency tags, `cyrius distlib` printed `sidecar: removed dist/puka.deps (no stdlib
+leaves remain)` and wrote no requires block. That was false: the engine calls `alloc`, `strlen` and
+`file_write`, and a scratch consumer declaring only kashi failed with `undefined function 'alloc'`.
+
+- **Cause.** Since 6.6.18 a sidecar lists only what distlib's verify proves, and a leaf is recorded only
+  when a symbol comes up undefined. The verify compiles every named dep's modules alongside the bundle,
+  and the new setu, sadish and rupa bundles open with requires blocks that define what the engine calls.
+  Confirmed both ways in scratch copies: the old tags give 4 leaves, and so does a manifest with kashi
+  alone. cyrius 6.7.18 gives the same empty result.
+- **Fix.** setu, dhancha, sadish, rupa and rekha are now `optional` under an `app` feature that is on
+  by default, and `dist/` is regenerated with `cyrius distlib --no-default-features`. That says what
+  was already true: the engine needs kashi, and the rest is the app half.
+- **Builds are untouched.** With the feature split, `lib/` and `cyrius.lock` are unchanged, and the
+  Linux and agnos binaries are byte-identical to those built before it.
+- **`dist/puka.deps` goes from 16 leaves to 4:** `syscalls`, `alloc`, `string`, `io`. Most of the drop
+  is 6.6.18, which stopped copying `[deps] stdlib` into the sidecar. The bundle gains the matching
+  requires block, so `include "dist/puka.cyr"` compiles alone.
+- **Proved with a consumer.** A scratch project declaring `stdlib = []`, kashi and puka resolved those
+  leaves from the sidecar, built and ran on Linux, and built for agnos.
+- **CI gains a step,** `cyrius distlib --check --no-default-features`, because a plain `cyrius distlib`
+  would undo this silently. ⚠ A plain `--check` reads the bundle as stale, and that is expected. The
+  reasoning is in [`docs/architecture/001-dependencies.md`](docs/architecture/001-dependencies.md).
+- ⚠ **The underlying behaviour is cyrius's** and is not filed there yet. Any bundle with a named dep
+  that has a requires block can get a short sidecar the same way.
+
+### Fixed — docs
+
+- **The mabda note was out of date.** `docs/architecture/001-dependencies.md` said declaring mabda
+  fails `--agnos`. That stopped being true at mabda 4.1.5: at cyrius 6.6.20 with mabda 4.1.7 the build
+  links, at 3,247,144 B. mabda is still undeclared, because nothing built needs it. The note now
+  records this, and that `color_rgb` will collide with `src/terminal.cyr` when it is declared.
+- **The GPU probes compile against mabda 4.1.7 now,** the version the 6.6.20 toolchain ships.
+  `programs/gpu_probe.cyr`'s header says so. That comment is the only source edit in this release.
+
+### Sizes
+
+| build (bytes) | 0.6.25 on 6.6.6 | 0.6.26 on 6.6.20 | Δ |
+|---|---|---|---|
+| Linux, `CYRIUS_DCE=1` (CI / release) | 1,501,408 | 1,420,336 | −81,072 (−5.4%) |
+| Linux, plain | 1,964,256 | 1,920,048 | −44,208 (−2.3%) |
+| `--agnos` | 1,946,392 | 1,914,944 | −31,448 (−1.6%) |
+| `--agnos` tests | 752,456 | 721,016 | −31,440 (−4.2%) |
+| `--aarch64` | 2,353,248 | 2,071,464 | −281,784 (−12.0%) |
+
+The toolchain alone adds 51,032 B to `--agnos` and 1,392 B to the DCE build. The dependency move takes
+back 82,480 B and 82,464 B.
+
+### Verification
+
+- **CI, replayed step by step:** the new bundle step, lint, DCE build, ELF check, `--agnos` entry and
+  tests, and `cyrius test`.
+- **Tests:** 601 passed, 0 failed across 16 files, no SKIP.
+- **Fuzz:** `cyrius fuzz` 1,297 green, also under `--poison`.
+- **Builds:** Linux with and without DCE, `--agnos` entry and tests, `--aarch64`, and all 10 programs
+  in `programs/`, including both GPU probes. No undefined functions, no `duplicate fn` warnings.
+- **Static checks:** `cyrius lint` 0 warnings across `src/`, `tests/` and `programs/`. `fmt --check` is
+  clean, `dist/` included.
+- **Dependency checks:** `vet` reports 14 deps, 0 untrusted, 0 missing. `deps --verify` 39/0.
+  `distlib --check --no-default-features` reports current. `lib/` and `cyrius.lock` are byte-identical
+  to a `cyrius deps` run in a scratch copy with neither present.
+- **Bench:** median of three runs of each release on the same day, 0.6.25 then 0.6.26. `vt_feed`
+  printable 10 → 11 ns (its resolution is 1 ns), CSI SGR 130 → 125 ns, `term_feed` 198 → 197 ns,
+  `grid_scroll_up` 10.87 → 10.89 µs, `fb_render` 1.87 → 1.87 ms.
+- ⚠ **`cyrius audit` still exits 1 on its docs step,** with the same inflated 427 that 0.6.25 explains.
+- ⚠ **Not run:** the GPU probes, and anything on agnos or under a live compositor.
+
 ## [0.6.25] - 2026-09-27 — puka exits when its compositor dies, the GPU seam compiles again, three unused stdlib leaves go
 
 The three follow-ups 0.6.24 recorded and left alone, plus a per-frame leak that was sitting in the

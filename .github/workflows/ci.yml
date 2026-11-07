@@ -37,6 +37,11 @@ jobs:
         # cyrius.lock) — cyrius clones them, so no sibling checkout is needed in CI.
         run: cyrius deps
 
+      - name: Engine bundle is current
+        # Without --no-default-features the app deps' requires blocks hide the engine's stdlib leaves
+        # from distlib's verify, and it writes a false empty sidecar. See docs/architecture/001-dependencies.md.
+        run: cyrius distlib --check --no-default-features
+
       - name: Lint (hard gate — any warning fails)
         run: |
           fail=0

@@ -16,23 +16,28 @@ compile, and CI's `--agnos` and test builds run without it, so they carry every 
 
 ## mabda is not declared
 
-`dist/mabda.cyr` issues `syscall(SYS_IOCTL, …)` for its DRM path, and the agnos syscall peer has no
-`SYS_IOCTL` (`lib/syscalls_x86_64_agnos.cyr` has none; the Linux peer has `SYS_IOCTL = 16`).
-Declaring mabda fails the `--agnos` build with `undefined variable 'SYS_IOCTL'` before a line of
-puka compiles. The stdlib's `sys_ioctl` wrapper (cyrius 6.5.36) covers the ELF and Mach-O peers
-only and does not change this.
-
 Nothing that is built needs it: the one consumer, `src/platform/gpu/gpu.cyr` (the `pgpu_*` seam), is
 not included by any entry point. The two GPU probes (`programs/gpu_probe.cyr`,
 `programs/gpu_win_probe.cyr`) include `lib/mabda.cyr` themselves, along with `lib/sakshi.cyr` and
 `lib/mmap.cyr`, which mabda calls and puka does not declare. See the next section for where those
 includes resolve.
 
-Declare it again when an entry point includes the GPU seam: on a current tag, consuming only
-mabda's `@public` `gpu_*` API, and only once `--agnos` stays green with it declared (an agnos
-`SYS_IOCTL`, or a way to keep the bundle out of the agnos build). mabda's `dist/mabda.deps` then
-decides which stdlib leaves come back into `[deps] stdlib`; at 4.1.4 it lists `mmap`, `dynlib`,
-`sakshi`, `thread`, `thread_local` and `sankoch` beyond puka's own set.
+Declaring it would cost every build. Measured at cyrius 6.6.20 with mabda 4.1.7 declared, the
+`--agnos` binary goes from 1,914,944 B to 3,247,144 B.
+
+The agnos build no longer blocks it. Through mabda 4.1.4 the bundle issued `syscall(SYS_IOCTL, …)`
+directly and the agnos syscall peer has no `SYS_IOCTL`, so declaring mabda failed `--agnos` with
+`undefined variable 'SYS_IOCTL'`. Since 4.1.5 those calls go through `_mabda_ioctl`, whose agnos arm
+returns -ENOSYS, and that build links. ⚠ The GPU path fails closed on agnos; it does not work there.
+
+Declare it again when an entry point includes the GPU seam, on a current tag, consuming only mabda's
+`@public` `gpu_*` API. Two things to settle at that point:
+
+- **`color_rgb` collides.** `src/terminal.cyr` and mabda both define it, with different bodies. From
+  cyrius 6.6.20 every call binds to the last definition, so include order decides which one the
+  terminal gets, and the build only warns (`duplicate fn`). No program includes both today.
+- **Stdlib leaves.** mabda's `dist/mabda.deps` decides which ones come back into `[deps] stdlib`; at
+  4.1.7 it lists `mmap` and `sakshi` beyond puka's own set.
 
 ## An undeclared `lib/` include resolves from the toolchain
 
@@ -40,8 +45,8 @@ When `include "lib/X.cyr"` finds no `lib/X.cyr` in the project, cycc opens
 `~/.cyrius/versions/<its own version>/lib/X.cyr` instead (the fallback in cyrius
 `src/frontend/lex.cyr`). A program can therefore reach a stdlib module, or a bundle the toolchain
 ships, that the manifest never declares. It gets it at the toolchain's version, not at a tag puka
-chose, and without a `cyrius.lock` hash. The GPU probes rely on this for mabda (4.1.4 at cyrius
-6.6.6), sakshi and mmap. It is acceptable for developer probes that CI does not build; anything an
+chose, and without a `cyrius.lock` hash. The GPU probes rely on this for mabda (4.1.7 at cyrius
+6.6.20), sakshi and mmap. It is acceptable for developer probes that CI does not build; anything an
 entry point includes should be declared instead.
 
 ## Toolchain floor: cyrius 6.5.8
@@ -65,17 +70,42 @@ if the pin is ever lowered.
   as a canvas widget, drawn by `dh_draw_widget`.
 
 Because puka calls setu directly it declares setu itself, and puka's `[deps.setu]` tag is the one
-that resolves: it overrides the setu tag dhancha declares. sadish, rupa and rekha are not declared
-by puka; they arrive through dhancha at the tags dhancha declares, and puka calls none of them.
+that resolves: it overrides the setu tag dhancha declares. kashi works the same way.
+
+puka calls none of sadish, rupa and rekha. It declares them only to override dhancha's tags: dhancha
+0.10.4 is still pinned to cyrius 6.6.6, and each of the three has a tag on puka's pin. Their moves
+carry no API change, so this is about staying on the pin, not about anything puka's code needs.
+sadish 0.11.3 differs from the 0.11.2 that rekha 1.0.0 was cut against only in its requires block and
+version probe. Drop the three declarations once dhancha has a tag on puka's pin, and they arrive
+through dhancha again.
 
 ## `dist/puka.cyr` needs kashi
 
 The `[lib]` bundle is the engine only (parser, grid, unicode, terminal, pixfmt, atlas, fb), with
 no PTY, window or app code. `fb.cyr` and `atlas.cyr` read kashi's glyph tables and the bundle does
 not carry them, so a program that consumes `dist/puka.cyr` must also declare `[deps.kashi]`; the
-core module is enough. `dist/puka.deps` lists the stdlib leaves the bundle needs. The `[lib]`
-module list follows `src/main.cyr`'s include order because `cyrius distlib` concatenates in list
-order.
+core module is enough. `dist/puka.deps` lists the stdlib leaves the bundle needs, and the bundle's
+requires block includes them. The `[lib]` module list follows `src/main.cyr`'s include order because
+`cyrius distlib` concatenates in list order.
+
+### Regenerate it with `cyrius distlib --no-default-features`
+
+A plain `cyrius distlib` writes a false result: it deletes `dist/puka.deps` and leaves out the
+requires block, so a consumer that declares only kashi fails with `undefined function 'alloc'`.
+
+Since cyrius 6.6.18 a sidecar is what distlib's verify can prove. It compiles the leaves found so far,
+every named dep's modules and the bundle, and records a leaf only when a symbol comes up undefined.
+The bundles of setu 0.8.14, sadish 0.11.3 and rupa 0.1.9 open with requires blocks of their own, which
+define everything the engine calls, so nothing comes up undefined and nothing is recorded.
+
+Those deps belong to the app half, so they are `optional` under the `app` feature, which is on by
+default. Every build resolves them exactly as before; the feature split left `lib/`, `cyrius.lock`
+and both binaries byte-identical. `--no-default-features` leaves the verify with kashi alone, which is
+the engine's real dependency set, and it proves `syscalls`, `alloc`, `string` and `io`.
+
+CI runs `cyrius distlib --check --no-default-features`, so a plain regeneration fails there rather
+than shipping. A plain `--check` reads the bundle as stale, and that is expected. cyrius 6.7.18 hides
+the leaves the same way (checked 2026-11-06), so this stays until cyrius changes the verify.
 
 ## kashi is consumed as its freestanding core
 

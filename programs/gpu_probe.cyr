@@ -5,8 +5,8 @@
 # HW-verified template), but built from PUKA's tree. mabda is NOT a declared
 # dependency (docs/architecture/001-dependencies.md): `include "lib/mabda.cyr"`
 # finds no project copy and falls back to the pinned toolchain's own stdlib
-# snapshot, so the mabda this compiles against moves with the cyrius pin (4.1.4
-# at cyrius 6.6.6; the bite-7 run was 3.2.11). It clears an offscreen 256x256 RGBA8 render
+# snapshot, so the mabda this compiles against moves with the cyrius pin (4.1.7
+# at cyrius 6.6.20; the bite-7 run was 3.2.11). It clears an offscreen 256x256 RGBA8 render
 # target to red via the fullscreen-triangle VS + solid-red FS, then reads
 # pixel(0,0) back through the GTT mapping and checks it is (FF,00,00,FF).
 #

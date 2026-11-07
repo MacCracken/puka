@@ -5,10 +5,17 @@
 
 ## Version
 
-**0.6.25** (2026-09-27) — see [`../../CHANGELOG.md`](../../CHANGELOG.md). Release narrative belongs
+**0.6.26** (2026-11-06) — see [`../../CHANGELOG.md`](../../CHANGELOG.md). Release narrative belongs
 there, not here.
 
-0.6.25 made three changes and fixed one leak.
+0.6.26 is the cyrius 6.6.20 and dependency release, with no change under `src/`.
+
+- **Toolchain:** cyrius 6.6.6 → 6.6.20.
+- **Dependencies:** each on its tag pinned to 6.6.20, except dhancha, which has no such tag.
+- **Engine bundle:** `dist/` now regenerates with `cyrius distlib --no-default-features`. A plain run
+  writes a false empty sidecar. `dist/puka.deps` goes from 16 leaves to 4.
+
+0.6.25 before it made three changes and fixed one leak.
 
 - **Compositor loss:** puka exits when the setu compositor goes away (setu's -6 maps to
   `WIN_EV_CLOSE`).
@@ -29,7 +36,7 @@ an out-of-bounds read and an information disclosure). Two P(-1) gates — `cyriu
 `cyrius bench` — were passing over **empty harnesses** and now measure something.
 
 ⛔ **SCOPE, STATED SO IT IS NOT MISREAD.** **Version**, **Toolchain**, **Dependencies** and **Tests**
-were re-derived from the tree on 2026-09-27. The **Source**, **Carry-forward**, **Dep gaps**,
+were re-derived from the tree on 2026-11-06. The **Source**, **Carry-forward**, **Dep gaps**,
 **Consumers** and **Next** sections below still carry the staleness they had at 0.6.7 (they describe
 the tree as of 2026-08-02) and were **not** re-verified — the audit read the code, not these
 paragraphs. Trust them at that date, not this one.
@@ -38,9 +45,9 @@ Since 0.6.7, in brief (the CHANGELOG is authoritative): the **setu/dhancha windo
 (`win_*` over dhancha's client layer, `src/ui.cyr`), **`dist/puka.cyr` as an embeddable engine**
 (0.6.17, `[lib] modules`), the **line discipline** (`src/line_discipline.cyr`), fullscreen/terminal
 repairs, the documented **agnos kernel floor 1.56.46** (0.6.20), a **whole-stack dependency refresh**
-(0.6.21 — cyrius 6.5.36, dhancha 0.9.26, setu 0.8.8), the **first hardening audit** (0.6.22), and two
-toolchain releases (0.6.23 — cyrius 6.6.2; 0.6.24 — cyrius 6.6.6 plus every dependency at its latest
-tag).
+(0.6.21 — cyrius 6.5.36, dhancha 0.9.26, setu 0.8.8), the **first hardening audit** (0.6.22), and
+three toolchain releases (0.6.23 — cyrius 6.6.2; 0.6.24 — cyrius 6.6.6 plus every dependency at its
+latest tag; 0.6.26 — cyrius 6.6.20 plus each dependency's tag on that pin).
 
 ⛔ **The setu TCP transport is RETIRED (2026-08-03) and puka has NO standing agnos desktop claim on the
 replacement.** It is retired as the WRONG PRIMITIVE for a local display protocol — nothing to route,
@@ -64,20 +71,21 @@ transport. What is retracted is the pre-`net_src_for` rigged-smoke lineage, not 
 
 ## Toolchain
 
-- **Cyrius pin**: `6.6.6` (in `cyrius.cyml [package].cyrius`), the same pin dhancha 0.10.4 and setu
-  0.8.11 carry. Floor: 6.5.8, for the agnos channel band (see the architecture note).
+- **Cyrius pin**: `6.6.20` (in `cyrius.cyml [package].cyrius`), the same pin kashi 1.1.1, setu
+  0.8.14, sadish 0.11.3, rupa 0.1.9 and rekha 1.0.0 carry. dhancha 0.10.4 is still on 6.6.6. Floor:
+  6.5.8, for the agnos channel band (see the architecture note).
 - The `cyrius` wrapper re-executes the pinned toolchain when `~/.cyrius/versions/<pin>` is installed
   (observed 2026-09-27: with 6.6.6 current, a 6.6.2 pin ran 6.6.2's `cycc`).
 - ⚠ **`cyrius update` ignores `--help` at 6.6.6 and runs.** It copies the whole stdlib snapshot (111
   files) into `lib/`. Under 6.6.2, `cyrius build --help` and `cyrius test --help` also resolved deps
   before rejecting the flag; 6.6.6 prints their help.
-- ⛔ **`[deps.mabda]` is NOT DECLARED.** Declaring it fails the whole `--agnos` target, because the
-  agnos syscall peer still has no `SYS_IOCTL` (re-checked at 6.6.6; mabda 4.1.4's bundle names it 49
-  times). Reasoning and restore conditions:
-  [`../architecture/001-dependencies.md`](../architecture/001-dependencies.md).
+- **`[deps.mabda]` is not declared**, because nothing built needs it. `--agnos` no longer blocks it:
+  the agnos peer still has no `SYS_IOCTL`, but since mabda 4.1.5 that call sits behind a wrapper that
+  fails closed, and the build links (measured at 6.6.20 with mabda 4.1.7, at 3,247,144 B). Reasoning
+  and restore conditions: [`../architecture/001-dependencies.md`](../architecture/001-dependencies.md).
 - **`src/platform/gpu/gpu.cyr` is ported to cyrius 6.6's value-form `Result`** (0.6.25). It and both
   GPU probes build again; they failed at 0.6.23 and 0.6.24. ⚠ Build-verified only: neither probe has
-  been run on the GPU since the port. They compile against the mabda 4.1.4 the 6.6.6 toolchain
+  been run on the GPU since the port. They compile against the mabda 4.1.7 the 6.6.20 toolchain
   ships, not the 3.2.11 bite 7 was verified with.
 - ⚠ **Kernel floor `agnos >= 1.56.46`** (0.6.20). Below it the terminal opens and every *builtin*
   renders while **every program the shell launches is silent** — a kernel `chan_auth` defect, not a
@@ -115,9 +123,10 @@ marked at every write chokepoint and consumed by the renderer
 ## Tests
 
 **601 assertions, all green** (`cyrius test`), across 16 `.tcyr` files (0.6.25: 589 + the 12 in
-`window_setu.tcyr`). Re-counted 2026-09-27. At 0.6.24 this block corrected an earlier claim of 604
-across 17: the 604 summed the runner's closing `N passed, 0 failed` line, which counts files, into
-the assertions.
+`window_setu.tcyr`). Re-counted 2026-11-06. The runner's closing line reads `17 passed`: it counts
+files, and since cyrius 6.6.17 it also runs the `[build] test` entry, `src/test.cyr`, which asserts
+nothing. At 0.6.24 this block corrected an earlier claim of 604 across 17: the 604 summed that closing
+line into the assertions.
 
 - Engine core: `parser.tcyr` (70), `grid.tcyr` (102 — resize, per-row damage, multi-word bitset rows
   ≥ 64, scrollback ring/viewport, **and the 0.6.22 row/viewport bounds guards**), `unicode.tcyr` (43
@@ -137,13 +146,15 @@ the assertions.
 - **`tests/puka.fcyr` — the fuzz harness, real since 0.6.22.** Drives `term_feed` (the whole
   untrusted path) with ~820,000 adversarial bytes: 16 targeted sequences plus 400 rounds of
   fixed-seed pseudo-random and escape-biased noise, asserting grid invariants after each.
-  **1,297 assertions**, green under `cyrius fuzz` and `cyrius fuzz --poison`. ⛔ It was a stub that
-  fuzzed nothing until this release.
+  **1,297 assertions**, green under `cyrius fuzz` and `cyrius fuzz --poison`. Since cyrius 6.6.18
+  `--poison` covers `alloc()`: a one-byte overwrite added to the harness fails it, and plain
+  `cyrius fuzz` does not catch that overwrite (checked 2026-11-06). ⛔ It was a stub that fuzzed
+  nothing until 0.6.22.
 - **`tests/puka.bcyr` — five hot-path baselines, real since 0.6.22** (it timed an empty function
-  before). Median of three runs on 2026-09-27 (0.6.24, cyrius 6.6.6): `vt_feed` printable 10 ns ·
-  `vt_feed` CSI SGR 121 ns · `term_feed` full pipeline 193 ns · `grid_scroll_up` 10.43 µs ·
-  `fb_render` 80×24 all-dirty 1.82 ms. A same-day rebuild of 0.6.23 on 6.6.2 lands within noise of
-  every figure. ⚠ Baselines, not thresholds — nothing fails on a regression yet.
+  before). Median of three runs on 2026-11-06 (0.6.26, cyrius 6.6.20): `vt_feed` printable 11 ns ·
+  `vt_feed` CSI SGR 125 ns · `term_feed` full pipeline 197 ns · `grid_scroll_up` 10.89 µs ·
+  `fb_render` 80×24 all-dirty 1.87 ms. A same-day rebuild of 0.6.25 on 6.6.6 gives 10 ns, 130 ns,
+  198 ns, 10.87 µs and 1.87 ms. ⚠ Baselines, not thresholds — nothing fails on a regression yet.
 - ⛔ **The Wayland subsystem still has no headless tests**, and that is now the most conspicuous gap:
   the 0.6.22 wire-validation fixes (A-03/A-04) are the repairs that most deserve coverage and are
   verified by reading only. `wire.cyr` is pure and the byte-vector tests are already scoped.
@@ -160,36 +171,48 @@ Declared in `cyrius.cyml` and resolved from their git tags; `cyrius.lock` pins e
 Why each is declared the way it is, and why mabda is not:
 [`../architecture/001-dependencies.md`](../architecture/001-dependencies.md).
 
-| dep | pin (0.6.24) | modules | note |
+| dep | pin (0.6.26) | modules | note |
 |---|---|---|---|
-| **kashi** | `1.0.10` | `src/font_data.cyr` | the **freestanding** core only, the same core the agnos kernel and dhancha consume. Built-in CP437 VGA 8×16 / CGA 8×8 / VGA 9×16. [ADR 0004](../adr/0004-kashi-freestanding-core-over-library-face.md). |
-| **setu** | `0.8.11` | `dist/setu.cyr` | the AGNOS display protocol + reference client. `present` / `poll_input` go here directly. puka's pin overrides the 0.8.9 dhancha declares. |
-| **dhancha** | `0.10.4` | `dist/dhancha.cyr` | the widget toolkit. CONNECT / FD / CLOSE route through it; `src/ui.cyr` builds the canvas widget. |
-| **sadish** | `0.11.2` | *(transitive, via dhancha)* | software rasteriser. |
-| **rupa** | `0.1.7` | *(transitive, via dhancha)* | theme/design tokens. dhancha's pin; 0.1.8 exists and arrives when dhancha moves. |
-| **rekha** | `0.9.0` | *(transitive, via dhancha)* | vector glyph path. |
+| **kashi** | `1.1.1` | `src/font_data.cyr` | the **freestanding** core only, the same core the agnos kernel and dhancha consume. Built-in CP437 VGA 8×16 / CGA 8×8 / VGA 9×16. [ADR 0004](../adr/0004-kashi-freestanding-core-over-library-face.md). |
+| **setu** | `0.8.14` | `dist/setu.cyr` | the AGNOS display protocol + reference client. `present` / `poll_input` go here directly. puka's pin overrides the 0.8.9 dhancha declares. |
+| **dhancha** | `0.10.4` | `dist/dhancha.cyr` | the widget toolkit. CONNECT / FD / CLOSE route through it; `src/ui.cyr` builds the canvas widget. ⚠ Still pinned to cyrius 6.6.6: it has no tag on 6.6.20. |
+| **sadish** | `0.11.3` | `dist/sadish.cyr` | software rasteriser. puka calls none of it and declares it to override dhancha's 0.11.2. |
+| **rupa** | `0.1.9` | `dist/rupa.cyr` | theme/design tokens. puka calls none of it and declares it to override dhancha's 0.1.7. |
+| **rekha** | `1.0.0` | `dist/rekha.cyr` | vector glyph path. puka calls none of it and declares it to override dhancha's 0.9.0. |
 
-- Every tag above is the latest published tag as of 2026-09-27, except rupa, which follows dhancha.
+- Every tag above except dhancha's is that dep's tag pinned to cyrius 6.6.20, checked 2026-11-06. None
+  of them is the latest: kashi, setu, sadish, rupa and rekha have since moved to cyrius 6.7.x.
+- **The app half is optional.** setu, dhancha, sadish, rupa and rekha sit under the default-on `app`
+  feature, so every build resolves them. `--no-default-features` exists for `cyrius distlib` alone:
+  [`../architecture/001-dependencies.md`](../architecture/001-dependencies.md) says why.
+- ⚠ **A tag bump leaves the old tag's row in `cyrius.lock`.** Since cyrius 6.6.20 that row stays and
+  fails closed. To drop it, delete `cyrius.lock` and run `cyrius deps`, which re-pins every dep.
 - stdlib: string, fmt, alloc, io, vec, str, syscalls, assert, bench, args, hashmap, tagged, fnptr,
   result, net, chrono. `mmap`, `dynlib` and `sakshi` were removed at 0.6.25. They had been declared
-  for mabda's bundle and nothing in puka referenced them. `dist/puka.deps` now lists 16 leaves (was
-  19). The two GPU probes include `lib/sakshi.cyr` and `lib/mmap.cyr` themselves, because mabda needs
-  them.
+  for mabda's bundle and nothing in puka referenced them. `dist/puka.deps` lists 4 leaves: `syscalls`,
+  `alloc`, `string`, `io` (16 at 0.6.25, when the list was seeded from `[deps] stdlib`). The two GPU
+  probes include `lib/sakshi.cyr` and `lib/mmap.cyr` themselves, because mabda needs them.
 - ⚠ **The `path` lines are commented out**, so `cyrius deps` resolves the tags. Uncomment one only to
   build against an unpushed sibling. At 0.6.23 live `path` lines had vendored dhancha 0.9.29 / setu
   0.8.9 / kashi 1.0.10 while the manifest named 0.9.26 / 0.8.8 / 1.0.6 and CI built the tags.
 - **setu 0.8.11's -6 from `setu_client_poll_input` (the compositor gone) is consumed since 0.6.25.**
   `win_poll_events` maps it to `WIN_EV_CLOSE`, so puka exits instead of polling a dead socket.
 - The draw stack dhancha pulls in grew at 0.6.24 (`lib/sadish.cyr` 75 KB → 472 KB, `lib/rekha.cyr`
-  39 KB → 551 KB). DCE removes most of it. The `--agnos` build is not DCE'd: 1,946,392 B at 0.6.25,
-  +14.7% over 0.6.23 even after the stdlib prune took back 109 KB.
+  39 KB → 551 KB). DCE removes most of it. The `--agnos` build is not DCE'd: 1,914,944 B at 0.6.26,
+  +12.9% over 0.6.23.
 
 Planned (own-the-stack, not yet wired): `rekha`+`sadish` **directly** (vector glyphs, post-v1.0 — they
-are on disk today only as dhancha's transitives), `sakshi` (logging — declared again when puka logs
+are declared today only to override dhancha's tags), `sakshi` (logging — declared again when puka logs
 through it). kashi's PSF/BDF/PCF library face is available but not pulled in (ADR 0004).
 
 ## Dep gaps / blockers
 
+- **dhancha has no tag on cyrius 6.6.20** *(2026-11-06)* — 0.10.4 stays on 6.6.6 and compiles unchanged
+  on puka's pin. puka overrides its sadish, rupa and rekha tags until it moves; then those three
+  declarations go.
+- **`cyrius distlib` hides a bundle's stdlib leaves behind a named dep's requires block** *(found
+  2026-11-06, cyrius 6.6.20, still so at 6.7.18)* — worked around with `--no-default-features`, and not
+  filed in cyrius yet.
 - **mabda native RT `va_map` 64 KiB-align bug** *(found 2026-06-19)* — `native_rt_create_2d_rgba8`'s `va_map` returns `EINVAL` unless the BO byte-size is 64 KiB-aligned (256²/512²/1024²/2048² pass; `1260×682×4` = 3360 KiB does not — the GTT BO alloc itself is fine, only the VA map fails). Worked around in `pgpu_target` (pad the alloc to a 256-px multiple per axis, read back the visible sub-rect). The clean fix is mabda-side: round the GTT/`va_map` size up to 64 KiB. Reported to the maintainer.
 - **mabda no instanced-vertex path** *(recon 2026-06-19)* — and none is roadmapped (3.2.x closes at 3.2.13; 3.3 = asset-loading). So bite 8 renders the grid via a **single full-screen pass** (texture sampling shipped 3.2.2–3.2.3 + the SPIR-V→GFX9 compiler is complete at 3.2.11, both HW-verified on Cezanne) reading the grid as a storage buffer + the kashi atlas as a texture — NOT instanced quads.
 - **mabda dmabuf-export** — mabda has the PRIME `HANDLE_TO_FD` ioctl internally but no public accessor to hand a Wayland client a dmabuf fd (+ fourcc/stride/modifier). Zero-copy GPU present (bite 9 / cut #3) needs a `gpu_render_target_export_dmabuf` in mabda (Phase D, unscheduled). The `wl_shm` GPU→CPU readback memcpy (cut #2, **shipped in bite 7**) needs no mabda change. mabda's native backend is **AMD-GFX9-only** (verified on this Cezanne box) — non-AMD sessions use the `wl_shm` CPU fallback.

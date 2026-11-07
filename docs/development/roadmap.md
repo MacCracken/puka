@@ -221,13 +221,3 @@ engine + the `aethersafha` windowing crate. Name/scaffold TBD when puka v1.0 lan
 - puka does not declare mabda (`docs/architecture/001-dependencies.md`): it reaches `lib/mabda.cyr` from
   the toolchain, so "resolves mabda >= 4.2.0" means the pinned toolchain's `lib/mabda.cyr` header reads
   `# Version: 4.2.0` or later (cyrius 6.7.6's tree still folds 4.1.7 as of this note).
-
-## Moved from cyrius's roadmap (2026-10-08) — for the next cyrius pin move
-
-cyrius no longer carries this repo's follow-ups; the items below were moved here from its roadmap. Each
-applies from the cyrius version it names. Everything else that changes between this repo's pin and cyrius
-6.7.6 is in cyrius's `CHANGELOG.md` and `docs/development/ecosystem-migration.md`.
-
-- **(cyrius ≥ 6.6.18)** `cyrius fuzz --poison` now covers `alloc()` (and arenas, `fl_alloc`, any `_a` API), and an
-  overwrite stops the harness with exit 86 — a poison run checks something real, and can go red where it passed
-  before.

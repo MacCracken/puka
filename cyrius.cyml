@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "puka — sovereign Cyrius-native terminal emulator (Ghostty-class: VT/escape parser, cell grid, scrollback, font raster). Hawaiian: opening/doorway into the machine. Foundation for a future worktree coding-agent command center."
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.6.6"
+cyrius = "6.6.20"
 
 [build]
 entry = "src/main.cyr"
@@ -28,21 +28,53 @@ modules = [
 [deps]
 stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "args", "hashmap", "tagged", "fnptr", "result", "net", "chrono"]
 
+# The engine bundle needs kashi and nothing else; the rest is the app half. `app` is on by default, so
+# every build resolves everything. Regenerate dist/ with `cyrius distlib --no-default-features`: see
+# "`dist/puka.cyr` needs kashi" in docs/architecture/001-dependencies.md for what a plain run breaks.
+[features]
+default = ["app"]
+app = ["setu", "dhancha", "sadish", "rupa", "rekha"]
+
 [deps.kashi]
 git = "https://github.com/MacCracken/kashi.git"
 # path = "../kashi"
-tag = "1.0.10"
+tag = "1.1.1"
 # The freestanding core, not the library face: docs/adr/0004-kashi-freestanding-core-over-library-face.md
 modules = ["src/font_data.cyr"]
 
 [deps.setu]
+optional = true
 git = "https://github.com/MacCracken/setu.git"
 # path = "../setu"
-tag = "0.8.11"
+tag = "0.8.14"
 modules = ["dist/setu.cyr"]
 
 [deps.dhancha]
+optional = true
 git = "https://github.com/MacCracken/dhancha.git"
 # path = "../dhancha"
 tag = "0.10.4"
 modules = ["dist/dhancha.cyr"]
+
+# puka calls none of the next three. dhancha 0.10.4 declares them, and puka's tags override its tags:
+# dhancha has no tag on cyrius 6.6.20, and each of these does. Drop all three when dhancha catches up.
+[deps.sadish]
+optional = true
+git = "https://github.com/MacCracken/sadish.git"
+# path = "../sadish"
+tag = "0.11.3"
+modules = ["dist/sadish.cyr"]
+
+[deps.rupa]
+optional = true
+git = "https://github.com/MacCracken/rupa.git"
+# path = "../rupa"
+tag = "0.1.9"
+modules = ["dist/rupa.cyr"]
+
+[deps.rekha]
+optional = true
+git = "https://github.com/MacCracken/rekha.git"
+# path = "../rekha"
+tag = "1.0.0"
+modules = ["dist/rekha.cyr"]
