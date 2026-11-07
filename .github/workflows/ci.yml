@@ -37,11 +37,16 @@ jobs:
         # cyrius.lock) — cyrius clones them, so no sibling checkout is needed in CI.
         run: cyrius deps
 
+      - name: Engine bundle is current
+        # --no-default-features keeps the app deps out of distlib's verify: their requires blocks would
+        # hide the engine's leaves and it would write a false empty sidecar. Needs cyrius >= 6.7.7, whose
+        # result does not depend on the filesystem. See docs/architecture/001-dependencies.md.
+        run: cyrius distlib --check --no-default-features
+
       - name: Engine bundle stands alone
         # A consumer of dist/puka.cyr declares kashi and gets its stdlib leaves from the bundle's requires
         # block. --no-deps IS the gate: without it the manifest's leaves are prepended and hide a missing
-        # block. Not `distlib --check`: before cyrius 6.7.7 which leaves it writes follows the filesystem's
-        # listing order, so a runner and a dev box disagree. See docs/architecture/001-dependencies.md.
+        # block.
         run: |
           mkdir -p build
           cyrius build --no-deps programs/engine_reach.cyr build/engine_reach

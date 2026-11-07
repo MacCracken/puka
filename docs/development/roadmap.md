@@ -171,6 +171,8 @@ around the core. Built bite-by-bite, each verified live on Hyprland.
 
 ### M7 — Conformance + polish (0.7.0 → 0.9.0)
 
+0.7.0 itself is the move to the cyrius 6.7 language line, and none of the items below has started.
+
 - Full vttest / `ctlseqs` conformance: origin mode, charset switching (DEC special graphics / `ESC ( B`), mouse tracking (SGR), DA/DSR query responses, bracketed-paste edge cases, grapheme clustering, selection/clipboard (`wl_data_device`). *(Alternate screen — DEC 1049 — shipped in 0.6.2; scrollback in 0.6.3.)*
 - Fuzz both the VT parser AND the **Wayland wire parser** (a second untrusted-input boundary — compositor messages) against malformed input.
 
@@ -208,23 +210,3 @@ engine + the `aethersafha` windowing crate. Name/scaffold TBD when puka v1.0 lan
 - **Sixel / Kitty / iTerm2 image protocols** — post-v1.0 (the `kii` image-to-ANSI path is adjacent but separate).
 - **Ligatures / complex text shaping** — needs `rekha` vector fonts; post-v1.0.
 - **Tabs / splits / config UI inside puka** — terminal-multiplexer concerns belong to the command center, not the emulator.
-
-## Recorded by cyrius 6.7.6 (2026-10-08) — for the next cyrius pin move
-
-⛔ Needs cyrius >= 6.7.6 — nothing to do until cyrius 6.7.6 is tagged; then at your pin bump:
-
-- **`color_init()` in the GPU seam can go once puka resolves mabda >= 4.2.0.**
-  `src/platform/gpu/gpu.cyr:35-37` — the "⚠ mabda's F64_* colour constants are 0 until `color_init` runs"
-  comment and the `color_init();` call in `pgpu_init` — exist because the 11 `F64_*` colour constants were
-  `var`s set at run time. In mabda 4.2.0 they are f64 `const`s (bit-identical values) and `color_init()` is a
-  no-op kept for compatibility, so the call is harmless but dead.
-- puka does not declare mabda (`docs/architecture/001-dependencies.md`): it reaches `lib/mabda.cyr` from
-  the toolchain, so "resolves mabda >= 4.2.0" means the pinned toolchain's `lib/mabda.cyr` header reads
-  `# Version: 4.2.0` or later (cyrius 6.7.6's tree still folds 4.1.7 as of this note).
-
-## Found at 0.6.26 — for the next cyrius pin move
-
-- **(cyrius ≥ 6.7.7)** `cyrius distlib` stops depending on the filesystem's listing order. Add
-  `cyrius distlib --check --no-default-features` to CI then, beside the `engine_reach` build: nothing
-  gates `dist/puka.cyr` against `src/` until it is there. `docs/architecture/001-dependencies.md` has
-  the reason.

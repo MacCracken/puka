@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "puka — sovereign Cyrius-native terminal emulator (Ghostty-class: VT/escape parser, cell grid, scrollback, font raster). Hawaiian: opening/doorway into the machine. Foundation for a future worktree coding-agent command center."
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.6.20"
+cyrius = "6.7.9"
 
 [build]
 entry = "src/main.cyr"
@@ -24,7 +24,7 @@ modules = [
 ]
 
 # Why each dependency is declared the way it is, and why mabda is not: docs/architecture/001-dependencies.md
-# `path` lines stay commented in a commit; uncomment one only to build against an unpushed sibling.
+# `path` is a dev override: uncomment one and build with CYRIUS_LOCAL=<name> to use an unpushed sibling.
 [deps]
 stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "args", "hashmap", "tagged", "fnptr", "result", "net", "chrono"]
 
@@ -38,7 +38,7 @@ app = ["setu", "dhancha", "sadish", "rupa", "rekha"]
 [deps.kashi]
 git = "https://github.com/MacCracken/kashi.git"
 # path = "../kashi"
-tag = "1.1.1"
+tag = "1.2.0"
 # The freestanding core, not the library face: docs/adr/0004-kashi-freestanding-core-over-library-face.md
 modules = ["src/font_data.cyr"]
 
@@ -46,7 +46,7 @@ modules = ["src/font_data.cyr"]
 optional = true
 git = "https://github.com/MacCracken/setu.git"
 # path = "../setu"
-tag = "0.8.14"
+tag = "0.9.0"
 modules = ["dist/setu.cyr"]
 
 [deps.dhancha]
@@ -57,24 +57,24 @@ tag = "0.10.4"
 modules = ["dist/dhancha.cyr"]
 
 # puka calls none of the next three. dhancha 0.10.4 declares them, and puka's tags override its tags:
-# dhancha has no tag on cyrius 6.6.20, and each of these does. Drop all three when dhancha catches up.
+# dhancha has no tag on puka's cyrius pin, and each of these does. Drop all three when dhancha catches up.
 [deps.sadish]
 optional = true
 git = "https://github.com/MacCracken/sadish.git"
 # path = "../sadish"
-tag = "0.11.3"
+tag = "0.12.0"
 modules = ["dist/sadish.cyr"]
 
 [deps.rupa]
 optional = true
 git = "https://github.com/MacCracken/rupa.git"
 # path = "../rupa"
-tag = "0.1.9"
+tag = "0.2.0"
 modules = ["dist/rupa.cyr"]
 
 [deps.rekha]
 optional = true
 git = "https://github.com/MacCracken/rekha.git"
 # path = "../rekha"
-tag = "1.0.0"
+tag = "1.1.0"
 modules = ["dist/rekha.cyr"]

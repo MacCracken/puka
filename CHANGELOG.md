@@ -4,6 +4,107 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-06 — cyrius 6.7.9, the language minor, and behaviour does not move
+
+The pin moves onto cyrius's 6.7 line, where the language can change what code means without failing the
+build. That is why this is a minor, as it was for sadish 0.12.0, rekha 1.1.0 and rupa 0.2.0. It is a
+toolchain release: none of M7's items has started. The one change under `src/` removes a dead call.
+
+### Changed — toolchain `6.6.20` → `6.7.9`
+
+- **The migration notes for 6.7.0–6.7.9 were checked against the source, not only the build.** A build
+  catches what 6.7 refuses. It cannot catch what 6.7 compiles with a new meaning: a lone `!` was dropped
+  by the lexer until 6.7.3, so `if (!ok)` meant `if (ok)`, and unary `-` / `~` changed how they bind at
+  6.7.9. With comments and strings stripped, `src/`, `programs/`, `tests/` and `lib/dhancha.cyr` have
+  zero sites of every such shape. A control file showed the scanner catches each one.
+- **Behaviour was measured.** A scratch oracle drives `term_feed` with 69 streams, and hashes the grid,
+  the RGB buffer and the buffer out of dhancha's widget path. Built from the same source on both
+  toolchains, **0 of 207 hashes differ**. One changed input byte moves exactly 3, so it can fail. The
+  output of `cyrius test` is identical too, once file order is ignored.
+- **No build prints a diagnostic,** on any entry point, program or target.
+- **`lib/` is re-vendored** from the 6.7.9 snapshot: 19 files change, 39 in all.
+
+### Changed — dependencies to their 6.7.9 tags
+
+| dep | 0.6.26 | 0.7.0 | that tag's cyrius pin |
+|---|---|---|---|
+| kashi | 1.1.1 | **1.2.0** | 6.7.9 |
+| setu | 0.8.14 | **0.9.0** | 6.7.9 |
+| dhancha | 0.10.4 | 0.10.4 | ⚠ 6.6.6 |
+| sadish | 0.11.3 | **0.12.0** | 6.7.9 |
+| rupa | 0.1.9 | **0.2.0** | 6.7.9 |
+| rekha | 1.0.0 | **1.1.0** | 6.7.9 |
+
+- **The minors change no code.** With comments stripped, the five bundles differ from their 0.6.26 tags
+  in one place: sadish's version probe. The 5 `setu_*` and 4 `kashi_*` functions puka calls keep their
+  signatures, and the `SETU_*` names it reads are unchanged.
+- ⚠ **dhancha still has no tag past 6.6.6,** so nobody else has checked its bundle against the 6.7
+  changes. It was audited here instead, as above. Each pin move has to repeat that until dhancha moves.
+- **`cyrius.lock` was deleted and regenerated** to drop the old tags' rows. `cyrius deps --locked`, new
+  at 6.7.6, confirms it.
+
+### Changed — the engine bundle
+
+- **CI runs `cyrius distlib --check --no-default-features` again,** beside the `engine_reach` build.
+  6.7.7 sorted the listing that made the result depend on the filesystem, so this also closes the
+  drift gap 0.6.26 recorded. Checked here under both listing orders.
+- **`dist/puka.deps` goes from 4 leaves to 3:** `io`, `alloc`, `string`. The sort settles the tie over
+  `O_WRONLY` on `io`, and `lib/io.cyr` includes `syscalls`. The bundle's code does not change.
+- A plain `cyrius distlib` still writes a false empty sidecar at 6.7.9, so `--no-default-features` stays.
+
+### Removed — `color_init()`
+
+mabda 4.2.0, which the 6.7.9 toolchain ships, makes the 11 `F64_*` colours `const`s and `color_init()` a
+no-op. The call goes from `pgpu_init` and from both GPU probes. A scratch program confirmed `F64_1` is
+set without it. This closes the roadmap item recorded by cyrius 6.7.6. ⚠ Build-verified only: the
+seam is in no entry point and the probes were not run.
+
+### Added — the P(-1) audit for this minor
+
+[`docs/audit/2026-11-06-audit.md`](docs/audit/2026-11-06-audit.md). It is a delta audit: the two `src/`
+files changed since 0.6.22, the 6.7 changes and the dependency moves, not a second line-by-line read.
+
+- **Nothing High or Medium.**
+- ⚠ **A-18, Low, in setu, not fixed:** a compositor that dies after sending part of a frame reads as idle
+  forever, so puka keeps running against the dead socket. Reproduced with a scratch test.
+- ⚠ **`cyrius fuzz --bounds` was not adopted.** It passes and checks nothing here: `src/` has no typed
+  arrays, `*T` subscripts or slices.
+
+### Fixed — docs
+
+- **`docs/architecture/001-dependencies.md` said a live `path` wins over `tag`.** From 6.7.6 a default
+  build always builds the tag, and `path` needs `CYRIUS_LOCAL`. Measured on a scratch sibling.
+- The note also records that dhancha needs auditing here at each pin move, and that CI checks the bundle
+  two ways.
+
+### Sizes
+
+| build (bytes) | 0.6.26 on 6.6.20 | 0.7.0 on 6.7.9 | Δ |
+|---|---|---|---|
+| Linux, `CYRIUS_DCE=1` (CI / release) | 1,420,336 | 1,420,336 | 0 |
+| Linux, plain | 1,920,048 | 1,920,048 | 0 |
+| `--agnos` | 1,914,944 | 1,914,960 | +16 |
+| `--agnos` tests | 721,016 | 725,128 | +4,112 |
+| `--aarch64` | 2,071,464 | 2,071,464 | 0 |
+
+### Verification
+
+- **CI, replayed:** every `run:` block of `ci.yml` executed as written, from a clean copy, on a fresh
+  toolchain install in a throwaway `HOME`, once for each listing order of the toolchain's `lib/`.
+- **Tests:** 601 passed, 0 failed across 16 files, no SKIP.
+- **Fuzz:** `cyrius fuzz` 1,297 green, also under `--poison`.
+- **Builds:** Linux with and without DCE, `--agnos` entry and tests, `--aarch64`, and all 11 programs
+  in `programs/`, including both GPU probes. No diagnostics.
+- **Static checks:** `cyrius lint` 0 warnings across `src/`, `tests/` and `programs/`. `fmt --check` is
+  clean.
+- **Dependency checks:** `vet` reports 14 deps, 0 untrusted, 0 missing. `deps --verify` 39/0,
+  `deps --locked` clean, `distlib --check --no-default-features` current.
+- **Bench:** median of three interleaved runs, 0.6.26 then 0.7.0. `vt_feed` printable 10 → 10 ns, CSI SGR
+  121 → 120 ns, `term_feed` 191 → 190 ns, `grid_scroll_up` 10.55 → 10.50 µs, `fb_render` 1.83 → 1.77 ms.
+- ⚠ **`cyrius audit` still exits 1 on its docs step,** now reporting 428, the inflated count 0.6.25
+  explains.
+- ⚠ **Not run:** the GPU probes, and anything on agnos or under a live compositor.
+
 ## [0.6.26] - 2026-11-06 — cyrius 6.6.20, each dependency on its tag for that pin, and a true engine sidecar
 
 No change under `src/`. The toolchain moves 14 releases and the dependencies move to the tags pinned

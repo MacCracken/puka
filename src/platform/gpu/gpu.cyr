@@ -32,9 +32,6 @@ enum PgpuAbi {
 # (fullscreen-triangle VS + solid-red FS — the verified bring-up shaders).
 # Returns 1 on success, 0 if there is no usable AMD GPU (caller → CPU fallback).
 fn pgpu_init(): i64 {
-    # ⚠ mabda's F64_* colour constants are 0 until `color_init` runs, and `pgpu_render` clears with
-    # them, so a caller that forgot it got a silently black clear. Idempotent; the seam owns it now.
-    color_init();
     # ⛔ cyrius 6.6 VALUE-FORM Result: the tag and the payload come back as a PAIR, so bind both.
     # This read `var res = …; is_err_result(res); payload(res)` — `payload` was deleted in 6.6.0 and
     # a one-variable bind of a pair-returning call is a compile error, so the seam stopped compiling

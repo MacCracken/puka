@@ -22,8 +22,8 @@ not included by any entry point. The two GPU probes (`programs/gpu_probe.cyr`,
 `lib/mmap.cyr`, which mabda calls and puka does not declare. See the next section for where those
 includes resolve.
 
-Declaring it would cost every build. Measured at cyrius 6.6.20 with mabda 4.1.7 declared, the
-`--agnos` binary goes from 1,914,944 B to 3,247,144 B.
+Declaring it would cost every build. Measured at cyrius 6.7.9 with mabda 4.2.0 declared, the
+`--agnos` binary goes from 1,914,960 B to 3,246,952 B.
 
 The agnos build no longer blocks it. Through mabda 4.1.4 the bundle issued `syscall(SYS_IOCTL, …)`
 directly and the agnos syscall peer has no `SYS_IOCTL`, so declaring mabda failed `--agnos` with
@@ -37,7 +37,7 @@ Declare it again when an entry point includes the GPU seam, on a current tag, co
   cyrius 6.6.20 every call binds to the last definition, so include order decides which one the
   terminal gets, and the build only warns (`duplicate fn`). No program includes both today.
 - **Stdlib leaves.** mabda's `dist/mabda.deps` decides which ones come back into `[deps] stdlib`; at
-  4.1.7 it lists `mmap` and `sakshi` beyond puka's own set.
+  4.2.0 it lists `mmap` and `sakshi` beyond puka's own set.
 
 ## An undeclared `lib/` include resolves from the toolchain
 
@@ -45,8 +45,8 @@ When `include "lib/X.cyr"` finds no `lib/X.cyr` in the project, cycc opens
 `~/.cyrius/versions/<its own version>/lib/X.cyr` instead (the fallback in cyrius
 `src/frontend/lex.cyr`). A program can therefore reach a stdlib module, or a bundle the toolchain
 ships, that the manifest never declares. It gets it at the toolchain's version, not at a tag puka
-chose, and without a `cyrius.lock` hash. The GPU probes rely on this for mabda (4.1.7 at cyrius
-6.6.20), sakshi and mmap. It is acceptable for developer probes that CI does not build; anything an
+chose, and without a `cyrius.lock` hash. The GPU probes rely on this for mabda (4.2.0 at cyrius
+6.7.9), sakshi and mmap. It is acceptable for developer probes that CI does not build; anything an
 entry point includes should be declared instead.
 
 ## Toolchain floor: cyrius 6.5.8
@@ -74,10 +74,16 @@ that resolves: it overrides the setu tag dhancha declares. kashi works the same 
 
 puka calls none of sadish, rupa and rekha. It declares them only to override dhancha's tags: dhancha
 0.10.4 is still pinned to cyrius 6.6.6, and each of the three has a tag on puka's pin. Their moves
-carry no API change, so this is about staying on the pin, not about anything puka's code needs.
-sadish 0.11.3 differs from the 0.11.2 that rekha 1.0.0 was cut against only in its requires block and
-version probe. Drop the three declarations once dhancha has a tag on puka's pin, and they arrive
-through dhancha again.
+carry no API change, so this is about staying on the pin, not about anything puka's code needs. Drop
+the three declarations once dhancha has a tag on puka's pin, and they arrive through dhancha again.
+
+## dhancha is compiled by a toolchain it was never checked on
+
+Every other dependency has a tag on puka's pin, and that repo checked its own source against the
+migration notes. dhancha 0.10.4 has not, and from the 6.7 line that matters: a toolchain can change
+what code means without failing the build. Until dhancha catches up, each cyrius pin move has to
+check `lib/dhancha.cyr` for those changes here. The 0.7.0 audit did that, and found no site:
+[`../audit/2026-11-06-audit.md`](../audit/2026-11-06-audit.md).
 
 ## `dist/puka.cyr` needs kashi
 
@@ -95,49 +101,43 @@ requires block, so a consumer that declares only kashi fails with `undefined fun
 
 Since cyrius 6.6.18 a sidecar is what distlib's verify can prove. It compiles the leaves found so far,
 every named dep's modules and the bundle, and records a leaf only when a symbol comes up undefined.
-The bundles of setu 0.8.14, sadish 0.11.3 and rupa 0.1.9 open with requires blocks of their own, which
-define everything the engine calls, so nothing comes up undefined and nothing is recorded.
+The bundles of setu, sadish and rupa open with requires blocks of their own, which define everything
+the engine calls, so nothing comes up undefined and nothing is recorded.
 
 Those deps belong to the app half, so they are `optional` under the `app` feature, which is on by
 default. Every build resolves them exactly as before; the feature split left `lib/`, `cyrius.lock`
 and both binaries byte-identical. `--no-default-features` leaves the verify with kashi alone, which is
-the engine's real dependency set, and it proves `syscalls`, `alloc`, `string` and `io`.
+the engine's real dependency set, and it proves `io`, `alloc` and `string`.
 
-A plain `--check` reads the bundle as stale, and that is expected. cyrius 6.7.18 hides the leaves the
-same way (checked 2026-11-06), so this stays until cyrius changes the verify.
+A plain `--check` reads the bundle as stale, and that is expected. cyrius 6.7.9 and 6.7.18 hide the
+leaves the same way (checked 2026-11-06), so this stays until cyrius changes the verify.
 
-### CI builds a consumer, because `distlib --check` depends on the filesystem
+### CI checks the bundle two ways
 
-Below cyrius 6.7.7, `--check` cannot be a gate, with or without the flag. distlib gives a symbol to
-the first leaf that defines it in directory listing order, and `O_WRONLY`, which `fb_dump_ppm` uses, is
-defined by both `syscalls` and `io`. So the sidecar follows the filesystem: `syscalls alloc string io`
-on the dev box, `io alloc string` on a GitHub runner, and `--check` compares bytes. Both bundles
-compile, because `lib/io.cyr` includes the others, so the committed bundle can carry either list.
-
-CI instead builds `programs/engine_reach.cyr` with `--no-deps` for Linux and agnos and runs it on
-Linux. It is a consumer: kashi and the bundle are all that is in scope, and it reaches every stdlib
-call the engine makes. A bundle with no requires block, or one missing `io`, fails on both targets.
-Without `--no-deps` the manifest's leaves are prepended and the same bundle builds, so that flag is
-what makes this a gate.
-
-cyrius 6.7.7 sorts the listing, so `cyrius distlib --check --no-default-features` can be added back at
-a pin of 6.7.7 or later. It would also catch a bundle that has drifted from `src/`, which this gate
-does not.
+- **`cyrius distlib --check --no-default-features`** catches a bundle that has drifted from `src/`. It
+  needs cyrius 6.7.7 or later. Below that, distlib gave a symbol to the first leaf defining it in
+  directory listing order, and `O_WRONLY` is in both `syscalls` and `io`, so the sidecar depended on
+  the filesystem and the check failed on GitHub for a bundle current on the dev box.
+- **`programs/engine_reach.cyr`, built with `--no-deps`** for Linux and agnos and run on Linux, catches
+  a bundle a consumer cannot use. kashi and the bundle are all that is in scope, and it reaches every
+  stdlib call the engine makes. A bundle with no requires block, or one missing `io`, fails on both
+  targets. Without `--no-deps` the manifest's leaves are prepended and the same bundle builds, so that
+  flag is what makes it a gate.
 
 ## kashi is consumed as its freestanding core
 
 See [ADR 0004](../adr/0004-kashi-freestanding-core-over-library-face.md).
 
-## `path` lines stay commented in a commit
+## `path` is a dev override
 
-When a `[deps.X]` entry carries both `path` and `tag`, `cyrius deps` uses the path whenever it
-exists, and a path-resolved dependency gets no `commit` line in `cyrius.lock`. On a machine with
-sibling checkouts a live `path` therefore vendors whatever the sibling holds, while the manifest
-still names a tag and CI, which has no siblings, resolves that tag. The two builds diverge silently.
+From cyrius 6.7.6 a default build always builds the tag, even with a `path` line live, and prints a
+hint naming the local checkout it is not using. A `path` is used only in local mode, with
+`CYRIUS_LOCAL=<name>`, `CYRIUS_LOCAL=1` or `--local`. That resolve goes to `build/local-deps/lib/` and
+leaves `lib/` and `cyrius.lock` untouched, so local work cannot reach a commit by accident.
 
-So every `path` line is commented out in a commit. Uncomment one to build against an unpushed
-sibling and comment it back before committing. With all of them commented, `cyrius.lock` pins every
-git dependency by commit and matches a clean `cyrius deps` byte for byte.
+Below 6.7.6 a live `path` won over `tag`, and a machine with sibling checkouts silently built
+something other than CI. The `path` lines are commented out here because they were written for that
+rule. To build against an unpushed sibling, uncomment one and set `CYRIUS_LOCAL`.
 
 ## Editing `cyrius.cyml`
 
