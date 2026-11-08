@@ -13,7 +13,13 @@
 enum WlAbi {
     WL_AF_UNIX        = 1;
     WL_SOCK_STREAM    = 1;
+    WL_SOCK_CLOEXEC   = 524288;  # the shell must not inherit our compositor connection
     WL_SYS_SENDMSG    = 46;
+    WL_MSG_DONTWAIT   = 0x40;
+    WL_MSG_NOSIGNAL   = 0x4000;  # a send to a dead compositor reports it, instead of SIGPIPE
+    WL_SEND_WAIT_MS   = 1000;    # how long a compositor that stopped reading gets
+    WL_PATH_MAX       = 107;     # sun_path holds 108 bytes, with the NUL
+    WL_MAX_PX         = 32767;   # the largest surface extent accepted from a configure
     WL_DISPLAY_ID     = 1;       # wl_display always has object id 1 (implicit)
     # ---- request opcodes ----
     OP_DISPLAY_SYNC   = 0;   OP_DISPLAY_GETREG = 1;
@@ -93,7 +99,30 @@ fn wl_pop_key(out24): i64 {                # writes code,val,mods; 1 if popped e
 }
 fn wl_key_pending(): i64 { if (wl_kq_head != wl_kq_tail) { return 1; } return 0; }
 
-fn wl_alloc_id(): i64 { var id = wl_next_id; wl_next_id = wl_next_id + 1; return id; }
+# Object ids. An id may be reused only after the server's wl_display.delete_id, and a frame
+# callback per present would otherwise climb without limit.
+var wl_free_ids[64];
+var wl_free_count = 0;
+
+fn wl_alloc_id(): i64 {
+    if (wl_free_count > 0) {
+        wl_free_count = wl_free_count - 1;
+        return load64(&wl_free_ids + wl_free_count * 8);
+    }
+    var id = wl_next_id;
+    wl_next_id = wl_next_id + 1;
+    return id;
+}
+
+fn wl__release_id(id): i64 {
+    if (id < 2) { return 0; }                  # wl_display is permanent, and 0 is no object
+    if (id >= wl_next_id) { return 0; }        # the server never issued this one back to us
+    if (wl_free_count < 64) {
+        store64(&wl_free_ids + wl_free_count * 8, id);
+        wl_free_count = wl_free_count + 1;
+    }
+    return 0;
+}
 
 # ---- stdout helpers (probe visibility) ----
 fn wl__emit(s, n): i64 { syscall(1, 1, s, n); return 0; }
@@ -117,22 +146,37 @@ fn wl__streq(ptr, len, lit): i64 {
 }
 
 # ---- connection ----
+# Copy a C string to dst + off, within WL_PATH_MAX. -> the new offset, or -1 if it would not fit.
+# The environment is untrusted: these fill fixed stack buffers.
 fn wl__copy_cstr(dst, off, src): i64 {
+    if (off < 0) { return 0 - 1; }
     var i = 0;
-    while (load8(src + i) != 0) { store8(dst + off + i, load8(src + i)); i = i + 1; }
+    while (load8(src + i) != 0) {
+        if (off + i >= WL_PATH_MAX) { return 0 - 1; }
+        store8(dst + off + i, load8(src + i));
+        i = i + 1;
+    }
     return off + i;
 }
 fn wl__sock_path(buf): i64 {
     var wd = getenv("WAYLAND_DISPLAY");
+    var n = 0;
     if (wd != 0) { if (load8(wd) == 0x2F) {
-            var n = wl__copy_cstr(buf, 0, wd); store8(buf + n, 0); return n;
+            n = wl__copy_cstr(buf, 0, wd);
+            if (n < 0) { return 0 - 1; }
+            store8(buf + n, 0);
+            return n;
         } }
     var rt = getenv("XDG_RUNTIME_DIR");
     if (rt == 0) { return 0 - 1; }
-    var n = wl__copy_cstr(buf, 0, rt);
-    store8(buf + n, 0x2F); n = n + 1;
+    n = wl__copy_cstr(buf, 0, rt);
+    if (n < 0) { return 0 - 1; }
+    if (n >= WL_PATH_MAX) { return 0 - 1; }
+    store8(buf + n, 0x2F);
+    n = n + 1;
     if (wd != 0) { n = wl__copy_cstr(buf, n, wd); }
     else { n = wl__copy_cstr(buf, n, "wayland-0"); }
+    if (n < 0) { return 0 - 1; }
     store8(buf + n, 0);
     return n;
 }
@@ -140,7 +184,7 @@ fn wl_connect(): i64 {
     var path[128];
     var plen = wl__sock_path(&path);
     if (plen < 0) { return 0 - 1; }
-    var fd = sys_socket(WL_AF_UNIX, WL_SOCK_STREAM, 0);
+    var fd = sys_socket(WL_AF_UNIX, WL_SOCK_STREAM | WL_SOCK_CLOEXEC, 0);
     if (fd < 0) { return 0 - 1; }
     var addr[120];
     store8(&addr, WL_AF_UNIX); store8(&addr + 1, 0);
@@ -148,12 +192,39 @@ fn wl_connect(): i64 {
     while (i < plen) { store8(&addr + 2 + i, load8(&path + i)); i = i + 1; }
     store8(&addr + 2 + plen, 0);
     if (sys_connect(fd, &addr, 2 + plen + 1) < 0) { sys_close(fd); return 0 - 1; }
-    wl_fd = fd; wl_rlen = 0; wl_next_id = 2;
+    wl_fd = fd; wl_rlen = 0; wl_next_id = 2; wl_free_count = 0; wl_send_dead = 0;
     return fd;
 }
 
 # ---- request senders ----
-fn wl__send(size): i64 { return file_write(wl_fd, &wl_sbuf, size); }
+# ⛔ NEVER BLOCK ON THE COMPOSITOR, AND NEVER DIE OF IT. This loop is single-threaded, and a plain
+# write stalled it for good once the socket filled (a compositor that stops reading, after about 50
+# presents), or killed the process with SIGPIPE if the compositor had gone. A compositor gets
+# WL_SEND_WAIT_MS to drain the socket; after that the connection is treated as lost, and every later
+# send is a no-op while `wl_closed` takes the window down.
+var wl_send_dead = 0;
+
+fn wl__writable(): i64 {
+    var p[8];
+    store32(&p, wl_fd);
+    store32(&p + 4, 4);                         # POLLOUT
+    return syscall(SYS_POLL, &p, 1, WL_SEND_WAIT_MS);
+}
+
+fn wl__lost(): i64 { wl_send_dead = 1; wl_closed = 1; return 0 - 1; }
+
+fn wl__send(size): i64 {
+    if (wl_send_dead == 1) { return 0 - 1; }
+    var done = 0;
+    while (done < size) {
+        var n = sys_sendto(wl_fd, &wl_sbuf + done, size - done, WL_MSG_DONTWAIT | WL_MSG_NOSIGNAL, 0, 0);
+        if (n > 0) { done = done + n; }
+        elif (n == 0 - EINTR) { continue; }
+        elif (n == 0 - EAGAIN) { if (wl__writable() <= 0) { return wl__lost(); } }
+        else { return wl__lost(); }
+    }
+    return done;
+}
 
 # send wl_sbuf[0..size) with one fd attached via SCM_RIGHTS ancillary data.
 fn wl__send_fd(size, fd): i64 {
@@ -173,7 +244,15 @@ fn wl__send_fd(size, fd): i64 {
     store64(&mh + 32, &cmsg);
     store64(&mh + 40, 24);              # controllen = CMSG_SPACE(4)
     store32(&mh + 48, 0);
-    return syscall(WL_SYS_SENDMSG, wl_fd, &mh, 0);
+    if (wl_send_dead == 1) { return 0 - 1; }
+    while (1 == 1) {
+        var n = syscall(WL_SYS_SENDMSG, wl_fd, &mh, WL_MSG_DONTWAIT | WL_MSG_NOSIGNAL);
+        if (n == size) { return n; }
+        if (n == 0 - EINTR) { continue; }
+        if (n == 0 - EAGAIN) { if (wl__writable() <= 0) { return wl__lost(); } continue; }
+        return wl__lost();                     # includes a short send, which would split a message
+    }
+    return 0 - 1;
 }
 
 fn wl_get_registry(): i64 {
@@ -253,6 +332,7 @@ fn wl__handle(o): i64 {
     var op = load32(&wl_rbuf + o + 4) & 0xFFFF;
     if (id == WL_DISPLAY_ID) {
         if (op == EV_DISPLAY_ERROR) { wl__emit_str("wl_display.error (fatal)\n"); wl_closed = 1; }
+        if (op == EV_DISPLAY_DELETE) { wl__release_id(wl__u32(o, 8)); }
         return 0;
     }
     if (id == wl_cur_sync) { if (op == EV_CALLBACK_DONE) { wl_sync_done = 1; } return 0; }
@@ -271,7 +351,7 @@ fn wl__handle(o): i64 {
             # against `len` FIRST and returns 0 on a mismatch, so a bogus L never reached its loop.
             # The other two readers had no such check. Now the length is validated once, here, before
             # anything indexes with it.
-            var L = wire_str_len(&wl_rbuf, o + 12);
+            var L = wl__u32(o, 12);
             var msz = wl__msg_size(o);
             if (L < 1) { return 0; }                       # a wire string always carries its NUL
             if (wire_str_next(12, L) + 4 > msz) { return 0; }   # string + the trailing version u32
@@ -300,10 +380,13 @@ fn wl__handle(o): i64 {
     }
     if (id == wl_top_oid) {
         if (op == EV_TOPLEVEL_CONFIGURE) {
+            # ⛔ THESE ARE int32 ON THE WIRE AND READ AS UNSIGNED, so a "negative" size arrives as
+            # about 2^31. Only a plausible extent goes on to size a buffer: 0x80010001 x 0x7FFF0001
+            # made `w * 4 * h` wrap to 4, mapped one page, and then wrote 2^62 pixels into it.
             var w = wl__u32(o, 8);
             var h = wl__u32(o, 12);
-            if (w > 0) { wl_cfg_w = w; }
-            if (h > 0) { wl_cfg_h = h; }
+            if (w > 0) { if (w <= WL_MAX_PX) { wl_cfg_w = w; } }
+            if (h > 0) { if (h <= WL_MAX_PX) { wl_cfg_h = h; } }
         }
         if (op == EV_TOPLEVEL_CLOSE) { wl_closed = 1; }
         return 0;
@@ -337,6 +420,7 @@ fn wl__parse(): i64 {
             else { wl__handle(o); o = o + size; }
         }
     }
+    if (o == 0) { return 0; }                  # nothing consumed: nothing to compact
     var rem = wl_rlen - o;
     var k = 0;
     while (k < rem) { store8(&wl_rbuf + k, load8(&wl_rbuf + o + k)); k = k + 1; }

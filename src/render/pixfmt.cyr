@@ -6,9 +6,6 @@
 # produces). This module is the one place that conversion lives, reused by the
 # wl_shm software path now and the mabda-GPU swizzle later. Includes nothing.
 
-# Pack one (r,g,b) into an XRGB8888 word (store32 -> B,G,R,0 on little-endian).
-fn pix_rgb_to_xrgb(r, g, b): i64 { return (r << 16) | (g << 8) | b; }
-
 # Blit pixel rows [py0, py1) of a W*H*3 packed-RGB source into an XRGB8888
 # destination whose rows are `dst_stride_px` pixels apart. Damage-aware: the
 # event loop blits only the rows the renderer touched (a full blit is py0=0,

@@ -66,6 +66,13 @@ var setuwin_cell_h = 0;
 
 fn win_backend_select(): i64 { return 1; }   # 1 = setu (0 = wayland)
 
+# A failed open must not leave the compositor connection behind. Always answers 0.
+fn setuwin__abandon(): i64 {
+    dh_client_close(setuwin_client);
+    setuwin_client = 0;
+    return 0;
+}
+
 # Connect to the compositor's setu socket ($SETU_SOCKET or the default), size the
 # surface to the grid (cols*cell_w x rows*cell_h), and allocate the persistent
 # present buffer. Returns an opaque handle (1) or 0 on connect failure. gpu_ctx
@@ -96,13 +103,16 @@ fn win_open(title, tlen, cols, rows, cell_w, cell_h, gpu_ctx): i64 {
     # the resize path validated its extent and the OPEN path — which takes cols/rows from the caller,
     # not from the grid's clamps — did not. A wrapped `nbytes` allocates a small buffer that the
     # present then reads `win_w * win_h * 4` bytes out of.
-    if (win_w <= 0) { syscall(1, 1, "setuwin: degenerate surface width\n", 34); return 0; }
-    if (win_h <= 0) { syscall(1, 1, "setuwin: degenerate surface height\n", 35); return 0; }
+    if (win_w <= 0) { syscall(1, 1, "setuwin: degenerate surface width\n", 34); return setuwin__abandon(); }
+    if (win_h <= 0) { syscall(1, 1, "setuwin: degenerate surface height\n", 35); return setuwin__abandon(); }
     var nbytes = win_w * win_h * 4;
-    if (nbytes <= 0) { syscall(1, 1, "setuwin: surface size overflow\n", 31); return 0; }
-    if (nbytes / 4 != win_w * win_h) { syscall(1, 1, "setuwin: surface size overflow\n", 31); return 0; }
+    if (nbytes <= 0) { syscall(1, 1, "setuwin: surface size overflow\n", 31); return setuwin__abandon(); }
+    if (nbytes / 4 != win_w * win_h) {
+        syscall(1, 1, "setuwin: surface size overflow\n", 31);
+        return setuwin__abandon();
+    }
     setuwin_buf = alloc(nbytes);
-    if (setuwin_buf == 0) { syscall(1, 1, "setuwin: present-buffer alloc FAILED\n", 37); return 0; }
+    if (setuwin_buf == 0) { syscall(1, 1, "setuwin: present-buffer alloc FAILED\n", 37); return setuwin__abandon(); }
     memset(setuwin_buf, 0, nbytes);
     setuwin_cap = nbytes;
     return 1;
@@ -296,18 +306,31 @@ fn win_resize_apply(win): i64 {
     var qh = setuwin_cfg_h / setuwin_cell_h * setuwin_cell_h;
     if (qw <= 0) { return 0 - 1; }                                    # smaller than one cell
     if (qh <= 0) { return 0 - 1; }
-    setuwin_cfg_w = qw;
-    setuwin_cfg_h = qh;
-    var need = setuwin_cfg_w * setuwin_cfg_h * 4;
-    if (need <= 0) { return 0 - 1; }                                  # overflow backstop
-    if (need / 4 != setuwin_cfg_w * setuwin_cfg_h) { return 0 - 1; }
+    # ⛔ CLAMP TO WHAT THE GRID CAN FILL. These are full i64s off the wire, and a size check on
+    # `w * h * 4` proves nothing when both sides of it can wrap: w = 2^62 + 3200 passed, and the
+    # present then overran the buffer. Nothing past the grid's extent can ever be painted, and
+    # inside it the arithmetic below cannot overflow.
+    var maxw = GRID_MAX_COLS * setuwin_cell_w;
+    var maxh = GRID_MAX_ROWS * setuwin_cell_h;
+    if (qw > maxw) { qw = maxw; }
+    if (qh > maxh) { qh = maxh; }
+    var need = qw * qh * 4;
     if (need > setuwin_cap) {
-        var p = alloc(need);
+        # ⚠ GROW GEOMETRICALLY. `alloc` has no free and a window drag is a run of new high-water
+        # marks, so growing to exactly `need` abandoned a full surface per step: measured, 200
+        # one-cell grows cost 443 MB for a 3.4 MB surface.
+        var grow = setuwin_cap * 2;
+        if (grow < need) { grow = need; }
+        var most = maxw * maxh * 4;
+        if (grow > most) { grow = most; }
+        var p = alloc(grow);
         if (p == 0) { return 0 - 1; }                                 # keep the old surface intact
         setuwin_buf = p;
-        setuwin_cap = need;
-        memset(setuwin_buf, 0, need);
+        setuwin_cap = grow;
+        memset(setuwin_buf, 0, grow);
     }
+    setuwin_cfg_w = qw;
+    setuwin_cfg_h = qh;
     win_w = setuwin_cfg_w;
     win_h = setuwin_cfg_h;
     setuwin_cfg_w = 0;
@@ -315,13 +338,14 @@ fn win_resize_apply(win): i64 {
     return 0;
 }
 
-# Hand out the latched key as [evdev keycode, mods, state=press]. Returns 1 when one was waiting.
+# Hand out the latched key as [evdev keycode, value (1 = press), mods], the record the Wayland
+# backend produces. Returns 1 when one was waiting.
 fn win_next_key(win, out24): i64 {
     if (setuwin_key_have == 0) { return 0; }
     setuwin_key_have = 0;
     store64(out24, setuwin_key_code);
-    store64(out24 + 8, setuwin_key_mods);
-    store64(out24 + 16, 1);
+    store64(out24 + 8, 1);
+    store64(out24 + 16, setuwin_key_mods);
     return 1;
 }
 # Drain the accumulated wheel delta (lines; + = back into history). Returns 0 when none is pending,

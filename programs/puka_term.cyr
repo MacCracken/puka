@@ -26,33 +26,6 @@ include "src/platform/window.cyr"
 
 enum PukaLoop { SYS_POLL = 7; POLLIN = 1; POLLHUP = 0x10; }
 
-var puka_argv0[8];           # "-<shell>\0" login-shell argv[0] (8 u64 = 64 bytes)
-
-# Build a login-shell argv[0] = "-" + basename(shellpath) into puka_argv0 and
-# return it. The leading dash is what makes zsh/bash a LOGIN shell (sources
-# .zprofile/.zlogin in addition to the interactive .zshrc) — the convention every
-# terminal uses for its top-level shell. e.g. "/usr/bin/zsh" → "-zsh".
-fn puka__login_argv0(shellpath): i64 {
-    var bn = shellpath;
-    var i = 0;
-    var go = 1;
-    while (go == 1) {
-        var c = load8(shellpath + i);
-        if (c == 0) { go = 0; }
-        else { if (c == 0x2F) { bn = shellpath + i + 1; } i = i + 1; }   # '/' → basename
-    }
-    store8(&puka_argv0, 0x2D);                            # '-'
-    var j = 0;
-    var more = 1;
-    while (more == 1) {
-        var ch = load8(bn + j);
-        if (ch == 0) { more = 0; }
-        else { if (j < 62) { store8(&puka_argv0 + 1 + j, ch); } j = j + 1; }
-    }
-    store8(&puka_argv0 + 1 + j, 0);
-    return &puka_argv0;
-}
-
 # Render + present only the rows that changed (damage-aware) — a one-line echo
 # copies ~16 px rows, not the whole 1260x683 buffer (the fix for input lag).
 fn puka__paint(win): i64 {
@@ -77,18 +50,17 @@ fn puka__paint(win): i64 {
 }
 
 # Drain all available child output (non-blocking) into the grid. Returns bytes.
+# Capped: a child that never stops writing (`yes`) must not keep this loop from repainting, answering
+# the compositor, or delivering Ctrl-C. poll() reports the rest next time round.
 fn puka__drain_pty(): i64 {
     var buf[2048];
     var total = 0;
-    var go = 1;
-    while (go == 1) {
+    while (total < 65536) {
         var n = file_read(pty_master, &buf, 2048);
-        if (n <= 0) { go = 0; }
-        else {
-            var i = 0;
-            while (i < n) { term_feed(load8(&buf + i)); i = i + 1; }
-            total = total + n;
-        }
+        if (n <= 0) { return total; }
+        var i = 0;
+        while (i < n) { term_feed(load8(&buf + i)); i = i + 1; }
+        total = total + n;
     }
     return total;
 }
@@ -123,10 +95,10 @@ fn main(): i64 {
     term_init(rows, cols);                            # clamps to GRID_MAX_* internally
     cols = grid_get_cols();                           # adopt the clamped truth
     rows = grid_get_rows();
-    fb_init(8, 16);
+    if (fb_init(8, 16) < 0) { wl__emit_str("framebuffer alloc failed\n"); win_close(win); return 1; }
     var shell = getenv("SHELL");                     # the user's login shell (zsh/bash/…)
     if (shell == 0) { shell = "/bin/sh"; }           # POSIX fallback
-    pty_login_argv0 = puka__login_argv0(shell);      # "-zsh" → sources .zprofile/.zshrc
+    pty_login_argv0 = pty_login_name(shell);      # "-zsh" → sources .zprofile/.zshrc
     wl__emit_str("window "); wl__emit_uint(win_w); wl__emit_str("x"); wl__emit_uint(win_h);
     wl__emit_str(" -> grid "); wl__emit_uint(cols); wl__emit_str("x"); wl__emit_uint(rows);
     wl__emit_str("; hosting "); wl__emit_str(shell); wl__emit_str(" (login).\n");
@@ -177,6 +149,7 @@ fn main(): i64 {
         if ((rev_pty & POLLIN) != 0) { if (puka__drain_pty() > 0) { dirty = 1; } }
         if ((rev_pty & POLLHUP) != 0) { alive = 0; }
         if (dirty == 1) { puka__paint(win); }
+        if (wl_closed == 1) { alive = 0; }           # a send found the compositor gone
 
         var st[8];
         if (sys_waitpid(pty_child_pid, &st, 1) > 0) { alive = 0; }   # WNOHANG: child exited

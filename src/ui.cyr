@@ -24,6 +24,7 @@
 # directory listing.
 var puka_ui_root = 0;
 var puka_ui_grid = 0;
+var puka_ui_surface = 0;      # one surface header, re-pointed at each frame's buffer
 
 # The CANVAS draw callback. `fb_render` has already repainted the dirty rows into the RGB24 grid
 # buffer; this hands that buffer to dhancha, which converts and clips it into the surface.
@@ -35,6 +36,7 @@ var puka_ui_grid = 0;
 # terminal renders as an additive over-bright ghost of itself rather than as opaque text. This stack
 # has paid that bill twice already; the conversion lives in the toolkit now so it is paid once.
 fn puka_grid_draw(wgt, sds, clx, cly, clw, clh): i64 {
+    if (fb_buf() == 0) { return 0; }            # the framebuffer failed to allocate
     return dh_canvas_blit_rgb24(wgt, sds, fb_buf(), fb_width(), fb_height(), clx, cly, clw, clh);
 }
 
@@ -62,14 +64,21 @@ fn puka_ui_grid_get(): i64 { return puka_ui_grid; }
 # `dst` is what `win_present_begin` returned; `w`/`h` are the present buffer's dimensions and
 # `stride_px` its pixels-per-row. -> 0 on success, -1 if there is nothing to draw into.
 #
-# ⚠ THE SURFACE IS WRAPPED PER FRAME, not cached. `win_present_begin` hands back a pointer that is
-# only valid until the matching commit; a wrapper held across frames would eventually point at a
-# buffer the backend has swapped out from under it.
+# ⚠ THE HEADER IS RE-POINTED PER FRAME, because `win_present_begin` hands back a pointer that is only
+# valid until the matching commit. It is not re-allocated: `dh_surface_wrap` is an `alloc`, `alloc`
+# has no free, and this runs for every frame.
 fn puka_ui_present(dst, w, h, stride_px): i64 {
     if (dst == 0) { return 0 - 1; }
     if (puka_ui_root == 0) { puka_ui_build(); }
-    var sds = dh_surface_wrap(dst, w, h, stride_px);
-    if (sds == 0) { return 0 - 1; }
+    if (puka_ui_surface == 0) {
+        puka_ui_surface = dh_surface_wrap(dst, w, h, stride_px);
+        if (puka_ui_surface == 0) { return 0 - 1; }
+    }
+    var sds = puka_ui_surface;
+    store64(sds + SD_SURFACE_WIDTH_OFFSET, w);
+    store64(sds + SD_SURFACE_HEIGHT_OFFSET, h);
+    store64(sds + SD_SURFACE_PIXELS_OFFSET, dst);
+    store64(sds + SD_SURFACE_STRIDE_OFFSET, stride_px * 4);
     dh_layout_apply(puka_ui_root, w, h);
     dh_draw_widget(sds, puka_ui_root, 0, 0, 0, w, h);
     return 0;

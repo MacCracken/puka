@@ -1,0 +1,230 @@
+# vt_semantics.tcyr — VT behaviour checked against a real terminal.
+#
+# Every expected value here was compared with kitty 0.49's parser, driven headless, in the 0.7.3 audit.
+# Where kitty differs, the value follows xterm, Ghostty or the Williams table, and the last group names
+# those cases so that nobody "fixes" them to match kitty.
+include "src/parser.cyr"
+include "src/grid.cyr"
+include "src/unicode.cyr"
+include "src/terminal.cyr"
+
+fn t(s): i64 { term_init(24, 80); term_feed_str(s); return 0; }
+
+fn main() {
+    alloc_init();
+
+    test_group("T1 term_csi ignores intermediates");
+    t("\x1b[3;3H\x1b[5;10;20;40;1$r");                 # DECCARA must not be DECSTBM
+    assert_eq(grid_scroll_top_get(), 0, "T1a DECCARA: scroll top unchanged");
+    assert_eq(grid_scroll_bot_get(), 23, "T1a DECCARA: scroll bot unchanged");
+    assert_eq(grid_cursor_row(), 2, "T1a DECCARA: cursor not homed");
+    t("\x1b[5;5H\x1b[2 A");                            # SR must not be CUU
+    assert_eq(grid_cursor_row(), 4, "T1b SR (SP A) not CUU");
+    t("AB\x1b[1;1H\x1b[1 @");                          # SL must not be ICH
+    assert_eq(grid_glyph(0, 0), 0x41, "T1c SL (SP @) not ICH");
+    t("\x1b[5;5H\x1b7\x1b[1;1H\x1b[1$u");              # DECRQTSR must not be RCP
+    assert_eq(grid_cursor_row(), 0, "T1d DECRQTSR ($ u) not RCP");
+
+    test_group("T2 colon sub-params flattened");
+    t("\x1b[4:3mA");
+    assert_eq(grid_attr(0, 0), ATTR_UNDERLINE, "T2a 4:3 is underline only, no italic");
+    t("\x1b[1m\x1b[4:0mA");
+    assert_eq(grid_attr(0, 0), ATTR_BOLD, "T2b 4:0 clears underline only, keeps bold");
+    t("\x1b[38:2::10:20:33mA");
+    assert_eq(grid_fg(0, 0), color_rgb(10, 20, 33), "T2c 38:2::r:g:b truecolor");
+    t("\x1b[38:2:10:20:30mA");
+    assert_eq(grid_fg(0, 0), color_rgb(10, 20, 30), "T2d 38:2:r:g:b legacy form (control)");
+
+    test_group("T3 mode lists read only param 0");
+    t("\x1b[?25l\x1b[?12;25h");                        # terminfo cvvis
+    assert_eq(term_cursor_visible(), 1, "T3a cvvis ?12;25h shows cursor");
+    t("\x1b[?7;25l");
+    assert_eq(term_cursor_visible(), 0, "T3b ?7;25l hides cursor");
+    t("\x1b[20;4h");
+    assert_eq(term_insert, 1, "T3c SM 20;4 sets IRM");
+
+    test_group("T4 pending-wrap latch survives cursor moves");
+    t("\x1b[6;6H\x1b7\x1b[1;80HX\x1b8Y");
+    assert_eq(grid_glyph(5, 5), 0x59, "T4a DECRC clears pending wrap");
+    t("\x1b[6;6H\x1b[s\x1b[1;80HX\x1b[uY");
+    assert_eq(grid_glyph(5, 5), 0x59, "T4b RCP clears pending wrap");
+    t("\x1b[1;80HX\x1bDY");
+    assert_eq(grid_glyph(1, 79), 0x59, "T4c IND clears pending wrap (twin of LF)");
+    t("\x1b[5;80HX\x1bMY");
+    assert_eq(grid_glyph(3, 79), 0x59, "T4d RI clears pending wrap");
+    t("\x1b[1;80HX\x1b[?6hY");
+    assert_eq(grid_glyph(0, 0), 0x59, "T4e DECOM home clears pending wrap");
+    t("\x1b[1;80HX\x1b[?1047hY");
+    assert_eq(grid_glyph(0, 0), 0x59, "T4f 1047 home clears pending wrap");
+    t("\x1b[1;80HX\x1b[KY");
+    assert_eq(grid_glyph(0, 79), 0x59, "T4g EL clears pending wrap (xterm/Ghostty)");
+    t("\x1b[1;80HX\x1b[PY");
+    assert_eq(grid_glyph(0, 79), 0x59, "T4h DCH clears pending wrap");
+
+    test_group("T5 DECSC / DECRC state");
+    t("\x1b[31m\x1b7\x1b[32m\x1b8A");
+    assert_eq(grid_fg(0, 0), color_palette(1), "T5a DECRC restores SGR fg");
+    t("\x1b[1m\x1b7\x1b[0m\x1b8A");
+    assert_eq(grid_attr(0, 0), ATTR_BOLD, "T5b DECRC restores SGR attrs");
+    t("\x1b[5;10r\x1b[?6h\x1b7\x1b[?6l\x1b8");
+    assert_eq(term_origin, 1, "T5c DECRC restores DECOM");
+
+    test_group("T6 ED 3");
+    term_init(24, 80);
+    var i = 0;
+    while (i < 30) { term_feed_str("L\r\n"); i = i + 1; }
+    assert_eq(grid_sb_count_get() > 0, 1, "T6 precondition: scrollback populated");
+    term_feed_str("KEEP\x1b[3J");
+    assert_eq(grid_sb_count_get(), 0, "T6a ED 3 empties scrollback");
+    assert_eq(grid_glyph(23, 0), 0x4b, "T6b ED 3 leaves the visible screen alone");
+
+    test_group("T7 margins");
+    t("\x1b[5;10r\x1b[7;1H\x1b[20B");
+    assert_eq(grid_cursor_row(), 9, "T7a CUD stops at bottom margin");
+    t("\x1b[5;10r\x1b[7;1H\x1b[20A");
+    assert_eq(grid_cursor_row(), 4, "T7b CUU stops at top margin");
+    t("\x1b[5;10r\x1b[7;1H\x1b[20E");
+    assert_eq(grid_cursor_row(), 9, "T7c CNL stops at bottom margin");
+    t("\x1b[5;10r\x1b[?6h\x1b[50;1H");
+    assert_eq(grid_cursor_row(), 9, "T7d DECOM CUP clamps to bottom margin");
+    t("\x1b[5;10r\x1b[?6h\x1b[3d");
+    assert_eq(grid_cursor_row(), 6, "T7e DECOM VPA is origin-relative");
+    t("\x1b[2;1HA\x1b[5;10r\x1b[2;1H\x1b[L");
+    assert_eq(grid_glyph(1, 0), 0x41, "T7f IL above the region is a no-op");
+    t("\x1b[3;5H\x1b[L");
+    assert_eq(grid_cursor_col(), 0, "T7g IL homes the column");
+    t("\x1b[3;5H\x1b[M");
+    assert_eq(grid_cursor_col(), 0, "T7h DL homes the column");
+
+    test_group("T8 wide-cell halves");
+    t("\xe6\x97\xa5\x1b[1;2HX");
+    assert_eq(grid_glyph(0, 0), 0x20, "T8a overwriting the spacer blanks the lead");
+    t("\xe6\x97\xa5\x1b[1;1HX");
+    assert_eq(grid_glyph(0, 1), 0x20, "T8b overwriting the lead blanks the spacer");
+    t("\xe6\x97\xa5\x1b[1;2H\x1b[X");
+    assert_eq(grid_glyph(0, 0), 0x20, "T8c ECH on the spacer blanks the lead");
+
+    test_group("U1 partial UTF-8 across controls");
+    t("\xe2\n\x82\xac");
+    assert_eq(grid_glyph(1, 1), 0xFFFD, "U1a stray continuation after LF is U+FFFD at (1,1)");
+    assert_eq(grid_glyph(1, 0), 0x20, "U1a2 no euro joined across the LF at (1,0)");
+    assert_eq(grid_glyph(0, 0), 0xFFFD, "U1b LF aborts the partial and U+FFFD lands before it");
+    t("\xe2\x1b[31mA");
+    assert_eq(grid_fg(0, 0), 0, "U1c U+FFFD for the aborted prefix keeps the old pen");
+    assert_eq(grid_glyph(0, 1), 0x41, "U1d 'A' after the SGR");
+
+    test_group("P1 param overflow");
+    t("\x1b[1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;31;4mA");
+    assert_eq(grid_fg(0, 0), color_palette(1), "P1a 16th param survives a 17th");
+    vt_reset();
+    term_feed_str("\x1b[1;2;3;4;5;6;7;8;9;10;11;12;13;14;15;16;99;5m");
+    assert_eq(vt_param(15), 16, "P1b 17th+ param does not fold into slot 15");
+
+    test_group("G1 advertised xterm-256color caps");
+    t("x\x1b[4b");
+    assert_eq(grid_glyph(0, 4), 0x78, "G1a REP repeats the last char");
+    t("\x1b[1;21H\x1b[Z");
+    assert_eq(grid_cursor_col(), 16, "G1b CBT backtab");
+
+    test_group("L misc");
+    t("AB\x1b[1;1H\x1b[5K");
+    assert_eq(grid_glyph(0, 0), 0x41, "La EL unknown mode ignored");
+    t("AB\x1b[1;1H\x1b[5J");
+    assert_eq(grid_glyph(0, 0), 0x41, "Lb ED unknown mode ignored");
+    t("\x1b[5;5H\x1b[10;3r");
+    assert_eq(grid_cursor_row(), 4, "Lc invalid DECSTBM does not home");
+    t("\x1b[31m\x1b[38;1mA");
+    assert_eq(grid_fg(0, 0), color_palette(1), "Ld 38 with a bad selector leaves fg");
+    t("\xe0\x80\x80A");
+    assert_eq(grid_cursor_col(), 4, "Le E0 80 80: 3 replacement chars + A (maximal subpart)");
+    t("\xc2\x85");
+    assert_eq(grid_cursor_col(), 0, "Lf decoded U+0085 is not a printing cell");
+    t("HIDE\x1b[?47h\x1bc\x1b[?47h");
+    assert_eq(grid_glyph(0, 0), 0x20, "Lh RIS then ?47h shows no stale primary");
+    term_init(24, 80);
+    var v = 0;
+    while (v < 30) { term_feed_str("L\r\n"); v = v + 1; }
+    grid_scroll_view(3);
+    term_feed_str("\x1b[?1049h");
+    assert_eq(grid_view_off_get(), 0, "Li entering the alt screen snaps the view to live");
+
+    test_group("wide cells under insert and delete");
+    t("A\xe6\x97\xa5B\x1b[1;1H\x1b[P");
+    assert_eq(grid_glyph(0, 0), 0x65e5, "DCH before a lead moves the glyph whole");
+    t("\xe6\x97\xa5AB\x1b[1;1H\x1b[@");
+    assert_eq(grid_glyph(0, 1), 0x65e5, "ICH at a lead moves the glyph whole");
+    t("\xe6\x97\xa5AB\x1b[1;2H\x1b[@");
+    assert_eq(grid_glyph(0, 0), 0x20, "ICH on a spacer splits the glyph");
+    t("\xe6\x97\xa5AB\x1b[1;1H\x1b[P");
+    assert_eq(grid_glyph(0, 1), 0x41, "DCH on a lead dissolves it, and the rest follows");
+
+    test_group("saved cursor");
+    t("\x1b[3;3H\x1b7\x1b[?1049h\x1b[5;5H\x1b7\x1b[?1049l\x1b[1;1H\x1b8");
+    assert_eq(grid_cursor_row(), 2, "the alt screen saves into its own record");
+    t("\x1b[5;5H\x1b8");
+    assert_eq(grid_cursor_row(), 0, "DECRC with nothing saved goes home");
+    t("\x1b[31mA\x1b[?1049h\x1b[32m\x1b[?1049lB");
+    assert_eq(grid_fg(0, 1), color_palette(1), "1049 exit restores the pen");
+
+    test_group("SGR sequences kitty and xterm read the same way");
+    t("\x1b[31m\x1b[38;5mA");
+    assert_eq(grid_fg(0, 0), color_palette(1), "truncated 38;5 leaves the colour");
+    t("\x1b[31m\x1b[38;2;1;2mA");
+    assert_eq(grid_fg(0, 0), color_palette(1), "truncated 38;2 leaves the colour");
+    t("\x1b[48:5:9mA");
+    assert_eq(grid_bg(0, 0), color_palette(9), "48:5:n");
+    t("\x1b[58:2::1:2:3mA");
+    assert_eq(grid_attr(0, 0), 0, "an unknown colon group is skipped whole");
+    t("\x1b[4:1;31mA");
+    assert_eq(grid_fg(0, 0), color_palette(1), "a semicolon after a colon group starts the next");
+
+    test_group("cursor verbs");
+    t("\x1b[10`");
+    assert_eq(grid_cursor_col(), 9, "HPA");
+    t("\x1b[3;3H\x1b[4a");
+    assert_eq(grid_cursor_col(), 6, "HPR");
+    t("\x1b[5;10r\x1b[7;1H\x1b[20e");
+    assert_eq(grid_cursor_row(), 9, "VPR stops at the bottom margin");
+    t("\x1b[2I");
+    assert_eq(grid_cursor_col(), 16, "CHT");
+    t("x\r\x1b[2b");
+    assert_eq(grid_cursor_col(), 2, "REP overwrites from the cursor");
+    t("\x1b[3b");
+    assert_eq(grid_cursor_col(), 0, "REP with nothing printed yet");
+    t("\x1b[1;80HX\tY");
+    assert_eq(grid_glyph(1, 0), 0x59, "HT at the last column keeps the pending wrap");
+
+    test_group("deliberate differences from kitty: xterm, Ghostty and the Williams table");
+    t("\x1b[1;80HX\x08Y");
+    assert_eq(grid_glyph(0, 78), 0x59, "BS at a pending wrap moves from the last column");
+    t("AB\x1b[3J");
+    assert_eq(grid_glyph(0, 0), 0x41, "ED 3 leaves the visible screen");
+    t("\x1b[1<2mA");
+    assert_eq(grid_glyph(0, 0), 0x41, "a marker mid-parameter ignores through the final byte");
+    t("\x1b[3\x1b[32mA");
+    assert_eq(grid_fg(0, 0), color_palette(2), "ESC aborts a CSI and starts the next");
+
+    test_group("erasing a typed character");
+    t("\x1b[1;80HZ");
+    term_erase_prev();
+    assert_eq(grid_glyph(0, 79), 0x20, "at a pending wrap the character under the cursor goes");
+    assert_eq(grid_cursor_col(), 79, "and the cursor stays");
+    t("abc");
+    term_erase_prev();
+    assert_eq(grid_glyph(0, 2), 0x20, "ordinarily the one before the cursor");
+    assert_eq(grid_cursor_col(), 2, "and the cursor backs up");
+    t("\x1b[1;80Hab");
+    term_erase_prev();
+    assert_eq(grid_cursor_row(), 1, "the second character wrapped to row 1");
+    term_erase_prev();
+    assert_eq(grid_cursor_row(), 0, "erasing across the wrap goes back up");
+    assert_eq(grid_glyph(0, 79), 0x20, "and takes the character at the end of the row");
+    t("");
+    term_erase_prev();
+    assert_eq(grid_cursor_col(), 0, "at home there is nothing to erase");
+
+    return assert_summary();
+}
+
+fn _entry(): i64 { var rc = main(); syscall(SYS_EXIT, rc); return 0; }
+_entry();

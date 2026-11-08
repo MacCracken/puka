@@ -8,6 +8,7 @@
 # (uses wl_alloc_id / wl__send / wl__send_fd / wl_sbuf / wl_shm_oid / wl_buf_oid).
 
 enum ShmAbi {
+    SHM_SIZE_MAX     = 0x7FFFFFFF;   # wl_shm sizes and offsets are int32
     SYS_MEMFD_CREATE = 319;
     SYS_FTRUNCATE    = 77;
     SYS_MMAP9        = 9;
@@ -35,6 +36,7 @@ fn shm_create(w, h): i64 {
     var stride = w * 4;
     var size = stride * h;
     if (size <= 0) { return 0; }
+    if (size > SHM_SIZE_MAX) { return 0; }
     var fd = syscall(SYS_MEMFD_CREATE, "puka-wl", MFD_CLOEXEC);
     if (fd < 0) { return 0; }
     if (syscall(SYS_FTRUNCATE, fd, size) < 0) { sys_close(fd); return 0; }
@@ -74,16 +76,21 @@ fn shm_resize(w, h): i64 {
     var stride = w * 4;
     var size = stride * h;
     if (size <= 0) { return 0; }
+    if (size > SHM_SIZE_MAX) { return 0; }
     if (size > shm_cap) {
         # grow: release the old buffer/pool/mapping/fd, then build fresh at `size`.
         if (wl_buf_oid != 0) { wl__req0(wl_buf_oid, OP_BUFFER_DESTROY); }
         if (shm_pool != 0)   { wl__req0(shm_pool, OP_POOL_DESTROY); }
         if (shm_ptr != 0)    { syscall(SYS_MUNMAP11, shm_ptr, shm_size); shm_ptr = 0; }
         if (shm_fd >= 0)     { sys_close(shm_fd); shm_fd = 0 - 1; }
+        # Those objects are gone. If the create below fails, nothing may refer to them again.
+        wl_buf_oid = 0;
+        shm_pool = 0;
+        shm_cap = 0;
         return shm_create(w, h);
     }
     # within capacity: keep the mapping + pool, rebuild only the wl_buffer.
-    wl__req0(wl_buf_oid, OP_BUFFER_DESTROY);
+    if (wl_buf_oid != 0) { wl__req0(wl_buf_oid, OP_BUFFER_DESTROY); }
     wl_buf_oid = wl_alloc_id();
     store32(&wl_sbuf + 8, wl_buf_oid);
     store32(&wl_sbuf + 12, 0);

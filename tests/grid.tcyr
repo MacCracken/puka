@@ -117,12 +117,13 @@ fn main() {
 
     test_group("resize");
     grid_init(24, 80);
-    grid_put_cell(0, 0, 0x41);          # 'A' survives a shrink it's inside
+    grid_put_cell(11, 0, 0x41);         # rides up with the cursor as the top rows leave
     grid_cursor_set(20, 70);
     grid_resize(10, 40);
     assert_eq(grid_get_rows(), 10, "resized to 10 rows");
     assert_eq(grid_get_cols(), 40, "resized to 40 cols");
-    assert_eq(grid_glyph(0, 0), 0x41, "in-bounds content preserved");
+    assert_eq(grid_glyph(0, 0), 0x41, "a shrink keeps the cursor's line and what is near it");
+    assert_eq(grid_sb_count_get(), 11, "the rows that left the top went to scrollback");
     assert_eq(grid_cursor_row(), 9, "cursor clamped to new last row");
     assert_eq(grid_cursor_col(), 39, "cursor clamped to new last col");
     assert_eq(grid_scroll_bot_get(), 9, "scroll region reset to full height");

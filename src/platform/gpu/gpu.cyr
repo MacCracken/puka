@@ -89,10 +89,10 @@ fn pgpu_ready(): i64 { if (pgpu_ctx != 0) { return 1; } return 0; }
 # RGBA8 base pointer, or 0 on failure.
 fn pgpu_target(req_w, req_h): i64 {
     if (pgpu_ctx == 0) { return 0; }
+    if (req_w < 2) { return 0; }                 # rounded up, this would overrun a 1 px readback row
+    if (req_h < 2) { return 0; }
     var vw = (req_w / 2) * 2;
     var vh = (req_h / 2) * 2;
-    if (vw < 2) { vw = 2; }
-    if (vh < 2) { vh = 2; }
     var aw = ((req_w + 255) / 256) * 256;        # 64 KiB-aligned, even alloc dims
     var ah = ((req_h + 255) / 256) * 256;
     if (pgpu_rt != 0) { gpu_render_target_release(pgpu_ctx, pgpu_rt); pgpu_rt = 0; }

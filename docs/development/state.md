@@ -5,10 +5,15 @@
 
 ## Version
 
-**0.7.2** (2026-11-07) — see [`../../CHANGELOG.md`](../../CHANGELOG.md). Release narrative belongs
+**0.7.3** (2026-11-08) — see [`../../CHANGELOG.md`](../../CHANGELOG.md). Release narrative belongs
 there, not here.
 
-0.7.2 moves dhancha to 0.11.1, its first tag on puka's cyrius pin, and drops the three overrides that
+0.7.3 is the P(-1) sweep: a full line-by-line audit, [`../audit/2026-11-08-audit.md`](../audit/2026-11-08-audit.md).
+60 distinct findings (6 High, 26 Medium, 28 Low), all but three repaired, and the Wayland wire parser now has headless
+tests and a fuzz harness. The roadmap was rewritten as a release plan to 1.0.0, and
+[ADR-0005](../adr/0005-v1-ships-on-setu-with-gpu-cells.md) records that v1.0 ships on setu with GPU cells.
+
+0.7.2 before it moved dhancha to 0.11.1, its first tag on puka's cyrius pin, and dropped the three overrides that
 stood in for it. Behaviour did not move, and `src/` is unchanged.
 
 0.7.1 before it moved to cyrius 6.7.18 and took every other dependency to its latest tag. A new lint
@@ -54,11 +59,9 @@ poisoned their own guard and then wrote to the null page; an unvalidated Wayland
 an out-of-bounds read and an information disclosure). Two P(-1) gates — `cyrius fuzz` and
 `cyrius bench` — were passing over **empty harnesses** and now measure something.
 
-⛔ **SCOPE, STATED SO IT IS NOT MISREAD.** **Version**, **Toolchain**, **Dependencies** and **Tests**
-were re-derived from the tree on 2026-11-07. The **Source**, **Carry-forward**, **Dep gaps**,
-**Consumers** and **Next** sections below still carry the staleness they had at 0.6.7 (they describe
-the tree as of 2026-08-02) and were **not** re-verified — the audit read the code, not these
-paragraphs. Trust them at that date, not this one.
+⛔ **SCOPE, STATED SO IT IS NOT MISREAD.** **Version**, **Toolchain**, **Source**, **Tests**,
+**Carry-forward**, **Dependencies**, **Dep gaps** and **Next** were re-derived from the tree on 2026-11-08.
+The two agnos notes below (the setu transport and `/bin/puka`) are records of 2026-08-02 and were not re-checked.
 
 Since 0.6.7, in brief (the CHANGELOG is authoritative): the **setu/dhancha window + UI edge**
 (`win_*` over dhancha's client layer, `src/ui.cyr`), **`dist/puka.cyr` as an embeddable engine**
@@ -113,28 +116,44 @@ transport. What is retracted is the pre-`net_src_for` rigged-smoke lineage, not 
 
 ## Source
 
-- `src/parser.cyr` — VT parser (Williams DEC ANSI state machine). Pure: `vt_feed(byte)` → one typed event.
-- `src/grid.cyr` — cell grid (the screen, single source of truth): cells, cursor, scroll region, tabs, scroll/erase/insert/delete primitives. Ceilings **`GRID_MAX_COLS=480` / `GRID_MAX_ROWS=144`** (4K window at 8×16); the per-row damage bitset is a **3-word array** (`GRID_DIRTY_WORDS`) so rows past 64 work. `grid_alt_screen` swaps the active cell buffer with a **lazily heap-allocated** backup (the alternate-screen primitive — no static cost until used). **Scrollback**: a lazily heap-allocated ring (`SCROLLBACK_LINES`=1000, primary only) captures top lines on `grid_scroll_up`; `grid_scroll_view`/`grid_view_reset` move a viewport offset; `grid_v*` accessors serve history-or-live cells to the renderer.
-- `src/unicode.cyr` — UTF-8 decode/encode + `char_width` (wcwidth, UAX#11).
-- `src/terminal.cyr` — the driver: parser events → grid mutations (cursor/erase/SGR/scroll/modes/resize) + headless text renderer. Exposes `term_cursor_visible()` (DECTCEM, dirties the cursor row on toggle), `term_app_cursor_get()` (DECCKM) and `term_bracket_paste_get()` (mode 2004) for the renderer/encoder. **Alternate screen** (DEC 1049/1047/47) via `term__alt_screen` (save cursor → swap → clear → home / restore).
-- `src/pty.cyr` — PTY + process plumbing (Linux): open/spawn/pump/write/winsize/wait/close. The child **inherits the full parent environment** (`/proc/self/environ`) with `TERM` overridden to `xterm-256color`; `pty_login_argv0` optionally sets argv[0] (e.g. `-zsh`) for a login shell. Linux-guarded; the agnos backend is post-v1.0.
-- `src/render/fb.cyr` — framebuffer renderer (M3): grid → RGB pixel buffer. Pure read of the grid; colour resolution (default/16/256/truecolor + bold/dim/reverse/hidden), background paint, kashi glyph blit (VGA 8×16), cursor block, per-row damage consumption, PPM (P6) dump. Integer-only, every pixel write bounds-clamped. `fb_resize()` refits the buffer to new grid dims (**grow-only** — reused below the high-water mark, the allocator has no `free`). Reads cells through the **viewport-aware** `grid_v*` accessors (history when scrolled back; identical to the live grid at the bottom) and hides the cursor while scrolled back.
-- `src/input.cyr` — keyboard→escape-sequence encoder (M4): `input_encode(sym, mods, out)` (disjoint keysym range; xterm modifier formula via `input__xtmod`) + `input_paste(text, len, cap, out)` (bracketed-paste 2004 wrap + ESC/0x9B strip + cap bound). Pure; reads terminal modes via getters.
-- **Desktop window backend (M6 / 0.6.0) — the live Wayland edge:**
-  - `src/platform/window.cyr` — the cross-platform `win_*` seam (open / present_begin / present_commit / poll_events / next_key / **resize_apply** / close). `win_poll_events` raises `WIN_EV_RESIZE` on a configured size change; `win_resize_apply` adopts it + refits the buffer. Platform-generic names → extracts to `aethersafha`. The engine never references `src/platform/`; mabda's GPU ctx is passed *through* `win_open`.
-  - `src/platform/wayland/wire.cyr` — the Wayland wire codec (message framing, u32/string arg encoders). Pure — and the new untrusted-input boundary.
-  - `src/platform/wayland/client.cyr` — AF_UNIX connect, `wl_registry` bind, the xdg-shell window lifecycle (configure/ack/ping-pong, `xdg_toplevel.configure` size), `wl_seat`/`wl_keyboard` + a key queue, SCM_RIGHTS fd-passing.
-  - `src/platform/wayland/shm.cyr` — memfd-backed `wl_shm` present buffer; `shm_resize` refits it (grow-only memfd/pool, wl_buffer rebuilt at the new dims; old mapping/fd torn down on grow → no leak).
-  - `src/render/pixfmt.cyr` — RGB→XRGB8888 pack + damage-aware row blit (the device-neutral core lifted from fbdev).
-  - `src/input/keymap.cyr` — shared evdev-keycode→bytes bridge (`wl_keyboard` delivers *raw* evdev keycodes; reuses `evdev__keymap` + the encode discipline).
-- **GPU plumbing (M6 bite 7) — the `pgpu_*` seam over mabda's native AMD backend:**
-  - `src/render/atlas.cyr` — kashi glyph atlas (bite 8a): packs the 256 CP437 glyphs into a 128×256 RGBA8 coverage texture for GPU sampling. Pure CPU read of kashi; verified bit-for-bit (`tests/atlas.tcyr`, 14). The data the bite-8 shader samples.
-  - `src/platform/gpu/gpu.cyr` — puka-generic GPU seam (init / target / render / readback / release). Wraps mabda so the engine/window never bind it directly (the GPU analogue of `win_*` → extracts to `aethersafha`). `pgpu_render` is a placeholder solid fill today; bite 8 swaps in the grid+atlas shader. `pgpu_readback_xrgb` converts the target's RGBA8 → puka's XRGB8888 and is where the cut-#2 memcpy into `wl_shm` lives. Pads the render target to a 64 KiB-aligned size (mabda `va_map` quirk) and reads back the visible sub-rect. **Verified live: GPU → wl_shm → Hyprland** (`programs/gpu_probe.cyr` headless render→readback; `programs/gpu_win_probe.cyr` the full windowed pipe). `puka_term` still renders cells on the CPU — this is the shader-agnostic foundation only.
-- `src/render/fbdev.cyr` + `src/input/evdev.cyr` (device layers) — **superseded** by the Wayland backend; queued for retirement (bite 10). The evdev **keymap** is kept + reused; the pure fbdev pack core moved to `pixfmt.cyr`.
-- `src/main.cyr` — demo entry: drives a canned stream through the full pipe, prints the rendered grid.
-- `programs/puka_term.cyr` — **the desktop daily-driver** (M6): a `poll()` loop over the Wayland fd + the PTY master hosting the user's **`$SHELL` as a login shell** (so `.zprofile`/`.zshrc`/starship source); keyboard → child, child output → grid → damage-aware repaint; **`WIN_EV_RESIZE` → reflow + refit + SIGWINCH + full repaint**. Run on Wayland (Hyprland).
-- `programs/{pty_demo,fb_demo,input_demo}.cyr` — headless pipe / framebuffer / input demos (engine verification, PPM dumps).
-- `programs/puka_session.cyr` — the M5 framebuffer session — **superseded** by `puka_term`; retire bite 10.
+Line counts at 0.7.3. The data flow is in [`../architecture/overview.md`](../architecture/overview.md).
+
+| file | lines | what |
+|---|---:|---|
+| `src/parser.cyr` | 364 | VT parser, Williams state machine. Pure: one byte in, one typed event out. |
+| `src/unicode.cyr` | 198 | UTF-8 decode and encode (maximal subpart), `char_width`. |
+| `src/grid.cyr` | 669 | the screen, the single source of truth: cells, cursor, scroll region, tabs, scrollback ring, alt screen, per-row damage. `GRID_MAX_COLS=480`, `GRID_MAX_ROWS=144`. |
+| `src/terminal.cyr` | 741 | VT semantics: parser events to grid mutations, saved cursors, modes, resize. |
+| `src/pty.cyr` | 464 | PTY and child spawn, explicit argv. Linux and agnos arms, the shared 64 KiB pump cap, child-exit state. |
+| `src/line_discipline.cyr` | 197 | echo and line editing on agnos, which has no kernel tty layer. |
+| `src/input.cyr` | 242 | key and paste encoding. Pure. |
+| `src/input/keymap.cyr` | 22 | evdev keycode + mods to child bytes, shared by both window backends. |
+| `src/input/evdev.cyr` | 258 | the console device layer, retired at 0.7.4, and `evdev__keymap`, which moves to `keymap.cyr` then. |
+| `src/render/fb.cyr` | 386 | grid to RGB: colour resolution, kashi glyphs through a CP437 lookup, cursor, damage. |
+| `src/render/pixfmt.cyr` | 28 | RGB to XRGB8888 and the damage-aware row blit. |
+| `src/render/atlas.cyr` | 64 | kashi glyphs as an RGBA8 coverage texture, for the 0.9.x GPU pass. |
+| `src/render/fbdev.cyr` | 221 | Linux framebuffer present, retired at 0.7.4. |
+| `src/ui.cyr` | 85 | the dhancha widget tree the window is built from. |
+| `src/platform/setu/window_setu.cyr` | 359 | **the release window:** the setu `win_*` backend. |
+| `src/platform/window.cyr` | 156 | the Wayland `win_*` backend. |
+| `src/platform/wayland/wire.cyr` | 41 | Wayland wire codec. Pure. |
+| `src/platform/wayland/client.cyr` | 448 | Wayland connection, registry, xdg-shell, keyboard, the bounded send path. Untrusted-input boundary. |
+| `src/platform/wayland/shm.cyr` | 114 | memfd-backed `wl_shm` present buffer. |
+| `src/platform/gpu/gpu.cyr` | 171 | the `pgpu_*` seam over mabda. In no entry point until 0.9.0. |
+| `src/main.cyr` | 413 | **the release binary:** the terminal over setu, falling back to the demo when no compositor answers. |
+| `src/test.cyr` | 11 | the `[build] test` entry. Asserts nothing. |
+| `programs/puka_term.cyr` | 165 | the Wayland terminal loop. |
+| `programs/puka_setu_term.cyr` | 114 | an earlier setu terminal, consolidated into `main.cyr` at 0.7.4. |
+| `programs/puka_setu_probe.cyr` | 71 | setu render probe, consolidated at 0.7.4. |
+| `programs/puka_session.cyr` | 93 | the framebuffer session, retired at 0.7.4. |
+| `programs/engine_reach.cyr` | 24 | CI's gate on `dist/puka.cyr`. |
+| `programs/gpu_probe.cyr` | 163 | GPU render and readback probe. |
+| `programs/gpu_win_probe.cyr` | 100 | GPU to Wayland window probe. |
+| `programs/wl_probe.cyr` | 38 | Wayland globals probe. |
+| `programs/pty_demo.cyr` | 58 | headless PTY demo. |
+| `programs/fb_demo.cyr` | 59 | framebuffer demo, writes a PPM. |
+| `programs/input_demo.cyr` | 74 | input encoder demo. |
+| **total** | **6611** | |
 
 `src/grid.cyr` additionally owns the **per-row damage bitset** (`grid_dirty_rows`),
 marked at every write chokepoint and consumed by the renderer
@@ -142,13 +161,16 @@ marked at every write chokepoint and consumed by the renderer
 
 ## Tests
 
-**601 assertions, all green** (`cyrius test`), across 16 `.tcyr` files (0.6.25: 589 + the 12 in
-`window_setu.tcyr`). Re-counted 2026-11-07. The runner's closing line reads `17 passed`: it counts
-files, and since cyrius 6.6.17 it also runs the `[build] test` entry, `src/test.cyr`, which asserts
-nothing. At 0.6.24 this block corrected an earlier claim of 604 across 17: the 604 summed that closing
-line into the assertions.
+**770 assertions, all green** (`cyrius test`), across 19 `.tcyr` files. Re-counted 2026-11-08. The
+runner's closing line reads `20 passed`: it counts files, and since cyrius 6.6.17 it also runs the
+`[build] test` entry, `src/test.cyr`, which asserts nothing.
 
-- Engine core: `parser.tcyr` (70), `grid.tcyr` (102 — resize, per-row damage, multi-word bitset rows
+- VT behaviour checked against a real terminal: `vt_semantics.tcyr` (86). Every expected value was compared
+  with kitty's parser, and the last group pins where puka deliberately differs.
+- Screen edges: `screen_edges.tcyr` (17): glyph lookup, resize, the alt screen, the viewport, memory per frame.
+- Wayland: `wayland.tcyr` (44): framing, hostile configures, registry strings, id recycling, stalled and dead peers.
+
+- Engine core: `parser.tcyr` (70), `grid.tcyr` (103 — resize, per-row damage, multi-word bitset rows
   ≥ 64, scrollback ring/viewport, **and the 0.6.22 row/viewport bounds guards**), `unicode.tcyr` (43
   — **incl. the 0.6.22 aborting-byte re-dispatch**), `terminal.tcyr` (77 — DECCKM/2004 getters,
   alt-screen 1049/1047/47, **and the end-to-end UTF-8 re-dispatch**).
@@ -156,8 +178,8 @@ line into the assertions.
   **and `fb__fill_rect`'s clamp**), `atlas.tcyr` (14 — kashi glyph atlas, bit-for-bit),
   `fbdev.tcyr` (25), `ui.tcyr` (14), `engine_bundle.tcyr` (11 — drives `dist/puka.cyr` as a consumer
   would, with no PTY, window or app code).
-- I/O edge: `input.tcyr` (67 — byte-exact, `vt_feed` round-trips, paste), `evdev.tcyr` (49),
-  `line_discipline.tcyr` (49), `pty.tcyr` (2) + `input_pty.tcyr` (2, real PTY echo — both
+- I/O edge: `input.tcyr` (80 — byte-exact, `vt_feed` round-trips, paste), `evdev.tcyr` (49),
+  `line_discipline.tcyr` (49), `pty.tcyr` (10) + `input_pty.tcyr` (2, real PTY echo — both
   skip-clean), `puka.tcyr` (2 smoke).
 - Window edge: `window_setu.tcyr` (12, 0.6.25). It drives the setu backend's `win_poll_events` over
   a real AF_UNIX `SOCK_SEQPACKET` pair: idle is no event, polling allocates nothing, `SETU_CLOSE` and
@@ -171,20 +193,20 @@ line into the assertions.
   `cyrius fuzz` does not catch that overwrite (checked 2026-11-06). ⛔ It was a stub that fuzzed
   nothing until 0.6.22. ⚠ `cyrius fuzz --bounds` passes and checks nothing here: `src/` has no typed
   arrays, `*T` subscripts or slices for it to guard.
+- **`tests/wayland.fcyr`, new at 0.7.3**: 4,000 rounds of messages aimed at the objects that matter, with
+  hostile sizes and payloads. **28,000 assertions**, green under `cyrius fuzz --poison`.
 - **`tests/puka.bcyr` — five hot-path baselines, real since 0.6.22** (it timed an empty function
-  before). Median of three interleaved runs on 2026-11-07 (0.7.2, cyrius 6.7.18): `vt_feed` printable
-  10 ns · `vt_feed` CSI SGR 124 ns · `term_feed` full pipeline 195 ns · `grid_scroll_up` 10.79 µs ·
-  `fb_render` 80×24 all-dirty 1.82 ms. 0.7.1, alternating with those runs, gives 10 ns, 122 ns,
-  192 ns, 10.75 µs and 1.87 ms. ⚠ Baselines, not thresholds — nothing fails on a regression yet.
-- ⛔ **The Wayland subsystem still has no headless tests**, and that is now the most conspicuous gap:
-  the 0.6.22 wire-validation fixes (A-03/A-04) are the repairs that most deserve coverage and are
-  verified by reading only. `wire.cyr` is pure and the byte-vector tests are already scoped.
+  before). Median of five interleaved runs on 2026-11-08 (0.7.3, cyrius 6.7.18): `vt_feed` printable
+  10 ns · `vt_feed` CSI SGR 85 ns · `term_feed` full pipeline 202 ns · `grid_scroll_up` 10.30 µs ·
+  `fb_render` 80×24 all-dirty 1.23 ms. 0.7.2, alternating with those runs, gives 10 ns, 124 ns,
+  195 ns, 10.75 µs and 1.87 ms. ⚠ Baselines, not thresholds — nothing fails on a regression yet.
 
 ## Carry-forward / known
 
-- **Large static data warning** (~1.2MB): grid backing store (~1.08MB — two `480×144` u64 cell arrays, raised in bite 6 from 132×64) + kashi's font BSS (~99KB — its glyph tables are u64-unit byte arrays). The renderer's pixel buffer + the `wl_shm` present buffer are **heap/memfd-allocated** (grow-only), not static. Acceptable for a desktop binary; heap-allocating the grid remains a deferred optimization (would also let `GRID_MAX_*` grow without BSS cost).
+- **Large static data warning** (1,147,560 B at 0.7.3): the grid's two `480×144` u64 cell arrays are nearly all of it. Pixel and present buffers are heap or memfd, and grow geometrically since 0.7.3. Acceptable for a desktop binary; heap-allocating the grid remains a deferred optimization.
 - **Wide CJK glyphs render blank**: kashi's built-in fonts cover CP437 (0x20..0xFF) only, so a width-2 cell paints its background but no glyph until a wider font (PSF/runtime-loaded or `rekha`) lands. The grid/width handling is already correct.
-- Deferred (M7 conformance / post-v1.0): DA/DSR query responses, charset designators (ESC ( B), origin-mode edge cases, mouse tracking, grapheme clustering, selection/clipboard; non-US keymaps + CapsLock in evdev; AGNOS-native edges (display/input/PTY) are post-v1.0. **Alt-screen (1049/1047/47) and scrollback are done.**
+- **Deferred by the 0.7.3 audit:** Wayland key repeat (D-10, after 1.0), short writes to the PTY master on a large paste (D-12, 0.8.2), and the 32 B per frame under Dep gaps.
+- **Not done yet, by release:** see [`roadmap.md`](roadmap.md).
 
 ## Dependencies
 
@@ -192,7 +214,7 @@ Declared in `cyrius.cyml` and resolved from their git tags; `cyrius.lock` pins e
 Why each is declared the way it is, and why mabda is not:
 [`../architecture/001-dependencies.md`](../architecture/001-dependencies.md).
 
-| dep | pin (0.7.2) | modules | note |
+| dep | pin (0.7.3) | modules | note |
 |---|---|---|---|
 | **kashi** | `1.3.0` | `src/font_data.cyr` | the **freestanding** core only, the same core the agnos kernel and dhancha consume. Built-in CP437 VGA 8×16 / CGA 8×8 / VGA 9×16. [ADR 0004](../adr/0004-kashi-freestanding-core-over-library-face.md). |
 | **setu** | `0.9.1` | `dist/setu.cyr` | the AGNOS display protocol + reference client. `present` / `poll_input` go here directly. The same tag dhancha declares. |
@@ -217,8 +239,8 @@ Why each is declared the way it is, and why mabda is not:
 - **setu 0.8.11's -6 from `setu_client_poll_input` (the compositor gone) is consumed since 0.6.25.**
   `win_poll_events` maps it to `WIN_EV_CLOSE`, so puka exits instead of polling a dead socket.
 - The draw stack dhancha pulls in grew at 0.6.24 (`lib/sadish.cyr` 75 KB → 472 KB, `lib/rekha.cyr`
-  39 KB → 551 KB). DCE removes most of it. The `--agnos` build is not DCE'd: 1,934,656 B at 0.7.2,
-  +14.0% over 0.6.23.
+  39 KB → 551 KB). DCE removes most of it. The `--agnos` build is not DCE'd: 1,943,216 B at 0.7.3,
+  +14.6% over 0.6.23.
 
 Planned (own-the-stack, not yet wired): `rekha`+`sadish` **directly** (vector glyphs, post-v1.0 — they
 are on disk today only as dhancha's transitives), `sakshi` (logging — declared again when puka logs
@@ -226,6 +248,9 @@ through it). kashi's PSF/BDF/PCF library face is available but not pulled in (AD
 
 ## Dep gaps / blockers
 
+- **dhancha allocates in its blit** *(found 2026-11-08, dhancha 0.11.1)* — `dh_canvas_blit_rgb24` calls `alloc(32)`,
+  and `alloc` has no free, so each damaged frame leaks 32 B. A one-line fix in dhancha (`var r4[32]`).
+  Not inlined here, per CLAUDE.md. `tests/screen_edges.tcyr` holds the line at 32 B.
 - **The agnos terminal has no window size** *(cyrius issue `2026-11-04-agnos-chan-winsz-ops-peer`,
   open)* — agnos `pty_set_winsize` is `return 0`, so a program in puka sees only the console's grid.
   agnos 1.57.17 has the ops, and cyrius 6.7.18 has no wrapper for them yet. Take them when cyrius adds
@@ -236,11 +261,11 @@ through it). kashi's PSF/BDF/PCF library face is available but not pulled in (AD
 - **`cyrius distlib` hides a bundle's stdlib leaves behind a named dep's requires block** *(found
   2026-11-06, cyrius 6.6.20, still so at 6.7.18)* — worked around with `--no-default-features`, and not
   filed in cyrius yet.
-- **mabda native RT `va_map` 64 KiB-align bug** *(found 2026-06-19)* — `native_rt_create_2d_rgba8`'s `va_map` returns `EINVAL` unless the BO byte-size is 64 KiB-aligned (256²/512²/1024²/2048² pass; `1260×682×4` = 3360 KiB does not — the GTT BO alloc itself is fine, only the VA map fails). Worked around in `pgpu_target` (pad the alloc to a 256-px multiple per axis, read back the visible sub-rect). The clean fix is mabda-side: round the GTT/`va_map` size up to 64 KiB. Reported to the maintainer.
-- **mabda no instanced-vertex path** *(recon 2026-06-19)* — and none is roadmapped (3.2.x closes at 3.2.13; 3.3 = asset-loading). So bite 8 renders the grid via a **single full-screen pass** (texture sampling shipped 3.2.2–3.2.3 + the SPIR-V→GFX9 compiler is complete at 3.2.11, both HW-verified on Cezanne) reading the grid as a storage buffer + the kashi atlas as a texture — NOT instanced quads.
-- **mabda dmabuf-export** — mabda has the PRIME `HANDLE_TO_FD` ioctl internally but no public accessor to hand a Wayland client a dmabuf fd (+ fourcc/stride/modifier). Zero-copy GPU present (bite 9 / cut #3) needs a `gpu_render_target_export_dmabuf` in mabda (Phase D, unscheduled). The `wl_shm` GPU→CPU readback memcpy (cut #2, **shipped in bite 7**) needs no mabda change. mabda's native backend is **AMD-GFX9-only** (verified on this Cezanne box) — non-AMD sessions use the `wl_shm` CPU fallback.
-- **AGNOS console/desktop environment** — AGNOS can't yet host puka, so **AGNOS-native is post-v1.0** (a new `win_*` backend: `blit`#39 + xHCI/HID + the kernel PTY surface). Not a v1.0 blocker.
-- **macOS / X11 / Windows** — `win_*` backends designed-for but not implemented; v1.0 is Wayland-only. macOS needs a Cyrius Darwin backend (cyrius-side).
+- **mabda had no instanced-vertex path** *(recon 2026-06-19, not re-checked; mabda is not declared until 0.9.0)*, which is why the 0.9.x cell pass is one full-screen pass.
+- **mabda had no public dmabuf export** *(recon 2026-06-19, not re-checked)*. Zero-copy GPU present is after 1.0.
+- **setu carries no clipboard or window title yet.** They gate 0.8.4 and 0.8.5; see "Needed from other repos" in [`roadmap.md`](roadmap.md).
+- **A bare-framebuffer agnos console** is after 1.0. v1.0 on agnos is the aethersafha window.
+- **macOS / X11 / Windows:** `win_*` backends designed for and not implemented. v1.0 is setu ([ADR-0005](../adr/0005-v1-ships-on-setu-with-gpu-cells.md)). macOS needs a Cyrius Darwin backend, which is cyrius-side.
 
 ## Consumers
 
@@ -248,23 +273,4 @@ _None yet._ The v3 command center (post-v1.0) — `thoth` panes — will be the 
 
 ## Next
 
-**M6 (→ 0.6.x) — finish the Wayland desktop terminal.** Shipped since 0.6.0: **window
-resize** (bite 6), the **`$SHELL` login-shell + env** fix, the **GPU plumbing
-foundation** (bite 7 — `pgpu_*` seam, render→`wl_shm`→Hyprland verified) + the **glyph
-atlas** (bite 8a), and the **alternate screen** (DEC 1049). In flight:
-1. **GPU cell renderer** (bite 8) — **PAUSED pending mabda.** Plumbing + atlas are done,
-   but the native path needs the **64 KiB-align `va_map` fix** (filed) and ideally a
-   higher-level shading API (no instanced path; a full-screen grid+atlas shader is
-   otherwise hand-assembled SPIR-V). Resume when those land. CPU `fb.cyr` renders cells.
-2. **Conformance (M7 pulled forward)** — alt-screen ✅, scrollback ✅; next: charset
-   designators (ESC ( B), mouse tracking (SGR), DA/DSR responses, selection/clipboard
-   (`wl_data_device`). The remaining daily-driver gaps for vim/less/tmux.
-3. **Retire the framebuffer edges** (bite 10) + a hardening audit of the Wayland wire
-   parser (the new untrusted-input boundary).
-
-Then **M8** (v1.0 hardening + engine / `aethersafha` extraction). **AGNOS-native** is
-post-v1.0; the **command center** is v3. See [`roadmap.md`](roadmap.md).
-
-Resize is a grid dim-change (fixed-max backing), so heap-allocating the grid remains a
-deferred optimization — now also the lever for raising `GRID_MAX_*` further without the
-~1 MB BSS cost (a >4K or multi-monitor-span window still clamps to 480×144).
+**0.7.4**, retiring the console edges, then the releases in [`roadmap.md`](roadmap.md) through 1.0.0.

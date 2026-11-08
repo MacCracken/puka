@@ -12,6 +12,7 @@
 # ⚠ WHITE-BOX: the tests set `setuwin_client` directly instead of calling `win_open`, which dials
 # `$SETU_SOCKET` or the default path and could reach a compositor that is really running.
 
+include "src/grid.cyr"
 include "src/platform/setu/window_setu.cyr"
 
 var WST_PATH = "/tmp/puka-window-setu-test.sock";

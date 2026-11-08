@@ -1,6 +1,6 @@
 # 0003 — A Wayland desktop window, not a framebuffer console, is the v1 surface
 
-**Status**: Accepted
+**Status**: Superseded by [0005](0005-v1-ships-on-setu-with-gpu-cells.md)
 **Date**: 2026-06-19
 
 ## Context

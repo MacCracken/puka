@@ -127,10 +127,24 @@ fn input__arrow(final, mods, out): i64 {
     return 3;
 }
 
+# What Ctrl turns an ASCII key into, by xterm's rule. Only @..~ fold by masking. The rest are specific
+# (Ctrl+2 is NUL, Ctrl+3..7 are ESC..US, Ctrl+8 is DEL, Ctrl+/ is US) or unchanged, and masking those
+# did real damage: Ctrl+- came out as 0x0D and ran the typed line, and Ctrl+3 sent XOFF.
+fn input__ctrl(cp): i64 {
+    if (cp >= 0x40) { if (cp <= 0x7E) { return cp & 0x1F; } }
+    if (cp == 0x20) { return 0; }                # Ctrl+Space
+    if (cp == 0x32) { return 0; }                # Ctrl+2
+    if (cp >= 0x33) { if (cp <= 0x37) { return cp - 0x33 + 0x1B; } }   # Ctrl+3..7
+    if (cp == 0x38) { return 0x7F; }             # Ctrl+8
+    if (cp == 0x2F) { return 0x1F; }             # Ctrl+/
+    if (cp == 0x7F) { return 0x08; }             # Ctrl+Backspace
+    return cp;
+}
+
 # Printable codepoint: Ctrl-fold (ASCII only) -> optional Alt ESC-prefix -> UTF-8.
 fn input__printable(cp, mods, out): i64 {
     if ((mods & MOD_CTRL) != 0) {
-        if (cp < 0x80) { cp = cp & 0x1F; }       # Ctrl+A->0x01 … Ctrl+_->0x1F; non-ASCII: no fold
+        if (cp < 0x80) { cp = input__ctrl(cp); }
     }
     var n = 0;
     if ((mods & MOD_ALT) != 0) { store8(out, 0x1B); n = 1; }   # Alt = ESC prefix (metaSendsEscape)
@@ -195,14 +209,20 @@ fn input_paste(text, len, cap, out): i64 {
         store8(out + n + 4, 0x30); store8(out + n + 5, 0x7E);      # 0 ~   -> ESC[200~
         n = n + 6;
         var i = 0;
+        var prev = 0;
         while (i < len) {
             var b = load8(text + i);
+            # ⚠ 0x9B is the C1 CSI only standing alone. After a byte >= 0x80 it is a UTF-8 continuation
+            # (U+00DB is C3 9B), and stripping it would corrupt the text.
+            var c1 = 0;
+            if (b == 0x9B) { if (prev < 0x80) { c1 = 1; } }
             if (b != 0x1B) {                                       # strip ESC (7-bit CSI introducer)
-                if (b != 0x9B) {                                   # strip 8-bit C1 CSI introducer
-                    if (n + 1 > cap) { return n; }
+                if (c1 == 0) {                                     # strip 8-bit C1 CSI introducer
+                    if (n + 1 + 6 > cap) { break; }                # always leave room to close
                     store8(out + n, b); n = n + 1;
                 }
             }
+            prev = b;
             i = i + 1;
         }
         if (n + 6 > cap) { return n; }

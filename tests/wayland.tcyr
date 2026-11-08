@@ -1,0 +1,221 @@
+# wayland.tcyr — the Wayland wire parser, headless. A compositor is a separate process, and everything
+# it sends is untrusted, so this drives the decoder with hostile bytes directly: `wl_fd` is -1 and the
+# receive buffer is filled by hand. The 0.7.3 audit's High findings live here.
+include "src/platform/wayland/wire.cyr"
+include "src/platform/wayland/client.cyr"
+include "src/platform/wayland/shm.cyr"
+include "src/platform/window.cyr"
+
+fn wl_reset(): i64 {
+    wl_fd = 0 - 1;
+    wl_rlen = 0;
+    wl_closed = 0;
+    wl_send_dead = 0;
+    wl_cfg_w = 0;
+    wl_cfg_h = 0;
+    wl_free_count = 0;
+    wl_next_id = 100;
+    return 0;
+}
+
+# Append one message header at the end of the receive buffer.
+fn put_msg(id, op, size): i64 {
+    store32(&wl_rbuf + wl_rlen, id);
+    store32(&wl_rbuf + wl_rlen + 4, (size << 16) | op);
+    wl_rlen = wl_rlen + 8;
+    return wl_rlen;
+}
+fn put_u32(v): i64 { store32(&wl_rbuf + wl_rlen, v); wl_rlen = wl_rlen + 4; return wl_rlen; }
+
+fn configure(w, h): i64 {
+    wl_rlen = 0;
+    put_msg(wl_top_oid, EV_TOPLEVEL_CONFIGURE, 20);
+    put_u32(w);
+    put_u32(h);
+    put_u32(0);
+    wl__parse();
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("wire: headers and strings");
+    var b[64];
+    wire_hdr_put(&b, 7, 3, 16);
+    assert_eq(load32(&b), 7, "object id");
+    assert_eq(load32(&b + 4), (16 << 16) | 3, "size in the high half, opcode in the low");
+    var off = wire_put_str(&b, 8, "abc", 3);
+    assert_eq(load32(&b + 8), 4, "a string's length counts its NUL");
+    assert_eq(load8(&b + 12 + 3), 0, "and the NUL is written");
+    assert_eq(off, 16, "padded to 4 bytes");
+    off = wire_put_str(&b, 8, "abcd", 4);
+    assert_eq(off, 20, "a length on the boundary pads to the next");
+
+    test_group("framing");
+    wl_reset();
+    put_msg(999, 0, 4);
+    wl__parse();
+    assert_eq(wl_closed, 1, "a size under the header closes the connection");
+    wl_reset();
+    put_msg(999, 0, 16);
+    wl__parse();
+    assert_eq(wl_rlen, 8, "a partial message waits for the rest");
+    put_u32(1);
+    put_u32(2);
+    wl__parse();
+    assert_eq(wl_rlen, 0, "and is consumed once it is whole");
+    wl_reset();
+    put_msg(999, 0, 8);
+    put_msg(999, 0, 12);
+    wl__parse();
+    assert_eq(wl_rlen, 8, "the unfinished tail stays");
+    assert_eq(load32(&wl_rbuf), 999, "compacted to the front");
+
+    test_group("configure: only a plausible extent is taken");
+    wl_reset();
+    wl_top_oid = 50;
+    configure(800, 600);
+    assert_eq(wl_cfg_w, 800, "an ordinary width");
+    assert_eq(wl_cfg_h, 600, "an ordinary height");
+    wl_reset();
+    configure(0x80010001, 0x7FFF0001);
+    assert_eq(wl_cfg_w, 0, "a negative width, read unsigned, is refused");
+    assert_eq(wl_cfg_h, 0, "and a huge height");
+    configure(0xFFFFFFFF, 0xFFFFFFFF);
+    assert_eq(wl_cfg_w, 0, "-1 is refused");
+    configure(WL_MAX_PX + 1, 600);
+    assert_eq(wl_cfg_w, 0, "one past the limit is refused");
+    assert_eq(wl_cfg_h, 600, "without losing the other axis");
+    configure(WL_MAX_PX, 600);
+    assert_eq(wl_cfg_w, WL_MAX_PX, "the limit itself is accepted");
+
+    test_group("a truncated message reads as absent, not past its end");
+    wl_reset();
+    configure(800, 600);
+    wl_rlen = 0;
+    put_msg(wl_top_oid, EV_TOPLEVEL_CONFIGURE, 8);
+    wl__parse();
+    assert_eq(wl_cfg_w, 800, "a configure with no body changes nothing");
+
+    test_group("registry strings");
+    wl_reset();
+    wl_reg_id = 60;
+    var g0 = wl_nglobals;
+    put_msg(wl_reg_id, EV_REGISTRY_GLOBAL, 20);
+    put_u32(1); put_u32(0xFFFFFFFF); put_u32(0);
+    wl__parse();
+    assert_eq(wl_nglobals, g0, "L = 0xFFFFFFFF is refused");
+    wl_rlen = 0;
+    put_msg(wl_reg_id, EV_REGISTRY_GLOBAL, 20);
+    put_u32(1); put_u32(0); put_u32(0);
+    wl__parse();
+    assert_eq(wl_nglobals, g0, "L = 0 is refused");
+    wl_rlen = 0;
+    put_msg(wl_reg_id, EV_REGISTRY_GLOBAL, 20);
+    put_u32(1); put_u32(4000); put_u32(0);
+    wl__parse();
+    assert_eq(wl_nglobals, g0, "a string past the message is refused");
+    wl_rlen = 0;
+    put_msg(wl_reg_id, EV_REGISTRY_GLOBAL, 28);
+    put_u32(9);
+    wl_rlen = wire_put_str(&wl_rbuf, wl_rlen, "wl_seat", 7);
+    put_u32(5);
+    wl__parse();
+    assert_eq(wl_gn_seat, 9, "a well-formed global is recorded");
+    assert_eq(wl_gv_seat, 5, "with its version");
+
+    test_group("keyboard queue");
+    wl_reset();
+    wl_kbd_oid = 70;
+    var i = 0;
+    while (i < 40) {
+        wl_rlen = 0;
+        put_msg(wl_kbd_oid, EV_KBD_KEY, 24);
+        put_u32(0); put_u32(0); put_u32(30); put_u32(1);
+        wl__parse();
+        i = i + 1;
+    }
+    var rec[24];
+    var n = 0;
+    while (wl_pop_key(&rec) == 1) { n = n + 1; }
+    assert_eq(n, 31, "a full queue drops, and holds what it can");
+
+    test_group("object ids come back only when the server says so");
+    wl_reset();
+    var id0 = wl_alloc_id();
+    var id1 = wl_alloc_id();
+    wl_rlen = 0;
+    put_msg(WL_DISPLAY_ID, EV_DISPLAY_DELETE, 12);
+    put_u32(id0);
+    wl__parse();
+    assert_eq(wl_alloc_id(), id0, "a deleted id is reused");
+    assert_eq(wl_alloc_id(), id1 + 1, "otherwise the next is new");
+    wl_rlen = 0;
+    put_msg(WL_DISPLAY_ID, EV_DISPLAY_DELETE, 12);
+    put_u32(1);
+    wl__parse();
+    put_msg(WL_DISPLAY_ID, EV_DISPLAY_DELETE, 12);
+    put_u32(0x7FFFFFFF);
+    wl__parse();
+    assert_eq(wl_free_count, 0, "wl_display and ids never issued are not recycled");
+
+    test_group("the socket path is bounded");
+    var pb[128];
+    var longs = alloc(600);
+    memset(longs, 0x41, 599);
+    store8(longs + 599, 0);
+    assert_eq(wl__copy_cstr(&pb, 0, longs), 0 - 1, "an over-long value is refused");
+    assert_eq(wl__copy_cstr(&pb, 100, "12345678"), 0 - 1, "and one that only fits from the start");
+    assert_eq(wl__copy_cstr(&pb, 100, "1234567"), 107, "the limit fits");
+
+    test_group("surface sizes");
+    assert_eq(win__fit(0, 640, 8), 640, "unset takes the default");
+    assert_eq(win__fit(4, 640, 8), 8, "never less than a cell");
+    assert_eq(win__fit(800, 640, 8), 800, "otherwise as asked");
+    wl_reset();
+    assert_eq(shm_create(32767, 32767), 0, "an extent past int32 bytes is refused");
+    assert_eq(shm_resize(32767, 32767), 0, "at resize too");
+    win_w = 800;
+    win_h = 600;
+    win_cell_w = 8;
+    win_cell_h = 16;
+    wl_cfg_w = 32767;
+    wl_cfg_h = 32767;
+    assert_eq(win_resize_apply(0), 0 - 1, "a refit that fails reports it");
+    assert_eq(win_w, 800, "and win_w still describes the old buffer");
+    assert_eq(win_h, 600, "and win_h");
+
+    #ifdef CYRIUS_TARGET_LINUX
+    test_group("sends never block and never kill");
+    var sv[16];
+    if (syscall(53, 1, 1, 0, &sv) == 0) {         # socketpair(AF_UNIX, SOCK_STREAM)
+        wl_reset();
+        wl_fd = load32(&sv);
+        var peer = load32(&sv + 4);
+        store32(&wl_sbuf, 0);
+        var sent = 0;
+        while (sent < 200000) {                    # nothing reads the peer, so the socket fills
+            if (wl__send(256) < 0) { break; }
+            sent = sent + 1;
+        }
+        assert_lt(sent, 200000, "a compositor that stopped reading is given up on");
+        assert_eq(wl_closed, 1, "and the window closes rather than freezing");
+        assert_eq(wl__send(8), 0 - 1, "later sends do nothing");
+        sys_close(peer);
+        sys_close(wl_fd);
+        if (syscall(53, 1, 1, 0, &sv) == 0) {
+            wl_reset();
+            wl_fd = load32(&sv);
+            sys_close(load32(&sv + 4));
+            assert_eq(wl__send(8), 0 - 1, "a send to a dead compositor reports it, with no SIGPIPE");
+            sys_close(wl_fd);
+        }
+    }
+    #endif
+
+    return assert_summary();
+}
+
+fn _entry(): i64 { var rc = main(); syscall(SYS_EXIT, rc); return 0; }
+_entry();

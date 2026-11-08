@@ -25,7 +25,8 @@ enum Utf8Const {
 # Incremental decoder state.
 var utf8_cp = 0;     # codepoint accumulator
 var utf8_need = 0;   # remaining continuation bytes expected
-var utf8_min = 0;    # minimum legal codepoint for this length (overlong guard)
+var utf8_lo = 0x80;  # lowest legal value of the NEXT continuation byte
+var utf8_hi = 0xbf;  # highest legal value of the NEXT continuation byte
 # ⭐ "THE BYTE I JUST REFUSED WAS NOT MINE." Set when a sequence is aborted by a byte that is not a
 # continuation — that byte belongs to whatever comes NEXT, and the caller must feed it again.
 # See `utf8_feed`'s truncation arm and `term_feed`'s re-dispatch.
@@ -34,7 +35,8 @@ var utf8_reject = 0;
 fn utf8_reset(): i64 {
     utf8_cp = 0;
     utf8_need = 0;
-    utf8_min = 0;
+    utf8_lo = 0x80;
+    utf8_hi = 0xbf;
     return 0;
 }
 
@@ -52,38 +54,46 @@ fn utf8_feed(b): i64 {
         # expecting a lead (or single) byte
         if (b < 0x80) { return b; }                       # ASCII
         if (b >= 0xc2) {
-            if (b <= 0xdf) { utf8_cp = b & 0x1f; utf8_need = 1; utf8_min = 0x80; return UTF8_MORE; }
+            if (b <= 0xdf) { utf8_cp = b & 0x1f; utf8_need = 1; return UTF8_MORE; }
         }
         if (b >= 0xe0) {
-            if (b <= 0xef) { utf8_cp = b & 0x0f; utf8_need = 2; utf8_min = 0x800; return UTF8_MORE; }
+            if (b <= 0xef) {
+                utf8_cp = b & 0x0f;
+                utf8_need = 2;
+                if (b == 0xe0) { utf8_lo = 0xa0; }       # below this is an overlong form
+                if (b == 0xed) { utf8_hi = 0x9f; }       # above this is a UTF-16 surrogate
+                return UTF8_MORE;
+            }
         }
         if (b >= 0xf0) {
-            if (b <= 0xf4) { utf8_cp = b & 0x07; utf8_need = 3; utf8_min = 0x10000; return UTF8_MORE; }
+            if (b <= 0xf4) {
+                utf8_cp = b & 0x07;
+                utf8_need = 3;
+                if (b == 0xf0) { utf8_lo = 0x90; }       # below this is an overlong form
+                if (b == 0xf4) { utf8_hi = 0x8f; }       # above this is past U+10FFFF
+                return UTF8_MORE;
+            }
         }
         return UC_REPLACE;   # stray continuation (0x80-0xBF), 0xC0/0xC1, 0xF5-0xFF
     }
 
-    # expecting a continuation byte (0x80-0xBF)
+    # expecting a continuation byte, in the range the lead byte allows (Table 3-7 of the Unicode
+    # standard). Checking the range here, not after the sequence completes, is what makes each
+    # maximal subpart one U+FFFD: `E0 80 80` is three bad bytes, not one bad character.
     # ⛔ THE ABORTING BYTE IS NOT CONSUMED, AND IT USED TO BE — a real character was lost every time.
     # `E2 41` ("truncated 3-byte sequence, then 'A'") yielded U+FFFD and silently ATE the 'A'. Unicode
     # 15 §3.9's maximal-subpart guidance, and every other terminal, emit U+FFFD for the bad prefix and
     # then process the byte normally, because that byte starts the next character. `utf8_reject` says
     # so and `term_feed` feeds it again; a caller that ignores the flag behaves exactly as before.
-    if (b < 0x80) { utf8_reset(); utf8_reject = 1; return UC_REPLACE; }
-    if (b > 0xbf) { utf8_reset(); utf8_reject = 1; return UC_REPLACE; }
+    if (b < utf8_lo) { utf8_reset(); utf8_reject = 1; return UC_REPLACE; }
+    if (b > utf8_hi) { utf8_reset(); utf8_reject = 1; return UC_REPLACE; }
+    utf8_lo = 0x80;
+    utf8_hi = 0xbf;
     utf8_cp = (utf8_cp << 6) | (b & 0x3f);
     utf8_need = utf8_need - 1;
     if (utf8_need > 0) { return UTF8_MORE; }
-
-    # sequence complete — validate
     var cp = utf8_cp;
-    var lo = utf8_min;
     utf8_reset();
-    if (cp < lo) { return UC_REPLACE; }                    # overlong
-    if (cp > UC_MAX) { return UC_REPLACE; }                # beyond Unicode
-    if (cp >= 0xd800) {
-        if (cp <= 0xdfff) { return UC_REPLACE; }           # UTF-16 surrogate
-    }
     return cp;
 }
 
@@ -128,6 +138,7 @@ fn uc__in(cp, lo, hi): i64 {
 # Zero-width: combining marks + explicit zero-width / format chars (subset).
 fn uc__zero_width(cp): i64 {
     if (cp == 0) { return 1; }                       # NUL
+    if (uc__in(cp, 0x0080, 0x009f) == 1) { return 1; }  # C1 controls: never a printing cell
     if (uc__in(cp, 0x0300, 0x036f) == 1) { return 1; }  # combining diacritical
     if (uc__in(cp, 0x0483, 0x0489) == 1) { return 1; }
     if (uc__in(cp, 0x0591, 0x05bd) == 1) { return 1; }
@@ -177,6 +188,10 @@ fn char_width(cp): i64 {
     # 0x20..0x7E can be either. (NUL is zero-width and is correctly excluded by the lower bound.)
     # Measured on `term_feed printable`: 300ns -> see CHANGELOG 0.6.22.
     if (cp >= 0x20) { if (cp < 0x7f) { return 1; } }
+    # Latin through Spacing Modifiers, and box drawing and block elements, which full-screen
+    # programs print constantly. Neither range holds a table entry, for the same provable reason.
+    if (cp >= 0xa0) { if (cp < 0x300) { return 1; } }
+    if (cp >= 0x2500) { if (cp < 0x25a0) { return 1; } }
     if (uc__zero_width(cp) == 1) { return 0; }
     if (uc__wide(cp) == 1) { return 2; }
     return 1;

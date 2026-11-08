@@ -81,6 +81,52 @@ fn main() {
             assert_eq(grid_cursor_row(), 1, "cursor advanced past the echoed line");
         }
     }
+
+    test_group("pty: the login name stays inside its buffer");
+    assert(streq(pty_login_name("/usr/bin/zsh"), "-zsh") == 1, "-basename");
+    assert(streq(pty_login_name("bash"), "-bash") == 1, "a bare name");
+    var longname = alloc(300);
+    memset(longname, 0x61, 299);
+    store8(longname + 299, 0);
+    assert_eq(load8(pty_login_name(longname) + 63), 0, "an over-long name is truncated with its NUL inside");
+    assert_eq(strlen(pty_login_name(longname)), 63, "the '-' and 62 bytes of name");
+
+    test_group("pty: the child's end");
+    term_init(24, 80);
+    if (pty_open() >= 0) {
+        pty_pump(2);
+        assert_eq(pty_child_gone(), 0, "no child yet is not a child that left");
+        if (pty_spawn("/bin/true", 0, 0, 24, 80) > 0) {
+            var w = 0;
+            while (w < 3000) {
+                pty_pump(2);
+                if (pty_child_gone() == 1) { w = 3000; }
+                w = w + 1;
+            }
+            assert_eq(pty_child_gone(), 1, "a shell that exits is seen");
+            pty_wait();
+        }
+        pty_close();
+    }
+
+    test_group("pty: a child that never stops writing cannot hold the loop");
+    term_init(24, 80);
+    if (pty_open() >= 0) {
+        if (pty_spawn("/usr/bin/yes", 0, 0, 24, 80) > 0) {
+            var got = 0;
+            var tries = 0;
+            while (got == 0) {
+                if (tries >= 3000) { break; }
+                got = pty_pump(2);
+                tries = tries + 1;
+            }
+            assert_gt(got, 0, "the flood arrives");
+            assert_lte(got, PTY_PUMP_MAX + 1024, "and one pump returns having read no more than its cap");
+            syscall(62, pty_child_pid, 9);       # SIGKILL
+            pty_wait();
+        }
+        pty_close();
+    }
     #endif
 
     #ifndef CYRIUS_TARGET_LINUX

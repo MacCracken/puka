@@ -4,6 +4,92 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-11-08 — the P(-1) sweep: 60 findings, and a roadmap that describes the project
+
+A full line-by-line audit, filed in [`docs/audit/2026-11-08-audit.md`](docs/audit/2026-11-08-audit.md), which has
+every finding. Four independent reads, High and Medium findings reproduced wherever that was possible headless, and expected VT behaviour compared with a
+real terminal (kitty's parser, driven headless). Repairs have tests wherever a headless test can reach them, and
+each new test was shown to fail with its repair removed.
+
+### Security — 6 High, all repaired
+
+- **A hostile setu `CONFIGURE` overran the present buffer** on the release path (full i64 sizes wrapped the check on both
+  sides). The surface is now clamped to what the grid can fill, where the arithmetic cannot overflow.
+- **A hostile Wayland configure wrote through a one-page mapping.** Sizes are validated at the wire, committed only
+  after the buffer succeeds, and floored to one cell, which is what the blit assumes.
+- **`$SHELL`, `$WAYLAND_DISPLAY` and `$XDG_RUNTIME_DIR`** overflowed fixed buffers.
+
+### Fixed — the release binary
+
+- **The shell never learned its size:** the resize path told fd 0, puka's stdin, instead of the PTY.
+- **A shell that exited left a dead window running.** There was no child-exit path.
+- **On Linux it launched `/bin/agnsh`**, which does not exist there. It now hosts `$SHELL`.
+- **`yes` froze the terminal:** no repaint, no Ctrl-C. A pump now stops at 64 KiB.
+- **Box-drawing was invisible and all of Latin-1 drew the wrong glyph.** The grid holds Unicode, and kashi takes CP437.
+
+### Fixed — VT behaviour
+
+- Intermediates are honoured, so `CSI $ r` is not DECSTBM. `:` sub-parameters are grouped, so `4:3` is an underline style.
+  Mode lists read every entry, so `cvvis` no longer leaves the cursor hidden.
+- DECSC saves the pen, modes and wrap state, per screen. `CSI 3 J` clears the scrollback, not the screen.
+- Margins hold for CUU, CUD, CNL, CPL, VPA and DECOM CUP, and IL/DL do nothing outside the region.
+- The pending-wrap latch clears wherever it should, and survives HT at the margin.
+- Overwriting half of a wide glyph dissolves the pair. A partial UTF-8 sequence ends at a control byte, and bad
+  sequences follow maximal subparts.
+- **REP, CBT, CHT, HPA, HPR and VPR now dispatch.** `TERM=xterm-256color` advertises REP, so ncurses output lost cells.
+- A height shrink keeps the cursor's line, sending the top rows to history.
+
+### Fixed — memory and the compositor connection
+
+- **One window drag consumed 480 MB for a 6 MB buffer.** Buffers grow geometrically.
+- **Every present leaked 64 B,** and idle frames presented too. An idle terminal now allocates nothing. ⚠ 32 B per damaged
+  frame remains, inside dhancha's blit. It is a one-line fix there, and CLAUDE.md says not to inline what a sibling owns.
+- **Wayland sends no longer block forever or die of SIGPIPE,** the socket is close-on-exec, and object ids are recycled.
+
+### Fixed — input
+
+Ctrl follows xterm's rule (Ctrl+- sent CR and ran the typed line). On agnos an arrow key no longer types `[A`. A
+capped paste keeps its closer, and a UTF-8 0x9B survives it. KP Enter works.
+
+### Added
+
+- **`tests/wayland.tcyr` and `tests/wayland.fcyr`:** the Wayland wire parser, the last untested untrusted-input
+  boundary, now has headless tests and 28,000 fuzz assertions.
+- **`tests/vt_semantics.tcyr`** pins behaviour checked against kitty, and names where puka deliberately differs.
+- **`tests/screen_edges.tcyr`:** resize, the alt screen, glyph lookup, memory per frame.
+
+### Changed
+
+- **The roadmap is a release plan from 0.7.x to 1.0.0,** with what other repos owe called out. Completed milestones are gone.
+- **[ADR-0005](docs/adr/0005-v1-ships-on-setu-with-gpu-cells.md):** v1.0 ships on setu with GPU-rendered cells. It supersedes ADR-0003.
+- **README and the architecture overview** described 0.6.2 and a Wayland v1. They now describe the project.
+- `pty_login_name` moved into `src/pty.cyr`, where it can be tested. The agnos spawn uses the stdlib's `sys_chan_endow_stdio`.
+- Dead code removed: `vt_init`, the unused `fb_set_*`, `pix_rgb_to_xrgb`, `grid_pen_*_get`, `wire_msg_*`.
+
+### Performance
+
+Median of five interleaved runs against 0.7.2: CSI SGR 124 → 85 ns (−31%), `fb_render` 1.87 → 1.23 ms (−34%), `grid_scroll_up`
+10.75 → 10.30 µs (−4%). `term_feed` 195 → 202 ns (+3.6%), the cost of the wide-cell check on each glyph. An alt-screen
+toggle pair costs 58 µs, not 708, at 80×24.
+
+### Sizes
+
+| build (bytes) | 0.7.2 | 0.7.3 | Δ |
+|---|---|---|---|
+| Linux, `CYRIUS_DCE=1` (CI / release) | 1,423,536 | 1,436,232 | +12,696 (+0.9%) |
+| `--agnos` | 1,934,656 | 1,943,216 | +8,560 (+0.4%) |
+
+### Verification
+
+- **CI, replayed:** every `run:` block of `ci.yml`, on a fresh toolchain install, once for each listing order of the
+  toolchain's `lib/`.
+- **Tests:** 770 passed, 0 failed across 19 files. **Fuzz:** 29,297 green, also under `--poison`.
+- **Static checks:** lint 0 warnings across `src/`, `programs/` and `tests/`, `fmt --check` clean, `vet` 14 deps, 0 untrusted,
+  0 missing, `deps --verify` 40/0, `deps --locked` clean.
+- **The audit's crash reproductions** rerun against the repairs: every High scenario survives.
+- ⚠ **`cyrius audit` still exits 1 on its docs step**, now reporting 445 (428 at 0.7.2), the inflated count 0.6.25 explains. It closes at 0.9.3.
+- ⚠ **Not run:** the GPU probes, and anything on agnos or under a live compositor. Compositors were simulated over real sockets.
+
 ## [0.7.2] - 2026-11-07 — dhancha 0.11.1, and the overrides it makes unnecessary
 
 dhancha finally has a tag on puka's cyrius pin, so every dependency is now on 6.7.18, and the three

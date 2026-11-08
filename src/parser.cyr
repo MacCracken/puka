@@ -20,9 +20,8 @@
 # continuation bytes, so all C1 functions arrive 7-bit via ESC. This is the
 # correct choice for a modern UTF-8 terminal.
 #
-# Scope (M1): GROUND / ESCAPE / CSI / OSC fully implemented. DCS and
-# SOS/PM/APC strings are consumed and discarded (VT_STR_IGN) — full DCS
-# passthrough (hook/put/unhook events) is deferred to M6 per the roadmap.
+# Scope: GROUND / ESCAPE / CSI / OSC fully implemented. DCS and SOS/PM/APC
+# strings are consumed and discarded (VT_STR_IGN).
 
 # ---- States (Williams) -------------------------------------------------
 enum VtState {
@@ -64,6 +63,7 @@ var vt_state = 0;
 var vt_nparams = 0;     # index of the current (last) param slot, 0-based
 var vt_have_param = 0;  # 1 if any digit/separator seen this sequence
 var vt_params[16];
+var vt_sub_mask = 0;    # bit i = slot i was joined to slot i-1 by ':' (an ECMA-48 sub-parameter)
 var vt_ninter = 0;
 var vt_inter[2];
 var vt_pfx = 0;         # CSI private-marker byte (0x3C-0x3F), else 0
@@ -73,16 +73,21 @@ var vt_str_buf[64];
 
 # ---- Internal actions --------------------------------------------------
 
-# CLEAR: reset params, intermediates, and the private marker. Run on entry
-# to a fresh control sequence (ESC, CSI_ENTRY).
+# CLEAR: reset params, intermediates, and the private marker. Run on entry to a
+# fresh control sequence (ESC).
+# Only slots 0..vt_nparams can be non-zero, because digits go only to the current slot and
+# vt__param_next zeroes each new one, so nothing past it needs clearing.
 fn vt__clear(): i64 {
+    var i = 0;
+    while (i <= vt_nparams) {
+        if (i < VT_PARAM_MAX) { store64(&vt_params + i * 8, 0); }
+        i = i + 1;
+    }
     vt_nparams = 0;
     vt_have_param = 0;
+    vt_sub_mask = 0;
     vt_ninter = 0;
     vt_pfx = 0;
-    for (var i = 0; i < VT_PARAM_MAX; i = i + 1) {
-        store64(&vt_params + i * 8, 0);
-    }
     return 0;
 }
 
@@ -97,15 +102,17 @@ fn vt__param_digit(d): i64 {
     return 0;
 }
 
-# PARAM separator (';' and, flattened, ':'): advance to the next slot.
-# NOTE: ':' sub-parameters are flattened into the same flat list in M1 —
-# enough to *read* SGR truecolor (38:2:r:g:b becomes separate params);
-# preserving ';' vs ':' grouping is a later refinement.
-fn vt__param_next(): i64 {
+# PARAM separator: advance to the next slot. `sub` is 1 for ':', which joins the new slot to the
+# one before it as a sub-parameter, so SGR can tell `4:3` (one attribute) from `4;3` (two).
+# Past the last slot vt_nparams parks at VT_PARAM_MAX, which is what stops vt__param_digit from
+# folding the digits of later parameters into the last slot.
+fn vt__param_next(sub): i64 {
     vt_have_param = 1;
-    if (vt_nparams + 1 < VT_PARAM_MAX) {
-        vt_nparams = vt_nparams + 1;
+    if (vt_nparams >= VT_PARAM_MAX) { return 0; }
+    vt_nparams = vt_nparams + 1;
+    if (vt_nparams < VT_PARAM_MAX) {
         store64(&vt_params + vt_nparams * 8, 0);
+        if (sub == 1) { vt_sub_mask = vt_sub_mask | (1 << vt_nparams); }
     }
     return 0;
 }
@@ -146,8 +153,16 @@ fn vt_event_char(): i64 { return vt_evch; }
 
 # Number of parameters present (0 = none given → consumer uses defaults).
 fn vt_param_count(): i64 {
-    if (vt_have_param == 1) { return vt_nparams + 1; }
-    return 0;
+    if (vt_have_param == 0) { return 0; }
+    if (vt_nparams >= VT_PARAM_MAX) { return VT_PARAM_MAX; }
+    return vt_nparams + 1;
+}
+
+# 1 if parameter i was introduced by ':', making it a sub-parameter of the one before it.
+fn vt_param_is_sub(i): i64 {
+    if (i < 0) { return 0; }
+    if (i >= VT_PARAM_MAX) { return 0; }
+    return (vt_sub_mask >> i) & 1;
 }
 
 # Raw value of parameter i (0 if absent).
@@ -192,8 +207,6 @@ fn vt_reset(): i64 {
     return 0;
 }
 
-fn vt_init(): i64 { return vt_reset(); }
-
 # ---- The machine -------------------------------------------------------
 # Feed one byte. Returns one VtEvent (VTE_NONE for pure bookkeeping).
 fn vt_feed(b): i64 {
@@ -235,7 +248,7 @@ fn vt_feed(b): i64 {
     if (vt_state == VT_ESCAPE) {
         if (vt__is_c0(b) == 1) { vt_evch = b; return VTE_EXECUTE; }
         if (b == 0x7f) { return VTE_NONE; }
-        if (b == 0x5b) { vt_state = VT_CSI_ENTRY; vt__clear(); return VTE_NONE; }   # '[' CSI
+        if (b == 0x5b) { vt_state = VT_CSI_ENTRY; return VTE_NONE; }                # '[' CSI (ESC cleared)
         if (b == 0x5d) { vt_state = VT_OSC; vt__str_reset(); return VTE_NONE; }     # ']' OSC
         if (b == 0x50) { vt_state = VT_STR_IGN; return VTE_NONE; }                  # 'P' DCS (M6)
         if (b == 0x58) { vt_state = VT_STR_IGN; return VTE_NONE; }                  # 'X' SOS
@@ -272,8 +285,8 @@ fn vt_feed(b): i64 {
         if (b >= 0x30) {
             if (b <= 0x39) { vt__param_digit(b - 0x30); vt_state = VT_CSI_PARAM; return VTE_NONE; }
         }
-        if (b == 0x3b) { vt__param_next(); vt_state = VT_CSI_PARAM; return VTE_NONE; }   # ';'
-        if (b == 0x3a) { vt__param_next(); vt_state = VT_CSI_PARAM; return VTE_NONE; }   # ':'
+        if (b == 0x3b) { vt__param_next(0); vt_state = VT_CSI_PARAM; return VTE_NONE; }   # ';'
+        if (b == 0x3a) { vt__param_next(1); vt_state = VT_CSI_PARAM; return VTE_NONE; }   # ':'
         if (b >= 0x3c) {
             if (b <= 0x3f) { vt_pfx = b; vt_state = VT_CSI_PARAM; return VTE_NONE; }     # private marker
         }
@@ -294,8 +307,8 @@ fn vt_feed(b): i64 {
         if (b >= 0x30) {
             if (b <= 0x39) { vt__param_digit(b - 0x30); return VTE_NONE; }
         }
-        if (b == 0x3b) { vt__param_next(); return VTE_NONE; }
-        if (b == 0x3a) { vt__param_next(); return VTE_NONE; }
+        if (b == 0x3b) { vt__param_next(0); return VTE_NONE; }
+        if (b == 0x3a) { vt__param_next(1); return VTE_NONE; }
         if (b >= 0x3c) {
             if (b <= 0x3f) { vt_state = VT_CSI_IGNORE; return VTE_NONE; }   # marker mid-param → ignore
         }

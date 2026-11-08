@@ -127,6 +127,7 @@ fn evdev__keymap(code, shift): i64 {
     if (code == 52) { if (shift != 0) { return 0x3E; } return 0x2E; }   # . >
     if (code == 53) { if (shift != 0) { return 0x3F; } return 0x2F; }   # / ?
     if (code == 55) { return 0x2A; }                                   # KP *
+    if (code == 96) { return 0x0D; }                                   # KP Enter
 
     # navigation -> named keys
     if (code == 103) { return KEY_UP; }

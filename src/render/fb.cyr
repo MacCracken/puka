@@ -29,13 +29,6 @@
 # KMS/DRM or the AGNOS `blit`#39 framebuffer — is a thin later backend over
 # the same buffer, not this module's concern.
 
-# Cursor styles (only block is wired; the rest are reserved for a DECSCUSR bite).
-enum FbCursorStyle {
-    FB_CURSOR_BLOCK     = 0;
-    FB_CURSOR_UNDERLINE = 1;
-    FB_CURSOR_BAR       = 2;
-}
-
 # ---- module state ------------------------------------------------------
 var fb_buf_ptr = 0;        # heap base of the W*H*3 RGB buffer (0 = uninitialized)
 var fb_cap     = 0;        # allocated bytes (high-water; fb_resize grows, never shrinks)
@@ -45,7 +38,6 @@ var fb_w       = 0;        # framebuffer width  = cols * fb_cell_w
 var fb_h       = 0;        # framebuffer height = rows * fb_cell_h
 var fb_def_fg  = 0xC0C0C0; # default foreground RGB (xterm light grey)
 var fb_def_bg  = 0x000000; # default background RGB (black)
-var fb_cursor_style = 0;   # FB_CURSOR_BLOCK
 var fb_font_id = 0;        # KASHI_FONT_VGA_8X16
 
 # ---- palette / colour resolution (pure) --------------------------------
@@ -118,8 +110,8 @@ fn fb__resolve(r, c, is_cursor, out): i64 {
     var bg = fb__decode(bgv, 0);
     if ((at & ATTR_DIM) != 0) { fg = (fg >> 1) & 0x7F7F7F; }      # halve each channel
     if ((at & ATTR_REVERSE) != 0) { var t = fg; fg = bg; bg = t; }
-    if ((at & ATTR_HIDDEN) != 0) { fg = bg; }                     # conceal glyph
     if (is_cursor != 0) { var u = fg; fg = bg; bg = u; }
+    if ((at & ATTR_HIDDEN) != 0) { fg = bg; }                     # after the swap, or SGR 8 hides the cursor
     store64(out, fg);
     store64(out + 8, bg);
     return 0;
@@ -217,12 +209,12 @@ fn fb_init(cell_w, cell_h): i64 {
 }
 
 # Re-fit the pixel buffer to the CURRENT grid dims after a window resize (the
-# grid was already grid_resize'd). Grow-only: the buffer is reallocated to a new
-# high-water size (rare — the allocator has no free, so per-drag realloc would
-# leak; growth converges as the user finds their max window), otherwise the
-# existing buffer is reused with a tighter stride (fb__plot strides by fb_w). No
-# zeroing: fb_render repaints every cell of every (now all-dirty) row, and the
-# present blits only the grid region. Returns 0, or -1 on bad size / OOM.
+# grid was already grid_resize'd). Grow-only, and geometrically: `alloc` has no free and a window
+# drag is a run of new high-water marks, so growing to exactly the new size abandoned a full buffer
+# per step (measured: 480 MB consumed for a final 6 MB buffer). Otherwise the existing buffer is
+# reused with a tighter stride (fb__plot strides by fb_w). No zeroing: fb_render repaints every cell
+# of every (now all-dirty) row, and the present blits only the grid region. Returns 0, or -1 on bad
+# size / OOM.
 fn fb_resize(): i64 {
     var nw = grid_get_cols() * fb_cell_w;
     var nh = grid_get_rows() * fb_cell_h;
@@ -231,11 +223,15 @@ fn fb_resize(): i64 {
     var sz = nw * nh * 3;
     if (sz <= 0) { return 0 - 1; }
     if (sz / 3 != nw * nh) { return 0 - 1; }       # overflow backstop
-    if (sz > fb_cap) {                              # grow to a new high-water (rare)
-        var p = alloc(sz);
+    if (sz > fb_cap) {
+        var grow = fb_cap * 2;
+        if (grow < sz) { grow = sz; }
+        var most = GRID_MAX_COLS * fb_cell_w * GRID_MAX_ROWS * fb_cell_h * 3;
+        if (grow > most) { grow = most; }
+        var p = alloc(grow);
         if (p == 0) { return 0 - 1; }
         fb_buf_ptr = p;
-        fb_cap = sz;
+        fb_cap = grow;
     }
     fb_w = nw;
     fb_h = nh;
@@ -243,26 +239,25 @@ fn fb_resize(): i64 {
     return 0;
 }
 
-# Re-seed cell metrics + re-allocate (e.g. adopting a new font's glyph size).
-fn fb_set_cell_size(cell_w, cell_h): i64 { return fb_init(cell_w, cell_h); }
-
 fn fb_set_default_colors(fg_rgb, bg_rgb): i64 {
     fb_def_fg = fg_rgb;
     fb_def_bg = bg_rgb;
     return 0;
 }
 
-fn fb_set_cursor_style(style): i64 { fb_cursor_style = style; return 0; }
-
 # ---- glyph foreground (kashi seam) -------------------------------------
 
 # Blit codepoint cp's bitmap at cell pixel origin (x_px,y_px) in fg_rgb, set
 # bits only (unset bits leave the already-painted background). Sourced from
 # kashi's freestanding font core: kashi_glyph_row returns one row byte,
-# bit 7 = leftmost pixel. Codepoints with no glyph (control / CJK / combining,
-# outside CP437 0x20..0xFF) yield 0 rows -> nothing drawn. Clamped to the cell
-# box so an oversized glyph never bleeds into a neighbour.
+# bit 7 = leftmost pixel. Clamped to the cell box so an oversized glyph never bleeds into a neighbour.
+# ⛔ THE GRID HOLDS UNICODE AND KASHI TAKES CP437 CELLS, and they agree only for ASCII. Passing the
+# codepoint through drew U+00E7 as cell 0xE7 (tau), so all of Latin-1 was wrong, and U+2500 had no
+# glyph at all, so every box-drawing border (htop, tmux, ncurses) was invisible. A codepoint with no
+# cell draws nothing.
 fn fb__glyph_draw(cp, x_px, y_px, fg_rgb): i64 {
+    var cell = kashi_cp437_from_unicode(cp);
+    if (cell == 0) { return 0; }
     var fw = kashi_font_width(fb_font_id);
     var fh = kashi_font_height(fb_font_id);
     if (fw <= 0) { return 0; }
@@ -272,7 +267,7 @@ fn fb__glyph_draw(cp, x_px, y_px, fg_rgb): i64 {
     if (fh > fb_cell_h) { fh = fb_cell_h; }
     var row = 0;
     while (row < fh) {
-        var bits = kashi_glyph_row(fb_font_id, cp, row);
+        var bits = kashi_glyph_row(fb_font_id, cell, row);
         if (bits != 0) {
             var col = 0;
             while (col < fw) {
@@ -307,6 +302,9 @@ fn fb__is_cursor(r, c): i64 {
 # of rows repainted.
 fn fb_render(): i64 {
     if (fb_buf_ptr == 0) { return 0; }
+    # Damage is keyed by live row. While scrolled back a live row shows at a different display row,
+    # so any change means repainting them all.
+    if (grid_view_off_get() != 0) { if (grid_any_dirty() == 1) { grid_mark_all_dirty(); } }
     var rows = grid_get_rows();
     var cols = grid_get_cols();
     var out[16];                             # 16 BYTES function-local scratch
@@ -323,7 +321,7 @@ fn fb_render(): i64 {
                 var bg = load64(&out + 8);
                 fb__fill_rect(px, py, fb_cell_w, fb_cell_h, bg);
                 var cp = grid_vglyph(r, c);
-                if (cp != 0) {                                    # skip wide spacer
+                if (cp > 0x20) {                                  # a space or wide spacer has no ink
                     if ((grid_vattr(r, c) & ATTR_HIDDEN) == 0) {
                         fb__glyph_draw(cp, px, py, fg);
                     }

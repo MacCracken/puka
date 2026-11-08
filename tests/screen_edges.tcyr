@@ -1,0 +1,160 @@
+# screen_edges.tcyr — the grid and renderer at their edges: resize, the alt screen, the scrollback
+# viewport, glyph lookup, and what a frame or a window drag costs in memory. The 0.7.3 audit's regressions.
+include "src/parser.cyr"
+include "src/grid.cyr"
+include "src/unicode.cyr"
+include "src/terminal.cyr"
+include "lib/kashi_font_data.cyr"
+include "src/render/pixfmt.cyr"
+include "src/render/atlas.cyr"
+include "src/render/fb.cyr"
+include "lib/dhancha.cyr"
+include "src/ui.cyr"
+
+# 1 if display cell (r, c) has any pixel different from its corner.
+fn cell_inked(r, c): i64 {
+    var p = fb_buf();
+    var y0 = r * 16;
+    var x0 = c * 8;
+    var w = fb_width();
+    var bg = load8(p + (y0 * w + x0) * 3);
+    var y = 0;
+    while (y < 16) {
+        var x = 0;
+        while (x < 8) {
+            if (load8(p + ((y0 + y) * w + x0 + x) * 3) != bg) { return 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return 0;
+}
+
+# 1 if the glyph painted at (0, 0) is exactly kashi's CP437 `cell`.
+fn cell_is(cell): i64 {
+    var p = fb_buf();
+    var w = fb_width();
+    var y = 0;
+    while (y < 16) {
+        var bits = kashi_glyph_row(0, cell, y);
+        var x = 0;
+        while (x < 8) {
+            var lit = 0;
+            if (load8(p + (y * w + x) * 3) == 255) { lit = 1; }
+            var want = (bits >> (7 - x)) & 1;
+            if (lit != want) { return 0; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return 1;
+}
+
+fn paint(s): i64 {
+    term_init(4, 20);
+    fb_set_default_colors(0xFFFFFF, 0x000000);
+    term_feed_str("\x1b[?25l");
+    term_feed_str(s);
+    fb_render_full();
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    term_init(4, 20);
+    fb_init(8, 16);
+
+    test_group("glyphs are looked up through CP437");
+    paint("\xc3\xa7");
+    assert_eq(cell_is(0x87), 1, "U+00E7 draws the c-cedilla cell");
+    paint("\xe2\x94\x80");
+    assert_eq(cell_inked(0, 0), 1, "U+2500 draws something");
+    assert_eq(cell_is(0xC4), 1, "U+2500 draws the box-drawing cell");
+    paint("\xc4\x80");
+    assert_eq(cell_inked(0, 0), 0, "a codepoint with no cell draws nothing");
+
+    test_group("the cursor stays visible on hidden text");
+    term_init(4, 20);
+    fb_set_default_colors(0xFFFFFF, 0x000000);
+    term_feed_str("\x1b[8mA\x1b[1;1H");
+    fb_render_full();
+    assert_eq(load8(fb_buf()), 255, "the block paints over SGR 8");
+
+    test_group("damage while scrolled back");
+    term_init(4, 20);
+    var i = 0;
+    while (i < 10) { term_feed_str("L\r\n"); i = i + 1; }
+    term_feed_str("\x1b[2;1H\x1b[K");    # live row 1 is blank
+    grid_scroll_view(2);
+    fb_render_full();
+    assert_eq(cell_inked(3, 0), 0, "live row 1 shows, blank, at display row 3");
+    grid_put_cell(1, 0, 0x5A);
+    fb_render();
+    assert_eq(cell_inked(3, 0), 1, "a live write repaints the display row it landed on");
+    grid_view_reset();
+
+    test_group("the alt screen and the viewport");
+    term_init(4, 20);
+    i = 0;
+    while (i < 10) { term_feed_str("L\r\n"); i = i + 1; }
+    grid_scroll_view(2);
+    term_feed_str("\x1b[?1049h");
+    assert_eq(grid_view_off_get(), 0, "entering the alt screen snaps to live");
+    grid_scroll_view(2);
+    assert_eq(grid_view_off_get(), 0, "the alt screen has no history to scroll");
+    term_feed_str("\x1b[?1049l");
+
+    test_group("a reset leaves nothing on either screen");
+    term_init(4, 20);
+    term_feed_str("OLD\x1b[?47h\x1bc\x1b[?47h");
+    assert_eq(grid_glyph(0, 0) == 0x4F, 0, "RIS on the alt screen forgets the primary");
+    term_init(4, 20);
+
+    test_group("resize");
+    term_init(10, 20);
+    term_feed_str("\x1b[10;1HPROMPT");
+    grid_resize(4, 20);
+    assert_eq(grid_cursor_row(), 3, "the cursor stays on the last row");
+    assert_eq(grid_glyph(3, 0), 0x50, "and its line comes with it");
+    assert_eq(grid_sb_count_get(), 6, "the rows above went to history");
+
+    term_init(4, 40);
+    term_feed_str("\x1b[1;30HH\x1b[?1049h");
+    grid_resize(4, 20);
+    grid_resize(4, 40);
+    term_feed_str("\x1b[?1049l");
+    assert_eq(grid_glyph(0, 29), 0x20, "growing on the alt screen blanks the primary too");
+
+    term_init(4, 40);
+    term_feed_str("\x1b[1;30HH");
+    grid_resize(4, 20);
+    grid_scroll_up(1);
+    grid_scroll_view(1);
+    assert_eq(grid_vglyph(0, 29), 0x20, "columns hidden by a shrink are not history");
+    grid_view_reset();
+
+    test_group("memory");
+    term_init(4, 20);
+    fb_init(8, 16);
+    var w = fb_width();
+    var h = fb_height();
+    var dst = alloc(3840 * 2304 * 4);
+    puka_ui_present(dst, w, h, w);      # the first frame builds the tree, once
+    var before = alloc_used();
+    i = 0;
+    while (i < 1000) { puka_ui_present(dst, w, h, w); i = i + 1; }
+    # ⚠ 32 B per frame remains, from the alloc inside dhancha's dh_canvas_blit_rgb24 (state.md, Dep gaps).
+    assert_lte(alloc_used() - before, 32000 + 32, "a present does not allocate its own surface header");
+
+    term_init(4, 20);
+    fb_init(8, 16);
+    before = alloc_used();
+    i = 21;
+    while (i <= 220) { term_resize(4, i); fb_resize(); i = i + 1; }
+    var used = alloc_used() - before;
+    assert_lt(used, 4 * 220 * 8 * 16 * 3 * 3, "a window drag grows geometrically");
+    return assert_summary();
+}
+
+fn _entry(): i64 { var rc = main(); syscall(SYS_EXIT, rc); return 0; }
+_entry();

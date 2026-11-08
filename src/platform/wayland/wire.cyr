@@ -18,9 +18,6 @@ fn wire_hdr_put(p, oid, opcode, size): i64 {
     store32(p + 4, (size << 16) | (opcode & 0xFFFF));
     return 0;
 }
-fn wire_msg_id(p): i64   { return load32(p); }
-fn wire_msg_op(p): i64   { return load32(p + 4) & 0xFFFF; }
-fn wire_msg_size(p): i64 { return (load32(p + 4) >> 16) & 0xFFFF; }
 
 # ---- argument writers (return the next byte offset) ----
 fn wire_put_u32(p, off, v): i64 { store32(p + off, v); return off + 4; }

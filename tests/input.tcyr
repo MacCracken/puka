@@ -146,6 +146,38 @@ fn main() {
     term_init(24, 80);                   # paste off for the cap test
     assert_eq(input_paste("abcdef", 6, 4, &ibuf), 4, "cap=4 stops writes at 4");
 
+    test_group("Ctrl follows xterm's rule, it does not mask every key");
+    var cb[16];
+    assert_eq(input_encode(0x2D, MOD_CTRL, &cb), 1, "Ctrl+- is one byte");
+    assert_eq(load8(&cb), 0x2D, "and is not CR, which would run the typed line");
+    input_encode(0x33, MOD_CTRL, &cb);
+    assert_eq(load8(&cb), 0x1B, "Ctrl+3 is ESC, not XOFF");
+    input_encode(0x32, MOD_CTRL, &cb);
+    assert_eq(load8(&cb), 0, "Ctrl+2 is NUL");
+    input_encode(0x38, MOD_CTRL, &cb);
+    assert_eq(load8(&cb), 0x7F, "Ctrl+8 is DEL");
+    input_encode(0x2F, MOD_CTRL, &cb);
+    assert_eq(load8(&cb), 0x1F, "Ctrl+/ is US");
+    input_encode(0x61, MOD_CTRL, &cb);
+    assert_eq(load8(&cb), 0x01, "Ctrl+a still folds");
+    input_encode(0x20, MOD_CTRL, &cb);
+    assert_eq(load8(&cb), 0, "Ctrl+Space is NUL");
+
+    test_group("paste always closes its bracket, and keeps UTF-8 intact");
+    term_feed_str("\x1b[?2004h");
+    var pb[32];
+    var body = alloc(64);
+    memset(body, 0x78, 64);
+    var pn = input_paste(body, 64, 16, &pb);
+    assert_eq(pn, 16, "a capped body stops short of the cap");
+    assert_eq(load8(&pb + 15), 0x7E, "and still ends with the closer");
+    assert_eq(load8(&pb + 14), 0x31, "ESC[201~");
+    pn = input_paste("\xc3\x9bx", 3, 32, &pb);
+    assert_eq(load8(&pb + 7), 0x9B, "a 0x9B inside a UTF-8 sequence survives");
+    pn = input_paste("a\x9bb", 3, 32, &pb);
+    assert_eq(pn, 14, "a lone 0x9B is still stripped");
+    term_feed_str("\x1b[?2004l");
+
     return assert_summary();
 }
 

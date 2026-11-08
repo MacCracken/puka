@@ -1,9 +1,7 @@
 # puka — terminal emulator entry point.
 #
-# M1 is the headless core (parser + grid + unicode + terminal). Until the
-# PTY backend lands (M2) and the framebuffer renderer (M3), this entry is a
-# demo: it drives a canned byte stream through the full pipe and prints the
-# rendered grid to stdout — proving parse -> grid -> render end to end.
+# The release binary: a shell on a PTY in a setu window. With no compositor, or with --demo, it
+# drives a canned byte stream through the pipe and prints the rendered grid instead.
 
 include "src/parser.cyr"
 include "src/grid.cyr"
@@ -58,7 +56,7 @@ var puka_szpx = 0;      # alloc(16) scratch for win_size_px; see puka_terminal
 # `alloc` has no free. A day in a shell is tens of thousands of keys. Module-global scratch, minted
 # once in `puka_terminal`, is the idiom this file already chose for exactly this reason 130 lines
 # below; these two call sites simply predated it.
-var puka_kev = 0;       # alloc(32) scratch: [evdev keycode, mods, state] from win_next_key
+var puka_kev = 0;       # alloc(32) scratch: [evdev keycode, value, mods] from win_next_key
 var puka_kbytes = 0;    # alloc(32) scratch: the encoded child bytes from input_from_keycode
 var PUKA_CELL_W = 8;
 var PUKA_CELL_H = 16;
@@ -66,6 +64,16 @@ var PUKA_ROWS   = 24;
 var PUKA_COLS   = 80;
 var PUKA_FRAMES = 0;
 var PUKA_SHELL  = "/bin/agnsh";
+
+# The program the terminal hosts: the agnos shell there, and the user's own on Linux.
+fn puka__shell(): i64 {
+    #ifdef CYRIUS_TARGET_LINUX
+    var s = getenv("SHELL");
+    if (s != 0) { if (load8(s) != 0) { return s; } }
+    return "/bin/sh";
+    #endif
+    return PUKA_SHELL;
+}
 
 # ⚠ Who owns the line discipline is `LD_OWNED_HERE`, declared with the discipline itself in
 # `src/line_discipline.cyr` — 1 on agnos (a channel fd has none), 0 on Linux (devpts already cooks and
@@ -126,13 +134,18 @@ fn puka__send_line(p, n): i64 {
 # so an echoed character and a shell-printed one land in the grid by one path.
 fn puka_input_deliver(kb, kn): i64 {
     if (LD_OWNED_HERE == 0) { return pty_write(kb, kn); }
+    # The discipline refuses a lone ESC, so feeding it an arrow key would type the `[A` that follows.
+    if (kn > 1) { if (load8(kb) == 0x1B) {
+            puka__say("puka: key sequence refused by the line discipline\n", 50);
+            return 0;
+        } }
     var i = 0;
     while (i < kn) {
         var act = ld_feed(load8(kb + i));
         if (act == LD_ECHO) {
             term_feed(ld_echo());
         }
-        if (act == LD_ERASE) { term_feed(0x08); term_feed(0x20); term_feed(0x08); }
+        if (act == LD_ERASE) { term_erase_prev(); }
         # ⚠ A REFUSAL IS REPORTED, ALWAYS. `puka-terminal-test.py` counts these, and a byte the
         # discipline declines is the one case where the screen and the child legitimately differ from
         # what was typed — so it must never be inferred from silence.
@@ -153,6 +166,51 @@ fn puka_input_deliver(kb, kn): i64 {
     return kn;
 }
 
+# Present the painted frame into `dst`, the backend's buffer. `f` is the frame number, for reporting.
+fn puka__present(dst, f): i64 {
+    # ⭐⭐ THROUGH THE WIDGET TREE (M7-D). This was a direct `pix_blit_region` from the grid
+    # buffer into the present buffer — puka drawing its entire window by hand. It is now a
+    # dhancha render whose CANVAS leaf performs that same blit, so the window has a widget
+    # tree and the grid keeps its dirty-row renderer untouched.
+    # ⛔ NOT AN EXTRA COPY: `dh_surface_wrap` (dhancha 0.9.9) points a sadish surface header
+    # AT `dst`, so the tree draws into the present buffer directly. Rendering into a
+    # toolkit-owned surface and copying it here would have added a second full-frame copy
+    # per keystroke and made adopting the toolkit a measurable regression.
+    # ⚠ It also fixes an alpha defect this path always had: `pix_blit_region` packs
+    # `(r<<16)|(g<<8)|b` and leaves byte 3 at ZERO, which under agnos's `#92` op 0x01
+    # premultiplied blend renders the terminal as an additive over-bright ghost rather than
+    # as opaque text. `dh_canvas_blit_rgb24` sets it to 255.
+    # ⚠ THE STRIDE IS THE SURFACE'S, NOT THE FRAMEBUFFER'S. `dst` is the backend's present
+    # buffer and its row pitch is the surface width; `fb_width()` is the GRID's pixel extent.
+    # The two are equal at open by construction and stayed equal only because nothing ever
+    # resized. They diverge the moment the grid clamps at GRID_MAX (480 cols = 3840 px), and
+    # a width written at one pitch and read at another SKEWS the frame diagonally rather
+    # than leaving a gap — a failure that looks like a renderer bug, not a stride bug.
+    win_size_px(0, puka_szpx);
+    var surf_w = load64(puka_szpx);
+    if (surf_w < fb_width()) { surf_w = fb_width(); }
+    puka_ui_present(dst, fb_width(), fb_height(), surf_w);
+    var prc = win_present_commit(0, 0, 0, fb_width(), fb_height());
+    if (f == 0) {
+        if (prc == 0) { puka__say("puka: first present ok\n", 23); }
+        else { puka__say("puka: first present REFUSED\n", 28); }
+    }
+    # ⛔ A PRESENT THAT FAILS AFTER FRAME 0 WAS SILENT. Only frame 0 was reported, so a
+    # surface that stopped reaching the compositor — which is exactly what a resize risks,
+    # since setu RECREATES the `#86` slot at the new byte count — looked identical to a
+    # surface that was arriving fine. Bounded so a persistent failure cannot flood a console
+    # three procs share.
+    if (prc != 0) {
+        if (puka_pres_fail < 8) {
+            puka_pres_fail = puka_pres_fail + 1;
+            puka__say("puka: present REFUSED, rc ", 26); puka__say_num(0 - prc);
+            puka__say(" at ", 4); puka__say_num(fb_width()); puka__say("x", 1);
+            puka__say_num(fb_height()); puka__say("\n", 1);
+        }
+    }
+    return 0;
+}
+
 # ⭐⭐ THE TERMINAL. Window + PTY + engine + renderer, wired end to end — a real shell hosted in a
 # composited window. This is what M1's demo was a placeholder for, and on agnos it is the remaining
 # half of ipc bite 9 ("a live agnsh prompt in a composited window").
@@ -166,7 +224,10 @@ fn puka_input_deliver(kb, kn): i64 {
 # Returns 0 on a clean exit, or -1 when no window/PTY is available so the caller can fall back.
 fn puka_terminal(rows, cols, frames): i64 {
     term_init(rows, cols);
-    fb_init(PUKA_CELL_W, PUKA_CELL_H);
+    if (fb_init(PUKA_CELL_W, PUKA_CELL_H) < 0) {
+        puka__say("puka: framebuffer alloc FAILED\n", 31);
+        return 0 - 1;
+    }
     ld_init();
     # ⚠ SAY WHICH STEP FAILED. All three failures below look identical from outside — a blank window,
     # or no window at all — and on agnos three processes share one console, so a numeric code printed
@@ -182,7 +243,7 @@ fn puka_terminal(rows, cols, frames): i64 {
     # ⚠ Spawned with NO argv. `pty_spawn` refuses arg1/arg2 on agnos rather than dropping them
     # silently, because `spawn_path #43` takes a path and not an argv vector — a shell that quietly
     # ignored its flags would be worse than one that refuses to start.
-    if (pty_spawn(PUKA_SHELL, 0, 0, rows, cols) < 0) {
+    if (pty_spawn(puka__shell(), 0, 0, rows, cols) < 0) {
         puka__say("puka: shell would not spawn\n", 28);
         pty_close(); win_close(0); return 0 - 1;
     }
@@ -217,55 +278,21 @@ fn puka_terminal(rows, cols, frames): i64 {
         # stalling the frame loop — the same "the batch IS the poll" shape the channel band is built
         # around (agnos planning/ipc.md §9.4).
         pty_pump(2);
-
-        fb_render();
-        var dst = win_present_begin(0);
-        if (dst != 0) {
-            # ⭐⭐ THROUGH THE WIDGET TREE (M7-D). This was a direct `pix_blit_region` from the grid
-            # buffer into the present buffer — puka drawing its entire window by hand. It is now a
-            # dhancha render whose CANVAS leaf performs that same blit, so the window has a widget
-            # tree and the grid keeps its dirty-row renderer untouched.
-            # ⛔ NOT AN EXTRA COPY: `dh_surface_wrap` (dhancha 0.9.9) points a sadish surface header
-            # AT `dst`, so the tree draws into the present buffer directly. Rendering into a
-            # toolkit-owned surface and copying it here would have added a second full-frame copy
-            # per keystroke and made adopting the toolkit a measurable regression.
-            # ⚠ It also fixes an alpha defect this path always had: `pix_blit_region` packs
-            # `(r<<16)|(g<<8)|b` and leaves byte 3 at ZERO, which under agnos's `#92` op 0x01
-            # premultiplied blend renders the terminal as an additive over-bright ghost rather than
-            # as opaque text. `dh_canvas_blit_rgb24` sets it to 255.
-            # ⚠ THE STRIDE IS THE SURFACE'S, NOT THE FRAMEBUFFER'S. `dst` is the backend's present
-            # buffer and its row pitch is the surface width; `fb_width()` is the GRID's pixel extent.
-            # The two are equal at open by construction and stayed equal only because nothing ever
-            # resized. They diverge the moment the grid clamps at GRID_MAX (480 cols = 3840 px), and
-            # a width written at one pitch and read at another SKEWS the frame diagonally rather
-            # than leaving a gap — a failure that looks like a renderer bug, not a stride bug.
-            win_size_px(0, puka_szpx);
-            var surf_w = load64(puka_szpx);
-            if (surf_w < fb_width()) { surf_w = fb_width(); }
-            puka_ui_present(dst, fb_width(), fb_height(), surf_w);
-            var prc = win_present_commit(0, 0, 0, fb_width(), fb_height());
-            if (f == 0) {
-                if (prc == 0) { puka__say("puka: first present ok\n", 23); }
-                else { puka__say("puka: first present REFUSED\n", 28); }
-            }
-            # ⛔ A PRESENT THAT FAILS AFTER FRAME 0 WAS SILENT. Only frame 0 was reported, so a
-            # surface that stopped reaching the compositor — which is exactly what a resize risks,
-            # since setu RECREATES the `#86` slot at the new byte count — looked identical to a
-            # surface that was arriving fine. Bounded so a persistent failure cannot flood a console
-            # three procs share.
-            if (prc != 0) {
-                if (puka_pres_fail < 8) {
-                    puka_pres_fail = puka_pres_fail + 1;
-                    puka__say("puka: present REFUSED, rc ", 26); puka__say_num(0 - prc);
-                    puka__say(" at ", 4); puka__say_num(fb_width()); puka__say("x", 1);
-                    puka__say_num(fb_height()); puka__say("\n", 1);
-                }
-            }
+        # The shell exited. The process is about to, so nothing is left to reap.
+        if (pty_child_gone() == 1) {
+            puka__say("puka: the shell exited\n", 23);
+            live = 0;
         }
-        else { if (f == 0) { puka__say("puka: no present buffer\n", 24); } }
+
+        var painted = fb_render();
+        var dst = win_present_begin(0);
+        # An idle frame has nothing to show: presenting it re-shipped the whole surface every pass.
+        # Frame 0 always goes, so the window exists before the shell has printed anything.
+        if (dst == 0) { if (f == 0) { puka__say("puka: no present buffer\n", 24); } }
+        elif (painted > 0 || f == 0) { puka__present(dst, f); }
 
         # ⭐ INPUT: compositor -> engine -> child. `win_poll_events` latches one key per frame and
-        # `win_next_key` hands it over as [evdev keycode, mods, state] — the SAME shape the Wayland
+        # `win_next_key` hands it over as [evdev keycode, value, mods] — the SAME shape the Wayland
         # backend produces, so `input_from_keycode` (the shared keycode->child-bytes bridge) does the
         # encoding for both. That is why arrows and named keys come out as proper CSI sequences here
         # instead of a hand-rolled byte: the encode discipline already existed and is not duplicated.
@@ -311,12 +338,9 @@ fn puka_terminal(rows, cols, frames): i64 {
                         # pixel buffer to the grid's new extent.
                         term_resize(nrows, ncols);
                         if (fb_resize() < 0) { puka__say("puka: fb refit FAILED after resize\n", 35); }
-                        # ⚠ ACCEPTED AND IGNORED ON AGNOS, deliberately — there is no TIOCSWINSZ on the
-                        # `#97` channel band (src/pty.cyr "NO WINDOW SIZE"). The GRID reflows, which is
-                        # what the report was about; the child shell is NOT told, so its own wrapping is
-                        # unchanged until a resize-aware pty protocol exists. Called anyway so the seam
-                        # is real on the host and this line does not have to be found later.
-                        pty_set_winsize(0, nrows, ncols);
+                        # ⚠ On agnos this is accepted and ignored until 0.8.6 (src/pty.cyr). The sizes
+                        # are the grid's, because `term_resize` may have clamped what was asked for.
+                        pty_set_winsize(pty_master, grid_get_rows(), grid_get_cols());
                         puka__say("puka: resized by the compositor -- grid ", 40);
                         puka__say_num(grid_get_cols()); puka__say("x", 1);
                         puka__say_num(grid_get_rows()); puka__say(" cells, ", 8);
@@ -325,11 +349,6 @@ fn puka_terminal(rows, cols, frames): i64 {
                     } }
             }
         }
-        # ⚠ LEFT AS EQUALITY, DELIBERATELY, and it is mask-fragile: on the wayland path a frame that
-        # carries both a key and a frame-done reports `KEY | FRAME` and this test misses the key. That is
-        # a latent host-build defect, not an agnos one (the setu backend returns single events), and
-        # fixing it changes behaviour on a path this change does not exercise. Recorded, not silently
-        # altered — see the note above for why the CLOSE test above does use a bit test.
         # ⭐ THE WHEEL SCROLLS THE SCROLLBACK. `grid_scroll_view` and the whole viewport ring have
         # existed since the scrollback bite and NOTHING in this loop moved them — `programs/puka_term.cyr`
         # wired PageUp/PageDown on the Wayland path, and this terminal, the one that runs on agnos, had
@@ -339,7 +358,7 @@ fn puka_terminal(rows, cols, frames): i64 {
             var sd = win_next_scroll(0);
             if (sd != 0) { grid_scroll_view(sd); }
         }
-        if (wev == WIN_EV_KEY) {
+        if ((wev & WIN_EV_KEY) != 0) {
             if (win_next_key(0, puka_kev) == 1) {
                 # ⭐ TYPING SNAPS TO THE LIVE BOTTOM. `grid_view_reset` was written for exactly this
                 # ("on user input", grid.cyr) and had no caller on this path; without it a user who
@@ -354,7 +373,7 @@ fn puka_terminal(rows, cols, frames): i64 {
                 # Measured: 1 run in 3 lost several keys INCLUDING Enter, which presents as "the shell
                 # never answered" while every byte that did arrive was handled correctly.
                 puka__say("puka: key received\n", 19);
-                var kn = input_from_keycode(load64(puka_kev), load64(puka_kev + 8), puka_kbytes);
+                var kn = input_from_keycode(load64(puka_kev), load64(puka_kev + 16), puka_kbytes);
                 if (kn > 0) { puka_input_deliver(puka_kbytes, kn); }
             }
         }

@@ -14,6 +14,37 @@
 # Child spawn uses explicit argv (never a shell string) — no command
 # injection surface (SECURITY.md / CLAUDE rule).
 
+# The most a single pty_pump will consume. A child that never stops writing must not starve the loop.
+var PTY_PUMP_MAX = 65536;
+var pty_gone = 0;            # 1 once pty_pump has seen the child's end close
+
+# 1 once the child's end of the terminal has closed: the shell exited.
+fn pty_child_gone(): i64 { return pty_gone; }
+
+var pty_argv0_buf[8];        # "-<shell>\0": 8 u64 = 64 bytes
+
+# Build a login-shell argv[0], "-" + basename(shellpath), for pty_login_argv0. The leading dash is what
+# makes zsh or bash a login shell. "/usr/bin/zsh" -> "-zsh". A basename too long for the buffer is
+# truncated: $SHELL is untrusted, and the terminating NUL has to land inside it too.
+fn pty_login_name(shellpath): i64 {
+    var bn = shellpath;
+    var i = 0;
+    while (load8(shellpath + i) != 0) {
+        if (load8(shellpath + i) == 0x2F) { bn = shellpath + i + 1; }
+        i = i + 1;
+    }
+    store8(&pty_argv0_buf, 0x2D);
+    var j = 0;
+    while (j < 62) {
+        var ch = load8(bn + j);
+        if (ch == 0) { break; }
+        store8(&pty_argv0_buf + 1 + j, ch);
+        j = j + 1;
+    }
+    store8(&pty_argv0_buf + 1 + j, 0);
+    return &pty_argv0_buf;
+}
+
 #ifdef CYRIUS_TARGET_LINUX
 
 enum PtyAbi {
@@ -95,6 +126,7 @@ fn pty_set_winsize(fd, rows, cols): i64 {
 # Open the PTY master and resolve the slave path. Returns the master fd, or
 # a negative value on failure (sandbox / no devpts).
 fn pty_open(): i64 {
+    pty_gone = 0;
     var m = sys_open("/dev/ptmx", PTY_O_RDWR | PTY_O_NOCTTY | PTY_O_NONBLOCK, 0);
     if (m < 0) { return 0 - 1; }
 
@@ -177,6 +209,9 @@ fn pty_spawn(path, arg1, arg2, rows, cols): i64 {
     if (pid == 0) {
         # ---- child ----
         sys_setsid();
+        # The master goes first. If puka was launched with stdout closed the master IS fd 1, and
+        # closing it after the dup2 calls below would take the child's stdout with it.
+        sys_close(pty_master);
         var s = sys_open(&pty_slave_path, PTY_O_RDWR, 0);
         if (s < 0) { sys_exit(127); }
         syscall(PTY_SYS_IOCTL, s, PTY_TIOCSCTTY, 0);
@@ -185,7 +220,6 @@ fn pty_spawn(path, arg1, arg2, rows, cols): i64 {
         sys_dup2(s, 1);
         sys_dup2(s, 2);
         if (s > 2) { sys_close(s); }
-        sys_close(pty_master);
         var argv[40];
         var a0 = path;
         if (pty_login_argv0 != 0) { a0 = pty_login_argv0; }   # "-zsh" → login shell
@@ -202,9 +236,11 @@ fn pty_spawn(path, arg1, arg2, rows, cols): i64 {
     return pid;
 }
 
-# Pump the master into the terminal: read available bytes, feed each through
-# term_feed(). Bounded — stops at EOF, or after `max_idle` consecutive empty
-# (EAGAIN) polls (each ~1ms), so it can never hang. Returns bytes consumed.
+# Pump the master into the terminal: read available bytes, feed each through term_feed(). Bounded:
+# stops when the child is gone, after `max_idle` consecutive empty (EAGAIN) polls (each ~1ms), or at
+# PTY_PUMP_MAX bytes. That last one matters: a child that never stops writing (`yes`) resets the idle
+# count on every read, and without a cap the caller would never repaint, answer the compositor, or
+# deliver Ctrl-C. Returns bytes consumed.
 fn pty_pump(max_idle): i64 {
     if (pty_master <= 0) { return 0; }
     var buf[1024];
@@ -212,6 +248,7 @@ fn pty_pump(max_idle): i64 {
     var idle = 0;
     var go = 1;
     while (go == 1) {
+        if (total >= PTY_PUMP_MAX) { return total; }
         var n = file_read(pty_master, &buf, 1024);
         if (n > 0) {
             var i = 0;
@@ -219,9 +256,10 @@ fn pty_pump(max_idle): i64 {
             total = total + n;
             idle = 0;
         } else {
-            if (n == 0) {
-                go = 0;                       # EOF: slave fully closed
-            } else {
+            # Every slave fd is closed: Linux reports that as -EIO on the master, not as 0.
+            if (n == 0) { pty_gone = 1; go = 0; }
+            elif (n == 0 - EIO) { pty_gone = 1; go = 0; }
+            else {
                 idle = idle + 1;
                 if (idle >= max_idle) { go = 0; }
                 pty__nap();
@@ -287,27 +325,14 @@ fn pty_close(): i64 {
 # `sys_read`, and that is the whole point — a channel every program must be rewritten for would be an
 # API, not a PTY.
 #
-# ⚠ NO WINDOW SIZE. There is no TIOCSWINSZ equivalent; `rows`/`cols` are accepted and ignored so the
-# call sites stay identical across targets. A resize-aware protocol is a separate piece of work, and
-# faking it here would let a caller believe the child was told.
+# ⚠ NO WINDOW SIZE YET. `rows`/`cols` are accepted and ignored so the call sites stay identical across
+# targets. agnos 1.57.17 has the `#97` window-size ops; this takes them when cyrius ships the wrapper
+# (0.8.6 on the roadmap). Faking it here would let a caller believe the child was told.
 
 var pty_master = 0;          # our end of the channel (0 = unset; fds are > 0 after stdio)
 var pty_child_pid = 0;
 var pty_child_fd = 0 - 1;    # the fd index the child will hold, as returned by CH_ENDOW
 var pty_login_argv0 = 0;     # accepted for source compatibility; agnos spawn takes no argv[0] override
-
-# ⛔ a4 SENTINEL, NOT A BOOLEAN. `ksyscall_a4` doubles as a record LENGTH for SEND/RECV and is not
-# cleared between ops, so PTY mode is keyed to a value no legal length can take. Must match
-# `CH_ENDOW_STDIO` in agnos `kernel/core/syscall.cyr`.
-var PTY_CH_ENDOW_STDIO = 1000;
-
-# ⚠ THE RAW SYSCALL NUMBER AND OP, MIRRORED LOCALLY. The stdlib's `sys_chan_endow(fd)` takes no mode
-# argument, so PTY mode needs the raw form — and the stdlib's `SYS_CHAN_OP` / `CH_ENDOW` enum members
-# do not resolve from a consumer here. Values mirror cyrius `lib/syscalls_x86_64_agnos.cyr:147,174`;
-# keep them in lockstep with that file, which is canonical.
-# ⭐ The right fix is upstream: a `sys_chan_endow_stdio(fd)` wrapper, so no consumer hand-rolls this.
-var PTY_SYS_CHAN_OP = 97;
-var PTY_CH_ENDOW    = 5;
 
 fn pty_set_winsize(fd, rows, cols): i64 { return 0; }   # see the NO WINDOW SIZE note above
 
@@ -319,6 +344,7 @@ var pty_chan_fds[4];         # 2 u64 slots used: [0] = our end, [8] = the child'
 
 fn pty_open(): i64 {
     var fds = &pty_chan_fds;
+    pty_gone = 0;
     if (sys_chan_mint(fds) != 0) { return 0 - 1; }
     pty_master = load64(fds);            # we keep this end
     pty_child_fd = load64(fds + 8);      # the end the child will be given
@@ -334,10 +360,8 @@ fn pty_spawn(path, arg1, arg2, rows, cols): i64 {
     if (pty_child_fd < 0) { return 0 - 1; }
     if (arg1 != 0) { return 0 - 2; }     # unsupported here — see above
     if (arg2 != 0) { return 0 - 2; }
-    # PTY mode: install this endpoint at the child's fd 0, 1 AND 2. The stdlib's `sys_chan_endow`
-    # takes no mode argument, so the raw form is used — a4 is the fifth argument to `syscall`,
-    # matching `sys_chan_send`'s (fd, buf, len) shape.
-    var cfd = syscall(PTY_SYS_CHAN_OP, PTY_CH_ENDOW, pty_child_fd, 0, PTY_CH_ENDOW_STDIO);
+    # PTY mode: install this endpoint at the child's fd 0, 1 AND 2.
+    var cfd = sys_chan_endow_stdio(pty_child_fd);
     if (cfd < 0) { return 0 - 1; }
     var pid = sys_spawn_path(path, strlen(path));
     if (pid < 0) { return 0 - 1; }
@@ -365,6 +389,7 @@ fn pty_pump(max_idle): i64 {
     var idle = 0;
     var go = 1;
     while (go == 1) {
+        if (total >= PTY_PUMP_MAX) { return total; }  # see the Linux arm
         var n = sys_chan_recv(pty_master, &buf, 128);
         if (n > 0) {
             # ⭐⭐ ONLCR ON THE WAY IN FROM THE CHILD — the OUTPUT half of the line discipline.
@@ -388,7 +413,7 @@ fn pty_pump(max_idle): i64 {
         else {
             # ⛔ PEER_GONE IS EOF; WOULD_BLOCK IS "NOT YET". Collapsing them would either hang on a
             # dead child or abandon a live one — they are RESULTS to act on, not errors (§9.4).
-            if (n == 0 - CH_E_PEERGONE) { go = 0; }
+            if (n == 0 - CH_E_PEERGONE) { pty_gone = 1; go = 0; }
             else {
                 idle = idle + 1;
                 if (idle >= max_idle) { go = 0; }

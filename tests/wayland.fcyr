@@ -1,0 +1,88 @@
+# wayland.fcyr — fuzz the Wayland wire parser: messages aimed at the objects that matter, with hostile
+# sizes and payloads, and invariants asserted after every batch. Deterministic: a fixed-seed PRNG, so a
+# failure reproduces. Run under `cyrius fuzz --poison` to make out-of-bounds writes fatal.
+include "src/platform/wayland/wire.cyr"
+include "src/platform/wayland/client.cyr"
+include "src/platform/wayland/shm.cyr"
+include "src/platform/window.cyr"
+
+var fz_state = 0;
+fn fz_rand(): i64 {
+    var x = fz_state;
+    x = x ^ (x << 13);
+    x = x ^ ((x >> 7) & 0x1FFFFFFFFFFFFFF);
+    x = x ^ (x << 17);
+    fz_state = x;
+    if (x < 0) { x = 0 - x; }
+    return x;
+}
+
+fn fz_oid(): i64 {
+    var k = fz_rand() % 9;
+    if (k == 0) { return WL_DISPLAY_ID; }
+    if (k == 1) { return wl_reg_id; }
+    if (k == 2) { return wl_cur_sync; }
+    if (k == 3) { return wl_xdg_oid; }
+    if (k == 4) { return wl_xsurf_oid; }
+    if (k == 5) { return wl_top_oid; }
+    if (k == 6) { return wl_seat_oid; }
+    if (k == 7) { return wl_kbd_oid; }
+    return fz_rand() & 0xFFFFFFFF;
+}
+
+fn fz_u32(): i64 {
+    var k = fz_rand() % 5;
+    if (k == 0) { return 0; }
+    if (k == 1) { return 0xFFFFFFFF; }
+    if (k == 2) { return 0x80000000; }
+    if (k == 3) { return fz_rand() % 64; }
+    return fz_rand() & 0xFFFFFFFF;
+}
+
+fn fz_fill(): i64 {
+    wl_rlen = 0;
+    while (wl_rlen + 8 + 63 * 4 <= 8192) {     # the harness itself must stay inside the buffer
+        var body = fz_rand() % 64;
+        var size = 8 + body;
+        var k = fz_rand() % 8;
+        if (k == 0) { size = fz_rand() & 0xFFFF; }      # a size that lies
+        if (k == 1) { size = 8; }
+        store32(&wl_rbuf + wl_rlen, fz_oid());
+        store32(&wl_rbuf + wl_rlen + 4, (size << 16) | (fz_rand() % 6));
+        var i = 0;
+        while (i < body) {
+            store32(&wl_rbuf + wl_rlen + 8 + i * 4, fz_u32());
+            i = i + 1;
+        }
+        wl_rlen = wl_rlen + 8 + body * 4;
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    fz_state = 0x2545F4914F6CDD1D;
+    wl_reg_id = 2; wl_cur_sync = 3; wl_xdg_oid = 4; wl_xsurf_oid = 5; wl_top_oid = 6;
+    wl_seat_oid = 7; wl_kbd_oid = 8; wl_buf_oid = 9; wl_frame_oid = 10;
+    var round = 0;
+    while (round < 4000) {
+        wl_fd = 0 - 1;
+        wl_closed = 0;
+        wl_send_dead = 0;
+        fz_fill();
+        wl__parse();
+        assert_gte(wl_rlen, 0, "receive length never negative");
+        assert_lte(wl_rlen, 8192, "receive length never past the buffer");
+        assert_lte(wl_cfg_w, WL_MAX_PX, "a configure width stays plausible");
+        assert_lte(wl_cfg_h, WL_MAX_PX, "a configure height stays plausible");
+        assert_lte(wl_free_count, 64, "the free-id stack stays bounded");
+        assert_lt(wl_kq_tail, 32, "key queue tail in range");
+        assert_lt(wl_kq_head, 32, "key queue head in range");
+        round = round + 1;
+    }
+    println("fuzz: wayland ok");
+    return assert_summary();
+}
+
+fn _entry(): i64 { var rc = main(); syscall(SYS_EXIT, rc); return 0; }
+_entry();
